@@ -11,8 +11,8 @@ library exists so integration tests in `tests/` drive the same modules the binar
 
 ```
 src/
-  main.rs            argv[0] + clap dispatch only
-  cli.rs             clap definitions; maps args to module calls
+  main.rs            calls cli and runs the result; no logic
+  cli.rs             clap definitions + argv[0] dispatch; maps args to module calls
   protocol/          wire messages, NDJSON codec, handshake
   detect/            Callback port detection (URL + /proc)
   discovery.rs       Shim's search for a working Session socket

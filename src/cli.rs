@@ -4,9 +4,10 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
+use url::Url;
 
 /// Names under which rowser acts as `rowser open` (installed as symlinks).
-pub const BROWSER_NAMES: [&str; 3] = ["xdg-open", "sensible-browser", "www-browser"];
+const BROWSER_NAMES: [&str; 3] = ["xdg-open", "sensible-browser", "www-browser"];
 
 #[derive(Debug, Parser)]
 #[command(name = "rowser", version, about)]
@@ -22,16 +23,20 @@ pub enum Command {
         #[command(subcommand)]
         action: Option<DaemonAction>,
     },
-    /// Run ssh with a per-session socket forward.
+    /// Run ssh with a Tunnel to the Daemon.
     Ssh {
-        /// Arguments passed to ssh.
+        /// Arguments passed to ssh unchanged.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        args: Vec<OsString>,
     },
     /// Open a URL in the local browser.
-    Open { url: String },
+    Open { url: Url },
     /// Forward a remote port to the local machine.
-    Forward { port: u16 },
+    Forward {
+        /// Remote port, 1024–65535.
+        #[arg(value_parser = clap::value_parser!(u16).range(1024..))]
+        port: u16,
+    },
     /// Check the remote setup.
     Doctor,
     /// Manage rowser on a remote host.
@@ -58,7 +63,8 @@ pub enum RemoteAction {
 }
 
 impl Command {
-    pub fn name(&self) -> &'static str {
+    /// Display label for the command, as a user types it.
+    pub fn label(&self) -> &'static str {
         match self {
             Command::Daemon { action: None } => "daemon",
             Command::Daemon {
@@ -77,7 +83,7 @@ impl Command {
     }
 }
 
-/// Parse a full argv. When argv[0]'s file name is one of [`BROWSER_NAMES`],
+/// Parse a full argv. When argv[0]'s file name is a browser name (`xdg-open`, `sensible-browser`, `www-browser`),
 /// the arguments are parsed as `rowser open …`; otherwise as normal subcommands.
 pub fn parse_from<I, T>(argv: I) -> Result<Command, clap::Error>
 where

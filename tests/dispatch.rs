@@ -2,9 +2,15 @@ use rowser::cli::{parse_from, Command};
 
 fn open_url(argv: &[&str]) -> String {
     match parse_from(argv.iter().copied()).expect("parse") {
-        Command::Open { url } => url,
+        Command::Open { url } => url.to_string(),
         other => panic!("expected open, got {other:?}"),
     }
+}
+
+#[test]
+fn open_rejects_a_malformed_url() {
+    assert!(parse_from(["rowser", "open", "not a url"]).is_err());
+    assert!(parse_from(["xdg-open", "http://[::1"]).is_err());
 }
 
 #[test]
@@ -43,7 +49,17 @@ fn every_stub_subcommand_parses() {
     ];
     for (argv, name) in cases {
         let cmd = parse_from(argv.iter().copied()).expect("parse");
-        assert_eq!(cmd.name(), *name, "{argv:?}");
+        assert_eq!(cmd.label(), *name, "{argv:?}");
+    }
+}
+
+#[test]
+fn forward_rejects_privileged_ports() {
+    for port in ["0", "80", "1023"] {
+        assert!(parse_from(["rowser", "forward", port]).is_err(), "{port}");
+    }
+    for port in ["1024", "65535"] {
+        assert!(parse_from(["rowser", "forward", port]).is_ok(), "{port}");
     }
 }
 
@@ -51,6 +67,19 @@ fn every_stub_subcommand_parses() {
 fn ssh_passes_its_arguments_through() {
     match parse_from(["rowser", "ssh", "-p", "22", "host"]).expect("parse") {
         Command::Ssh { args } => assert_eq!(args, ["-p", "22", "host"]),
+        other => panic!("expected ssh, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_passes_non_utf8_arguments_unchanged() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let raw = OsString::from_vec(vec![b'h', 0xff, b'x']);
+    let argv: Vec<OsString> = vec!["rowser".into(), "ssh".into(), raw.clone()];
+    match parse_from(argv).expect("parse") {
+        Command::Ssh { args } => assert_eq!(args, [raw]),
         other => panic!("expected ssh, got {other:?}"),
     }
 }

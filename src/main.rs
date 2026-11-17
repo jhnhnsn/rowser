@@ -5,6 +5,6 @@ fn main() -> ExitCode {
         Ok(command) => command,
         Err(err) => err.exit(),
     };
-    eprintln!("rowser {}: not implemented yet", command.name());
+    eprintln!("rowser {}: not implemented yet", command.label());
     ExitCode::from(2)
 }
