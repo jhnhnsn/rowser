@@ -29,6 +29,8 @@ rowser is a CLI; test it from the terminal.
 - Test hooks: `--runtime-dir <tmp>`, `ROWSER_SOCKET`, `--open-command` writing URLs to a file,
   the test Opener and Notifier adapters, `ROWSER_E2E=1` with a throwaway unprivileged `sshd` on
   localhost (`/usr/bin/sshd` is installed).
+- Unix socket paths are limited to about 104–108 bytes: put test sockets in a short temp dir
+  (e.g. `/tmp/rw.XXXX`), never under a long scratchpad or worktree path; remove it afterwards.
 - Never open the real browser or show real desktop notifications in a test.
 - Manual macOS checks (notifications, confirm dialogs) go on the ticket as a `ready-for-human` note;
   the loop runs on Linux.
