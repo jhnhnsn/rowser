@@ -16,6 +16,9 @@ pub enum NoticeHost {
 pub struct Notice {
     pub url: Url,
     pub host: NoticeHost,
+    /// Problems with the request that did not stop the URL from opening,
+    /// such as a busy Callback port.
+    pub warnings: Vec<String>,
 }
 
 impl Notice {
@@ -44,7 +47,12 @@ impl Notice {
                 n => format!("{n} (unverified)"),
             },
         };
-        format!("From {host}: {}", clean(self.url.as_str(), escape))
+        let mut body = format!("From {host}: {}", clean(self.url.as_str(), escape));
+        for w in &self.warnings {
+            body.push_str("\nWarning: ");
+            body.push_str(&clean(w, escape));
+        }
+        body
     }
 }
 

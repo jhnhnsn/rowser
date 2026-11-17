@@ -1,6 +1,7 @@
 //! The Daemon: serves Open requests on the direct and relay sockets.
 
 mod confirm;
+mod forward;
 mod limit;
 mod notifier;
 mod opener;
@@ -8,6 +9,7 @@ mod opener;
 pub mod testing;
 
 use std::io;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -41,6 +43,10 @@ pub struct DaemonConfig {
     pub confirm_unverified: bool,
     /// How long a confirmation may take before the request is refused.
     pub confirm_timeout: Duration,
+    /// How long a Callback forward lives at most.
+    pub forward_timeout: Duration,
+    /// Addresses the local side of a Callback forward binds.
+    pub loopback: Vec<IpAddr>,
 }
 
 impl Default for DaemonConfig {
@@ -51,6 +57,11 @@ impl Default for DaemonConfig {
             confirm_hosts: vec![],
             confirm_unverified: false,
             confirm_timeout: confirm::CONFIRM_TIMEOUT,
+            forward_timeout: Duration::from_secs(600),
+            loopback: vec![
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ],
         }
     }
 }
@@ -69,6 +80,7 @@ struct Inner {
     config: DaemonConfig,
     opener: Arc<dyn Opener>,
     notifier: Arc<dyn Notifier>,
+    forwards: Arc<forward::Forwards>,
 }
 
 impl Daemon {
@@ -78,6 +90,7 @@ impl Daemon {
                 config,
                 opener: Arc::new(opener),
                 notifier: Arc::new(notifier),
+                forwards: Arc::default(),
             }),
         }
     }
@@ -96,15 +109,6 @@ impl Daemon {
                 }
             });
         }
-    }
-}
-
-/// A successful `OpenResult`.
-fn open_ok() -> Msg {
-    Msg::OpenResult {
-        forward_id: None,
-        warnings: vec![],
-        error: None,
     }
 }
 
@@ -150,21 +154,43 @@ impl Inner {
                     return conn.send(&open_error(text)).await;
                 }
                 Msg::Open {
-                    url, reported_host, ..
+                    url,
+                    reported_host,
+                    callback_ports,
                 } => {
                     if limit.allow() {
                         let host = match &stamp {
                             Some(alias) => NoticeHost::Alias(alias.clone()),
                             None => NoticeHost::Reported(reported_host),
                         };
-                        self.open(&url, host).await
+                        self.open(&url, host, &callback_ports).await
                     } else {
-                        open_error(format!(
-                            "rate limit: at most {} URLs per {} seconds",
-                            self.config.rate_max,
-                            self.config.rate_window.as_secs()
-                        ))
+                        self.rate_error()
                     }
+                }
+                Msg::Forward { callback_ports, .. } => {
+                    if limit.allow() {
+                        let created = self.forward(&callback_ports);
+                        Msg::OpenResult {
+                            forward_id: created.forward_id,
+                            warnings: created.warnings,
+                            error: None,
+                        }
+                    } else {
+                        self.rate_error()
+                    }
+                }
+                Msg::AttachForward { forward_id } => {
+                    return match self.forwards.attach(&forward_id, conn) {
+                        Ok(()) => Ok(()),
+                        Err(mut conn) => conn.send(&open_error("unknown forward id")).await,
+                    };
+                }
+                Msg::DataConn { conn_id } => {
+                    return match self.forwards.take_pending(conn_id) {
+                        Some(browser) => Ok(forward::splice(conn, browser).await?),
+                        None => conn.send(&open_error("unknown connection id")).await,
+                    };
                 }
                 _ => return conn.send(&open_error("unexpected message")).await,
             };
@@ -173,7 +199,20 @@ impl Inner {
         Ok(())
     }
 
-    async fn open(&self, url: &str, host: NoticeHost) -> Msg {
+    fn rate_error(&self) -> Msg {
+        open_error(format!(
+            "rate limit: at most {} URLs per {} seconds",
+            self.config.rate_max,
+            self.config.rate_window.as_secs()
+        ))
+    }
+
+    fn forward(&self, ports: &[u16]) -> forward::Created {
+        self.forwards
+            .create(ports, &self.config.loopback, self.config.forward_timeout)
+    }
+
+    async fn open(&self, url: &str, host: NoticeHost, ports: &[u16]) -> Msg {
         let url = match Url::parse(url) {
             Ok(u) => u,
             Err(e) => return open_error(format!("invalid URL: {e}")),
@@ -190,25 +229,39 @@ impl Inner {
                 .confirm(Notice {
                     url: url.clone(),
                     host: host.clone(),
+                    warnings: vec![],
                 })
                 .await
             {
                 return error;
             }
         }
+        // Bind the Callback forward only after approval, so a denied URL
+        // never holds a local port.
+        let created = self.forward(ports);
         let opener = self.opener.clone();
         let notifier = self.notifier.clone();
+        let warnings = created.warnings.clone();
         let result = tokio::task::spawn_blocking(move || {
             opener.open(&url)?;
-            // The user saw the confirmation; a second notice adds nothing.
-            if !confirm {
-                notifier.notify(Notice { url, host });
+            // The user saw the confirmation; a second notice adds nothing
+            // unless it carries a forward warning.
+            if !confirm || !warnings.is_empty() {
+                notifier.notify(Notice {
+                    url,
+                    host,
+                    warnings,
+                });
             }
             Ok::<_, io::Error>(())
         })
         .await;
         match result.map_err(io::Error::other).and_then(|r| r) {
-            Ok(()) => open_ok(),
+            Ok(()) => Msg::OpenResult {
+                forward_id: created.forward_id,
+                warnings: created.warnings,
+                error: None,
+            },
             Err(e) => open_error(format!("could not open the URL: {e}")),
         }
     }
@@ -316,6 +369,8 @@ pub struct RunArgs {
     pub test_confirm: Option<testing::Answer>,
     /// Test hook: confirmation timeout in seconds.
     pub confirm_timeout: Option<u64>,
+    /// Test hook: loopback addresses for Callback forwards.
+    pub loopback: Vec<IpAddr>,
 }
 
 fn run_inner(args: RunArgs) -> Result<(), String> {
@@ -334,6 +389,9 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
     };
     if let Some(secs) = args.confirm_timeout {
         config.confirm_timeout = Duration::from_secs(secs);
+    }
+    if !args.loopback.is_empty() {
+        config.loopback = args.loopback;
     }
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {

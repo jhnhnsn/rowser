@@ -36,6 +36,10 @@ fn all_messages() -> Vec<Msg> {
             warnings: vec![],
             error: Some("scheme not allowed".into()),
         },
+        Msg::Forward {
+            reported_host: "devbox".into(),
+            callback_ports: vec![8080],
+        },
         Msg::AttachForward {
             forward_id: "f1".into(),
         },

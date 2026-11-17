@@ -75,6 +75,12 @@ pub enum Msg {
         reported_host: String,
         callback_ports: Vec<u16>,
     },
+    /// `rowser forward`: a Callback forward without a URL. The reply is an
+    /// `OpenResult`.
+    Forward {
+        reported_host: String,
+        callback_ports: Vec<u16>,
+    },
     OpenResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         forward_id: Option<String>,

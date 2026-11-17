@@ -31,6 +31,10 @@ rowser is a CLI; test it from the terminal.
   localhost (`/usr/bin/sshd` is installed).
 - Confirmations: hidden daemon flags `--test-confirm approve|deny|hang` (scripted Notifier, no
   desktop) and `--confirm-timeout <secs>` (default 60).
+- Callback forwards on one machine: run the daemon with the hidden `--loopback ::1` so the
+  local side binds only `[::1]`, and run the fake remote listener on `127.0.0.1` (the keeper
+  dials `127.0.0.1` first). `rowser open` starts a detached `rowser __keeper` that ends when
+  the remote port stops listening (2 s checks); kill leftover keepers with `pkill -f __keeper`.
 - `rowser ssh` uses the `ssh` on `PATH` and the Daemon in `$XDG_RUNTIME_DIR/rowser/`: put a fake
   `ssh` script first on `PATH` and set `XDG_RUNTIME_DIR` to a short temp dir to test it.
 - Unix socket paths are limited to about 104–108 bytes: put test sockets in a short temp dir

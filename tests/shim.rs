@@ -173,6 +173,9 @@ fn env(tunnel_dir: &Path, over: Option<PathBuf>) -> ShimEnv<Vec<u8>> {
         tunnel_dir: tunnel_dir.to_path_buf(),
         socket_override: over,
         reported_host: "devbox".into(),
+        procfs: rowser::detect::Procfs::new("/nonexistent"),
+        caller_pid: 1,
+        keeper_exe: None,
         stderr: Vec::new(),
     }
 }

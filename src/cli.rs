@@ -43,6 +43,10 @@ pub enum Command {
         /// Test hook: confirmation timeout in seconds (default 60).
         #[arg(long, hide = true)]
         confirm_timeout: Option<u64>,
+        /// Test hook: loopback addresses for Callback forwards (default
+        /// 127.0.0.1 and ::1). Repeat for more than one.
+        #[arg(long, hide = true)]
+        loopback: Vec<std::net::IpAddr>,
     },
     /// Run ssh with a Tunnel to the Daemon.
     Ssh {
@@ -65,8 +69,16 @@ pub enum Command {
         #[command(subcommand)]
         action: RemoteAction,
     },
+    /// Internal: holds a Callback forward for `rowser open` and `rowser forward`.
     #[command(name = "__keeper", hide = true)]
-    Keeper,
+    Keeper {
+        #[arg(long)]
+        socket: PathBuf,
+        #[arg(long)]
+        forward_id: String,
+        #[arg(long = "port", required = true)]
+        ports: Vec<u16>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -101,7 +113,7 @@ impl Command {
             Command::Forward { .. } => "forward",
             Command::Doctor => "doctor",
             Command::Remote { .. } => "remote install",
-            Command::Keeper => "__keeper",
+            Command::Keeper { .. } => "__keeper",
         }
     }
 }
@@ -117,6 +129,7 @@ pub fn run(command: Command) -> ExitCode {
             confirm_unverified,
             test_confirm,
             confirm_timeout,
+            loopback,
         } => crate::daemon::run(crate::daemon::RunArgs {
             runtime_dir,
             open_command,
@@ -124,9 +137,16 @@ pub fn run(command: Command) -> ExitCode {
             confirm_unverified,
             test_confirm,
             confirm_timeout,
+            loopback,
         }),
         Command::Open { url } => crate::shim::open_main(&url),
         Command::Ssh { args } => ssh(args),
+        Command::Forward { port } => crate::shim::forward_main(port),
+        Command::Keeper {
+            socket,
+            forward_id,
+            ports,
+        } => crate::shim::keeper_main(socket, forward_id, ports),
         other => {
             eprintln!("rowser {}: not implemented yet", other.label());
             ExitCode::from(2)

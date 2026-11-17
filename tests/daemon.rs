@@ -475,3 +475,64 @@ fn command_opener_rejects_url_in_the_program_word() {
     assert!(CommandOpener::new("/usr/bin/{url} --new-tab").is_err());
     assert!(CommandOpener::new("xdg-open {url}").is_ok());
 }
+
+/// A free loopback port: bind port 0, read it, release it.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn open_with_port(url: &str, port: u16) -> Msg {
+    Msg::Open {
+        url: url.into(),
+        reported_host: "devbox.internal".into(),
+        callback_ports: vec![port],
+    }
+}
+
+async fn forward_confirm_harness(answer: Answer) -> Harness<ScriptedNotifier> {
+    let config = DaemonConfig {
+        confirm_hosts: vec!["*.prod".into()],
+        loopback: vec!["127.0.0.1".parse().unwrap()],
+        ..DaemonConfig::default()
+    };
+    Harness::with(config, ScriptedNotifier::new(answer)).await
+}
+
+#[tokio::test]
+async fn denied_url_with_callback_port_binds_no_forward() {
+    let h = forward_confirm_harness(Answer::Deny).await;
+    let port = free_port();
+    let mut conn = h.connect_relay("db.prod").await;
+    let reply = request(&mut conn, open_with_port("https://example.com/", port)).await;
+    assert_eq!(error_of(&reply), Some(NOT_APPROVED));
+    assert!(matches!(
+        reply,
+        Msg::OpenResult {
+            forward_id: None,
+            ..
+        }
+    ));
+    // The local port is still free: no forward holds it.
+    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+}
+
+#[tokio::test]
+async fn approved_url_with_callback_port_gets_a_forward() {
+    let h = forward_confirm_harness(Answer::Approve).await;
+    let port = free_port();
+    let mut conn = h.connect_relay("db.prod").await;
+    let reply = request(&mut conn, open_with_port("https://example.com/", port)).await;
+    assert_eq!(error_of(&reply), None);
+    assert!(matches!(
+        reply,
+        Msg::OpenResult {
+            forward_id: Some(_),
+            ..
+        }
+    ));
+    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err());
+}

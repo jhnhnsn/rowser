@@ -43,17 +43,25 @@ pub async fn find_tunnel(
     dir: &Path,
     env_override: Option<PathBuf>,
 ) -> Result<Conn<UnixStream>, NoTunnel> {
+    find_tunnel_path(dir, env_override).await.map(|(c, _)| c)
+}
+
+/// `find_tunnel`, and also the path of the socket that answered.
+pub async fn find_tunnel_path(
+    dir: &Path,
+    env_override: Option<PathBuf>,
+) -> Result<(Conn<UnixStream>, PathBuf), NoTunnel> {
     let mut mismatch = None;
     if let Some(path) = env_override {
         match probe(&path).await {
-            Probe::Ok(conn) => return Ok(conn),
+            Probe::Ok(conn) => return Ok((conn, path)),
             Probe::Mismatch(e) => mismatch = Some(e),
             Probe::Refused | Probe::Failed => {}
         }
     }
     for c in candidates(dir, own_uid()) {
         match probe(&c.path).await {
-            Probe::Ok(conn) => return Ok(conn),
+            Probe::Ok(conn) => return Ok((conn, c.path)),
             Probe::Refused => remove_if_same(&c),
             Probe::Mismatch(e) => {
                 mismatch.get_or_insert(e);
