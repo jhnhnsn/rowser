@@ -1,0 +1,88 @@
+name: Release
+
+# A `v*` tag builds the four targets and publishes a GitHub Release.
+# A manual run (workflow_dispatch) is the dry run: it builds and uploads the
+# same assets as workflow artifacts, and publishes nothing.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+      - name: Check the Linux binary is static
+        if: contains(matrix.target, 'musl')
+        run: |
+          file "target/$TARGET/release/rowser"
+          if ldd "target/$TARGET/release/rowser"; then
+            echo "rowser for $TARGET is dynamically linked" >&2
+            exit 1
+          fi
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -czf "dist/rowser-$TARGET.tar.gz" -C "target/$TARGET/release" rowser
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rowser-${{ matrix.target }}
+          path: dist/rowser-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: rowser-*
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum rowser-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: dist/SHA256SUMS
+      - name: Publish the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: >
+          gh release create "$TAG" dist/rowser-*.tar.gz dist/SHA256SUMS
+          --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag

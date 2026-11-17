@@ -8,6 +8,10 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- Release binaries: each `v*` tag publishes `rowser-<target>.tar.gz` for
+  `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `aarch64-apple-darwin` and
+  `x86_64-apple-darwin` on the GitHub Release, with a `SHA256SUMS` file. The Linux binaries are
+  static. ([#12](https://github.com/jhnhnsn/rowser/issues/12))
 - Callback port detection: rowser finds the loopback callback ports of a URL from its
   `redirect_uri`, `redirect_url` and `callback` parameters and its own loopback port, and on
   Linux from the loopback ports that the calling process tree listens on.
