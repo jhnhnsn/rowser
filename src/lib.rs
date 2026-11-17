@@ -7,3 +7,4 @@ pub mod discovery;
 pub mod platform;
 pub mod protocol;
 pub mod shim;
+pub mod wrapper;
