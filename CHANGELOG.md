@@ -8,6 +8,10 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- Callback port detection: rowser finds the loopback callback ports of a URL from its
+  `redirect_uri`, `redirect_url` and `callback` parameters and its own loopback port, and on
+  Linux from the loopback ports that the calling process tree listens on.
+  ([#5](https://github.com/jhnhnsn/rowser/issues/5))
 - The rowser wire protocol: newline-delimited JSON with a `major.minor` version handshake.
   Mismatched major versions fail with an error that names both versions and how to update.
   ([#3](https://github.com/jhnhnsn/rowser/issues/3))
