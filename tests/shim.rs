@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
 use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET};
 use rowser::discovery::find_tunnel;
-use rowser::protocol::{Conn, Msg};
+use rowser::protocol::{Conn, Hello, Msg, Version};
 use rowser::shim::{run_open, ShimEnv};
 use tokio::net::UnixListener;
 use url::Url;
@@ -212,4 +212,59 @@ async fn open_without_a_tunnel_prints_the_url_and_exits_1() {
         String::from_utf8(env.stderr).unwrap(),
         "rowser: no tunnel; open this URL manually: https://example.com/a?b=c\n"
     );
+}
+
+#[tokio::test]
+async fn open_reports_a_version_mismatch_then_no_tunnel() {
+    let dir = TmpDir::new();
+    let listener = UnixListener::bind(dir.path("rowser-old.sock")).unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = Conn::connect(stream, Hello::with_version(Version::new(99, 0))).await;
+        }
+    });
+    let mut env = env(&dir.0, None);
+    let url = Url::parse("https://example.com/").unwrap();
+    assert_eq!(run_open(&url, &mut env).await, ExitCode::FAILURE);
+    assert_eq!(
+        String::from_utf8(env.stderr).unwrap(),
+        "rowser: protocol version mismatch: this rowser speaks 1.0, the peer speaks 99.0; \
+         update the remote with `rowser remote install <host>` or reinstall rowser locally\n\
+         rowser: no tunnel; open this URL manually: https://example.com/\n"
+    );
+}
+
+#[tokio::test]
+async fn open_prints_daemon_warnings_and_exits_0() {
+    let dir = TmpDir::new();
+    let listener = UnixListener::bind(dir.path("rowser-w.sock")).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (mut conn, _) = Conn::accept(stream).await.unwrap();
+        let _ = conn.recv().await.unwrap();
+        conn.send(&Msg::OpenResult {
+            forward_id: None,
+            warnings: vec!["x".into()],
+            error: None,
+        })
+        .await
+        .unwrap();
+    });
+    let mut env = env(&dir.0, None);
+    let url = Url::parse("https://example.com/").unwrap();
+    assert_eq!(run_open(&url, &mut env).await, ExitCode::SUCCESS);
+    assert_eq!(
+        String::from_utf8(env.stderr).unwrap(),
+        "rowser: warning: x\n"
+    );
+}
+
+#[tokio::test]
+async fn discovery_ignores_a_symlink_to_a_live_socket() {
+    let dir = TmpDir::new();
+    let live = dir.path("live.sock");
+    serve_named(&live, "live");
+    std::os::unix::fs::symlink(&live, dir.path("rowser-l.sock")).unwrap();
+    assert!(find_tunnel(&dir.0, None).await.is_err());
 }

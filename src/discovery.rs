@@ -8,19 +8,29 @@ use std::time::{Duration, SystemTime};
 
 use tokio::net::UnixStream;
 
-use crate::protocol::{Conn, Hello};
+use crate::protocol::{Conn, Error, Hello};
 
 /// How long a socket gets to finish the handshake before the next is tried.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// No socket answered the handshake.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoTunnel;
+#[derive(Debug)]
+pub struct NoTunnel {
+    /// The first `Error::VersionMismatch` a socket gave, if any.
+    pub mismatch: Option<Error>,
+}
 
 impl fmt::Display for NoTunnel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "no tunnel")
     }
+}
+
+/// The UID that owns the sockets we may use. The effective UID, as in
+/// `daemon::bind_sockets`: it is the UID that creates and owns our files.
+fn own_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
 }
 
 impl std::error::Error for NoTunnel {}
@@ -33,31 +43,53 @@ pub async fn find_tunnel(
     dir: &Path,
     env_override: Option<PathBuf>,
 ) -> Result<Conn<UnixStream>, NoTunnel> {
+    let mut mismatch = None;
     if let Some(path) = env_override {
-        if let Probe::Ok(conn) = probe(&path).await {
-            return Ok(conn);
-        }
-    }
-    // SAFETY: getuid has no preconditions and cannot fail.
-    let uid = unsafe { libc::getuid() };
-    for path in candidates(dir, uid) {
         match probe(&path).await {
             Probe::Ok(conn) => return Ok(conn),
-            Probe::Refused => {
-                let _ = std::fs::remove_file(&path);
+            Probe::Mismatch(e) => mismatch = Some(e),
+            Probe::Refused | Probe::Failed => {}
+        }
+    }
+    for c in candidates(dir, own_uid()) {
+        match probe(&c.path).await {
+            Probe::Ok(conn) => return Ok(conn),
+            Probe::Refused => remove_if_same(&c),
+            Probe::Mismatch(e) => {
+                mismatch.get_or_insert(e);
             }
             Probe::Failed => {}
         }
     }
-    Err(NoTunnel)
+    Err(NoTunnel { mismatch })
+}
+
+/// Removes a Stale socket only if the path still names the same inode: a new
+/// session can bind the same path between the probe and the removal.
+fn remove_if_same(c: &Candidate) {
+    let Ok(meta) = std::fs::symlink_metadata(&c.path) else {
+        return;
+    };
+    if meta.dev() == c.dev && meta.ino() == c.ino {
+        let _ = std::fs::remove_file(&c.path);
+    }
 }
 
 enum Probe {
     Ok(Conn<UnixStream>),
     /// Nothing listens on the socket.
     Refused,
+    /// The peer speaks another major protocol version.
+    Mismatch(Error),
     /// Something listens but did not complete the handshake.
     Failed,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Candidate {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
 }
 
 async fn probe(path: &Path) -> Probe {
@@ -68,16 +100,17 @@ async fn probe(path: &Path) -> Probe {
     };
     match tokio::time::timeout(PROBE_TIMEOUT, Conn::connect(stream, Hello::current())).await {
         Ok(Ok(conn)) => Probe::Ok(conn),
+        Ok(Err(e @ Error::VersionMismatch { .. })) => Probe::Mismatch(e),
         _ => Probe::Failed,
     }
 }
 
 /// The `rowser-*.sock` sockets in `dir` owned by `uid`, newest first.
-fn candidates(dir: &Path, uid: u32) -> Vec<PathBuf> {
+fn candidates(dir: &Path, uid: u32) -> Vec<Candidate> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return vec![];
     };
-    let mut found: Vec<(SystemTime, PathBuf)> = entries
+    let mut found: Vec<(SystemTime, Candidate)> = entries
         .flatten()
         .filter(|e| {
             let name = e.file_name();
@@ -91,28 +124,63 @@ fn candidates(dir: &Path, uid: u32) -> Vec<PathBuf> {
             if !meta.file_type().is_socket() || meta.uid() != uid {
                 return None;
             }
-            Some((meta.modified().ok()?, path))
+            let candidate = Candidate {
+                path,
+                dev: meta.dev(),
+                ino: meta.ino(),
+            };
+            Some((meta.modified().ok()?, candidate))
         })
         .collect();
     found.sort_by_key(|a| std::cmp::Reverse(a.0));
-    found.into_iter().map(|(_, p)| p).collect()
+    found.into_iter().map(|(_, c)| c).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn sockets_of_another_uid_are_ignored() {
-        let dir = PathBuf::from(format!("/tmp/rw.du.{}", std::process::id()));
+    struct TmpDir(PathBuf);
+
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tmp_dir(tag: &str) -> TmpDir {
+        let dir = PathBuf::from(format!("/tmp/rw.d{tag}.{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("rowser-a.sock");
+        TmpDir(dir)
+    }
+
+    fn paths(cs: Vec<Candidate>) -> Vec<PathBuf> {
+        cs.into_iter().map(|c| c.path).collect()
+    }
+
+    #[test]
+    fn sockets_of_another_uid_are_ignored() {
+        let dir = tmp_dir("u");
+        let path = dir.0.join("rowser-a.sock");
         let _l = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        // SAFETY: getuid has no preconditions.
-        let uid = unsafe { libc::getuid() };
-        assert_eq!(candidates(&dir, uid), vec![path]);
-        assert!(candidates(&dir, uid.wrapping_add(1)).is_empty());
-        std::fs::remove_dir_all(&dir).unwrap();
+        let uid = own_uid();
+        assert_eq!(paths(candidates(&dir.0, uid)), vec![path]);
+        assert!(candidates(&dir.0, uid.wrapping_add(1)).is_empty());
+    }
+
+    #[test]
+    fn a_socket_rebound_after_the_probe_is_not_removed() {
+        let dir = tmp_dir("r");
+        let path = dir.0.join("rowser-a.sock");
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        let old = candidates(&dir.0, own_uid()).remove(0);
+        // A new session replaces the socket at the same path. The hard link
+        // keeps the old inode alive, so the new socket cannot reuse its number.
+        std::fs::hard_link(&path, dir.0.join("keep")).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let _l = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        remove_if_same(&old);
+        assert!(path.exists(), "the new socket stays");
     }
 }

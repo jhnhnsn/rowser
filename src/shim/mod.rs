@@ -47,8 +47,14 @@ pub async fn run_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> ExitCode {
         );
         ExitCode::FAILURE
     };
-    let Ok(mut conn) = find_tunnel(&env.tunnel_dir, env.socket_override.clone()).await else {
-        return no_tunnel(env);
+    let mut conn = match find_tunnel(&env.tunnel_dir, env.socket_override.clone()).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            if let Some(mismatch) = e.mismatch {
+                let _ = writeln!(env.stderr, "rowser: {mismatch}");
+            }
+            return no_tunnel(env);
+        }
     };
     let request = Msg::Open {
         url: url.to_string(),
@@ -57,7 +63,7 @@ pub async fn run_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> ExitCode {
     };
     if let Err(e) = conn.send(&request).await {
         let _ = writeln!(env.stderr, "rowser: {e}");
-        return no_tunnel(env);
+        return ExitCode::FAILURE;
     }
     match conn.recv().await {
         Ok(Some(Msg::OpenResult {
