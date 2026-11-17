@@ -11,7 +11,7 @@ All notable changes to rowser are listed here. The format follows
 - `rowser ssh <ssh args…>` runs `ssh` with a per-session Tunnel to the daemon, passing every
   argument through unchanged, and stamps each URL with the Host alias you typed (from `ssh -G`,
   else the ssh arguments). It passes ssh's exit code through, removes its socket on exit, and
-  warns and runs plain `ssh` when the daemon is not running.
+  warns and runs plain `ssh` when the daemon is not running or the Host alias cannot be found.
   ([#7](https://github.com/jhnhnsn/rowser/issues/7))
 - `rowser open <url>` (and `xdg-open`, `sensible-browser`, `www-browser`) sends the URL to the
   daemon through a tunnel. It tries `ROWSER_SOCKET`, then your own `/tmp/rowser-*.sock` sockets,

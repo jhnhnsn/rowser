@@ -71,6 +71,23 @@ fn ssh_passes_its_arguments_through() {
     }
 }
 
+#[test]
+fn ssh_keeps_a_double_dash_and_help_flags() {
+    for args in [
+        &["--", "-G", "localhost"][..],
+        &["-h"][..],
+        &["--help", "host"][..],
+        &["-V"][..],
+    ] {
+        let mut argv = vec!["rowser", "ssh"];
+        argv.extend_from_slice(args);
+        match parse_from(argv).expect("parse") {
+            Command::Ssh { args: got } => assert_eq!(got, args, "{args:?}"),
+            other => panic!("expected ssh, got {other:?}"),
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn ssh_passes_non_utf8_arguments_unchanged() {

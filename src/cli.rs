@@ -101,12 +101,22 @@ pub fn run(command: Command) -> ExitCode {
             open_command,
         } => crate::daemon::run(runtime_dir, open_command),
         Command::Open { url } => crate::shim::open_main(&url),
-        Command::Ssh { args } => crate::wrapper::run(args),
+        Command::Ssh { args } => ssh(args),
         other => {
             eprintln!("rowser {}: not implemented yet", other.label());
             ExitCode::from(2)
         }
     }
+}
+
+/// `rowser ssh <args…>`: finds the Daemon's runtime directory and runs the Wrapper.
+fn ssh(args: Vec<OsString>) -> ExitCode {
+    let env = crate::platform::runtime_dir().map(|dir| crate::wrapper::WrapperEnv {
+        ssh: "ssh".into(),
+        relay_socket: dir.join(crate::daemon::RELAY_SOCKET),
+        session_dir: dir,
+    });
+    crate::wrapper::run(args, env)
 }
 
 /// Parse a full argv. When argv[0]'s file name is a browser name (`xdg-open`, `sensible-browser`, `www-browser`),
@@ -125,6 +135,12 @@ where
     if as_browser {
         args[0] = "rowser".into();
         args.insert(1, "open".into());
+    } else if args.get(1).is_some_and(|a| a == "ssh") {
+        // Everything after `ssh` belongs to ssh, unchanged: clap would eat a
+        // leading `--` and treat `-h`/`--help` as its own.
+        return Ok(Command::Ssh {
+            args: args.split_off(2),
+        });
     }
     Cli::try_parse_from(args).map(|cli| cli.command)
 }

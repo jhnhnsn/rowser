@@ -30,29 +30,9 @@ pub struct WrapperEnv {
     pub session_dir: PathBuf,
 }
 
-/// `rowser ssh <args…>` from the command line.
-pub fn run(args: Vec<OsString>) -> ExitCode {
-    let dir = match crate::platform::runtime_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("rowser ssh: {e}; running ssh without the URL forward");
-            return plain_ssh(Path::new("ssh"), &args);
-        }
-    };
-    run_ssh(
-        args,
-        WrapperEnv {
-            ssh: "ssh".into(),
-            relay_socket: dir.join(crate::daemon::RELAY_SOCKET),
-            session_dir: dir,
-        },
-    )
-}
-
-/// Runs ssh with a Tunnel from a random remote Session socket to a
-/// per-session local socket, relays each Tunnel connection to the Daemon's
-/// relay socket with the Host stamp, and returns ssh's exit code.
-pub fn run_ssh(args: Vec<OsString>, env: WrapperEnv) -> ExitCode {
+/// `rowser ssh <args…>`. When `env` is an error (no runtime directory),
+/// warns and runs plain `ssh` without the URL forward.
+pub fn run(args: Vec<OsString>, env: Result<WrapperEnv, String>) -> ExitCode {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(r) => r,
         Err(e) => {
@@ -60,7 +40,22 @@ pub fn run_ssh(args: Vec<OsString>, env: WrapperEnv) -> ExitCode {
             return ExitCode::from(255);
         }
     };
-    runtime.block_on(run_async(args, env))
+    runtime.block_on(async {
+        match env {
+            Ok(env) => run_async(args, env).await,
+            Err(e) => {
+                eprintln!("rowser ssh: {e}; running ssh without the URL forward");
+                supervise(Path::new("ssh"), &args).await
+            }
+        }
+    })
+}
+
+/// Runs ssh with a Tunnel from a random remote Session socket to a
+/// per-session local socket, relays each Tunnel connection to the Daemon's
+/// relay socket with the Host stamp, and returns ssh's exit code.
+pub fn run_ssh(args: Vec<OsString>, env: WrapperEnv) -> ExitCode {
+    run(args, Ok(env))
 }
 
 async fn run_async(args: Vec<OsString>, env: WrapperEnv) -> ExitCode {
@@ -71,8 +66,19 @@ async fn run_async(args: Vec<OsString>, env: WrapperEnv) -> ExitCode {
         );
         return supervise(&env.ssh, &args).await;
     }
-    let alias = resolve_alias(&env.ssh, &args).await;
-    let token = random_token();
+    let Some(alias) = resolve_alias(&env.ssh, &args).await else {
+        eprintln!("rowser ssh: could not find the host alias; running ssh without the URL forward");
+        return supervise(&env.ssh, &args).await;
+    };
+    let token = match random_token() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "rowser ssh: could not read /dev/urandom: {e}; running ssh without the URL forward"
+            );
+            return supervise(&env.ssh, &args).await;
+        }
+    };
     let local = env.session_dir.join(format!("session-{token}.sock"));
     let listener = match bind_session(&local) {
         Ok(l) => l,
@@ -91,7 +97,16 @@ async fn run_async(args: Vec<OsString>, env: WrapperEnv) -> ExitCode {
     full.extend(args);
     let relay = env.relay_socket.clone();
     let accept = tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
+        loop {
+            let stream = match listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(e) => {
+                    // For example EMFILE: keep the loop, but don't spin on it.
+                    tracing::warn!("accept on the per-session socket failed: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
             let relay = relay.clone();
             let alias = alias.clone();
             tokio::spawn(async move {
@@ -102,6 +117,8 @@ async fn run_async(args: Vec<OsString>, env: WrapperEnv) -> ExitCode {
         }
     });
     let code = supervise(&env.ssh, &full).await;
+    // This ends the accept loop only. Relay tasks already started keep
+    // running until their connection closes (or the runtime drops on return).
     accept.abort();
     let _ = std::fs::remove_file(&local);
     code
@@ -118,8 +135,10 @@ async fn daemon_answers(relay: &Path) -> bool {
     )
 }
 
-/// The Host alias: the `host` line of `ssh -G <args>`, else the argv destination.
-async fn resolve_alias(ssh: &Path, args: &[OsString]) -> String {
+/// The Host alias: the `host` line of `ssh -G <args>`, else the argv
+/// destination. `None` when both fail: the caller then runs ssh without the
+/// URL forward, as the Host alias is the trusted name and must not be guessed.
+async fn resolve_alias(ssh: &Path, args: &[OsString]) -> Option<String> {
     let out = tokio::process::Command::new(ssh)
         .arg("-G")
         .args(args)
@@ -136,11 +155,11 @@ async fn resolve_alias(ssh: &Path, args: &[OsString]) -> String {
                 .map(str::trim)
                 .filter(|h| !h.is_empty())
             {
-                return host.to_string();
+                return Some(host.to_string());
             }
         }
     }
-    destination(args).unwrap_or_else(|| "unknown".into())
+    destination(args)
 }
 
 fn bind_session(path: &Path) -> std::io::Result<UnixListener> {
@@ -150,12 +169,10 @@ fn bind_session(path: &Path) -> std::io::Result<UnixListener> {
 }
 
 /// 16 hex characters from the OS random source.
-fn random_token() -> String {
+fn random_token() -> std::io::Result<String> {
     let mut bytes = [0u8; 8];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Completes the Shim's handshake, opens a stamped connection to the Daemon,
@@ -171,16 +188,6 @@ async fn relay_conn(shim: UnixStream, relay: &Path, alias: String) -> crate::pro
     shim.write_all(&daemon_extra).await?;
     tokio::io::copy_bidirectional(&mut shim, &mut daemon).await?;
     Ok(())
-}
-
-fn plain_ssh(ssh: &Path, args: &[OsString]) -> ExitCode {
-    match tokio::runtime::Runtime::new() {
-        Ok(r) => r.block_on(supervise(ssh, args)),
-        Err(e) => {
-            eprintln!("rowser ssh: {e}");
-            ExitCode::from(255)
-        }
-    }
 }
 
 /// Runs ssh as a child and returns its exit code (128 + signal if killed).
