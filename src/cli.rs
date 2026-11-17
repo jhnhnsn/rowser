@@ -100,6 +100,7 @@ pub fn run(command: Command) -> ExitCode {
             runtime_dir,
             open_command,
         } => crate::daemon::run(runtime_dir, open_command),
+        Command::Open { url } => crate::shim::open_main(&url),
         other => {
             eprintln!("rowser {}: not implemented yet", other.label());
             ExitCode::from(2)

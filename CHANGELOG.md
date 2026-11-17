@@ -8,6 +8,10 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser open <url>` (and `xdg-open`, `sensible-browser`, `www-browser`) sends the URL to the
+  daemon through a tunnel. It tries `ROWSER_SOCKET`, then your own `/tmp/rowser-*.sock` sockets,
+  newest first, and removes stale ones. Without a working tunnel it prints the URL to open by
+  hand and exits 1. ([#6](https://github.com/jhnhnsn/rowser/issues/6))
 - `rowser daemon` runs the daemon in the foreground. It opens `http` and `https` URLs sent over
   its direct and relay sockets, shows a desktop notification naming the host, and limits each
   connection to 5 URLs per 10 seconds. `--runtime-dir` and `--open-command "<cmd> {url}"` set

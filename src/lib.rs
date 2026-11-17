@@ -3,5 +3,7 @@
 pub mod cli;
 pub mod daemon;
 pub mod detect;
+pub mod discovery;
 pub mod platform;
 pub mod protocol;
+pub mod shim;
