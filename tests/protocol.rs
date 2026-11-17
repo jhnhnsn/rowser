@@ -1,14 +1,18 @@
-use rowser::protocol::{Conn, Error, Hello, Msg, Version, MAX_LINE, VERSION};
+use rowser::protocol::{Conn, Error, Hello, Msg, Version};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, BufReader};
+
+/// Longer than the protocol's maximum line length (64 KiB).
+const TOO_LONG: usize = 64 * 1024 + 10;
+
+fn current() -> Version {
+    Hello::current().version()
+}
 
 async fn pair() -> (Conn<tokio::io::DuplexStream>, Conn<tokio::io::DuplexStream>) {
     let (a, b) = duplex(1 << 20);
-    let (client, server) = tokio::join!(
-        Conn::connect(a, Hello { version: VERSION }),
-        Conn::accept(b)
-    );
+    let (client, server) = tokio::join!(Conn::connect(a, Hello::current()), Conn::accept(b));
     let (server, hello) = server.unwrap();
-    assert_eq!(hello.version, VERSION);
+    assert_eq!(hello.version(), current());
     (client.unwrap(), server)
 }
 
@@ -41,7 +45,7 @@ fn all_messages() -> Vec<Msg> {
         },
         Msg::DataConn { conn_id: 7 },
         Msg::Ping,
-        Msg::Pong { version: VERSION },
+        Msg::Pong { version: current() },
     ]
 }
 
@@ -66,29 +70,27 @@ async fn recv_returns_none_after_peer_closes() {
 #[tokio::test]
 async fn minor_mismatch_is_accepted() {
     let (a, b) = duplex(1 << 16);
-    let other = Version {
-        major: VERSION.major,
-        minor: VERSION.minor + 1,
-    };
-    let (client, server) =
-        tokio::join!(Conn::connect(a, Hello { version: other }), Conn::accept(b));
+    let other = Version::new(current().major(), current().minor() + 1);
+    let (client, server) = tokio::join!(
+        Conn::connect(a, Hello::with_version(other)),
+        Conn::accept(b)
+    );
     assert!(client.is_ok());
-    assert_eq!(server.unwrap().1.version, other);
+    assert_eq!(server.unwrap().1.version(), other);
 }
 
 #[tokio::test]
 async fn major_mismatch_fails_on_both_sides_with_both_versions() {
     let (a, b) = duplex(1 << 16);
-    let other = Version {
-        major: VERSION.major + 1,
-        minor: 0,
-    };
-    let (client, server) =
-        tokio::join!(Conn::connect(a, Hello { version: other }), Conn::accept(b));
+    let other = Version::new(current().major() + 1, 0);
+    let (client, server) = tokio::join!(
+        Conn::connect(a, Hello::with_version(other)),
+        Conn::accept(b)
+    );
 
     match server.err().unwrap() {
         Error::VersionMismatch { local, remote } => {
-            assert_eq!(local, VERSION);
+            assert_eq!(local, current());
             assert_eq!(remote, other);
         }
         e => panic!("unexpected error: {e}"),
@@ -97,7 +99,7 @@ async fn major_mismatch_fails_on_both_sides_with_both_versions() {
     match &err {
         Error::VersionMismatch { local, remote } => {
             assert_eq!(*local, other);
-            assert_eq!(*remote, VERSION);
+            assert_eq!(*remote, current());
         }
         e => panic!("unexpected error: {e}"),
     }
@@ -135,11 +137,27 @@ async fn over_long_line_is_an_error() {
     let (client, mut server) = pair().await;
     let (mut raw, _) = client.into_raw();
     let writer = tokio::spawn(async move {
-        let _ = raw.write_all(&vec![b'a'; MAX_LINE + 10]).await;
+        let _ = raw.write_all(&vec![b'a'; TOO_LONG]).await;
         let _ = raw.write_all(b"\n").await;
         raw
     });
     assert!(matches!(server.recv().await, Err(Error::LineTooLong)));
+    drop(server);
+    let _ = writer.await;
+}
+
+#[tokio::test]
+async fn recv_after_over_long_line_keeps_failing() {
+    let (client, mut server) = pair().await;
+    let (mut raw, _) = client.into_raw();
+    let writer = tokio::spawn(async move {
+        let _ = raw.write_all(&vec![b'a'; TOO_LONG]).await;
+        let _ = raw.write_all(b"\n{\"type\":\"Ping\"}\n").await;
+        raw
+    });
+    assert!(matches!(server.recv().await, Err(Error::LineTooLong)));
+    assert!(matches!(server.recv().await, Err(Error::LineTooLong)));
+    assert!(server.send(&Msg::Ping).await.is_err());
     drop(server);
     let _ = writer.await;
 }

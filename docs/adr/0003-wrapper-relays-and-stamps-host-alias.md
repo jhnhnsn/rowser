@@ -10,5 +10,5 @@ the whole SSH session, so it supervises `ssh` as a child rather than `exec`ing i
 
 - The stamp is trusted because of *which socket* it arrives on, not because of its content. The
   Daemon has a direct socket (for `ssh_config` forwards; stamps rejected) and a relay socket (for
-  Wrappers; first frame must be a stamp). A Remote host cannot choose which local socket its Tunnel
+  Wrappers; first frame after the handshake must be a stamp). A Remote host cannot choose which local socket its Tunnel
   reaches, because that is set by the user's local `ssh` command or config.

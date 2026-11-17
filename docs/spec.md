@@ -32,8 +32,8 @@ is invoked through a symlink named `xdg-open`, `sensible-browser` or `www-browse
     Overridable with `--runtime-dir`.
   - `rowserd.sock` — direct socket, for `ssh_config` forwards. Host stamps are rejected here;
     the host name is the shim's untrusted reported name.
-  - `rowserd-relay.sock` — relay socket, for Wrappers only. The first frame must be a host
-    stamp. A remote host cannot choose which local socket its tunnel reaches, so the stamp is
+  - `rowserd-relay.sock` — relay socket, for Wrappers only. The first frame after the
+    handshake must be a host stamp. A remote host cannot choose which local socket its tunnel reaches, so the stamp is
     trusted.
   - Sockets mode 0600; directory 0700.
 - Accepts only `http` and `https` URLs. Every other scheme is rejected with an error to the shim.

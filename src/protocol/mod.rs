@@ -6,16 +6,33 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 /// Longest accepted line, in bytes, without the trailing newline.
-pub const MAX_LINE: usize = 64 * 1024;
+const MAX_LINE: usize = 64 * 1024;
 
 /// The protocol version this build speaks.
-pub const VERSION: Version = Version { major: 1, minor: 0 };
+const VERSION: Version = Version { major: 1, minor: 0 };
 
 /// A protocol version `major.minor`. Peers with the same major interoperate.
+///
+/// On the wire it is a JSON object, `{"major":1,"minor":0}`, not a `"1.0"`
+/// string: this is deliberate, so peers compare numbers and never parse text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
-    pub major: u32,
-    pub minor: u32,
+    major: u32,
+    minor: u32,
+}
+
+impl Version {
+    pub fn new(major: u32, minor: u32) -> Version {
+        Version { major, minor }
+    }
+
+    pub fn major(self) -> u32 {
+        self.major
+    }
+
+    pub fn minor(self) -> u32 {
+        self.minor
+    }
 }
 
 impl fmt::Display for Version {
@@ -27,7 +44,23 @@ impl fmt::Display for Version {
 /// The first message on every connection, sent by both sides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
-    pub version: Version,
+    version: Version,
+}
+
+impl Hello {
+    /// The hello for the protocol version this build speaks.
+    pub fn current() -> Hello {
+        Hello { version: VERSION }
+    }
+
+    /// A hello that claims `version`. Use it only to test version mismatches.
+    pub fn with_version(version: Version) -> Hello {
+        Hello { version }
+    }
+
+    pub fn version(&self) -> Version {
+        self.version
+    }
 }
 
 /// Every message after the handshake.
@@ -69,7 +102,9 @@ pub enum Msg {
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
-    /// A line exceeded [`MAX_LINE`].
+    /// A line exceeded the maximum line length. The rest of that line is
+    /// still unread, so the connection is unusable: every later `send` and
+    /// `recv` returns this error too.
     LineTooLong,
     /// A line was not a valid message.
     Malformed(serde_json::Error),
@@ -111,29 +146,34 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// A framed connection after a successful handshake.
 pub struct Conn<S> {
     stream: BufReader<S>,
+    /// Set after `LineTooLong`: the stream is mid-line and cannot be framed.
+    broken: bool,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
+    fn new(stream: S) -> Conn<S> {
+        Conn {
+            stream: BufReader::new(stream),
+            broken: false,
+        }
+    }
+
     /// Sends `hello`, then checks the peer's reply.
     pub async fn connect(stream: S, hello: Hello) -> Result<Conn<S>> {
-        let mut conn = Conn {
-            stream: BufReader::new(stream),
-        };
+        let mut conn = Conn::new(stream);
         conn.write(&hello).await?;
         let peer: Hello = conn.read().await?.ok_or(Error::Closed)?;
-        check(hello.version, peer.version)?;
+        require_same_major(hello.version, peer.version)?;
         Ok(conn)
     }
 
     /// Reads the peer's hello and replies with ours, even on a major mismatch
     /// so that the peer can report it too.
     pub async fn accept(stream: S) -> Result<(Conn<S>, Hello)> {
-        let mut conn = Conn {
-            stream: BufReader::new(stream),
-        };
+        let mut conn = Conn::new(stream);
         let peer: Hello = conn.read().await?.ok_or(Error::Closed)?;
-        conn.write(&Hello { version: VERSION }).await?;
-        check(VERSION, peer.version)?;
+        conn.write(&Hello::current()).await?;
+        require_same_major(VERSION, peer.version)?;
         Ok((conn, peer))
     }
 
@@ -153,6 +193,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
     }
 
     async fn write<T: Serialize>(&mut self, value: &T) -> Result<()> {
+        if self.broken {
+            return Err(Error::LineTooLong);
+        }
         let mut line = serde_json::to_vec(value).map_err(Error::Malformed)?;
         line.push(b'\n');
         self.stream.write_all(&line).await?;
@@ -161,6 +204,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
     }
 
     async fn read<T: DeserializeOwned>(&mut self) -> Result<Option<T>> {
+        if self.broken {
+            return Err(Error::LineTooLong);
+        }
         let mut line = Vec::new();
         (&mut self.stream)
             .take(MAX_LINE as u64 + 1)
@@ -173,6 +219,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
             line.pop();
         }
         if line.len() > MAX_LINE {
+            self.broken = true;
             return Err(Error::LineTooLong);
         }
         serde_json::from_slice(&line)
@@ -181,7 +228,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
     }
 }
 
-fn check(local: Version, remote: Version) -> Result<()> {
+fn require_same_major(local: Version, remote: Version) -> Result<()> {
     if local.major == remote.major {
         Ok(())
     } else {
