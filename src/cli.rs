@@ -7,8 +7,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use url::Url;
 
-/// Names under which rowser acts as `rowser open` (installed as symlinks).
-pub const BROWSER_NAMES: [&str; 3] = ["xdg-open", "sensible-browser", "www-browser"];
+pub use crate::platform::BROWSER_NAMES;
 
 #[derive(Debug, Parser)]
 #[command(name = "rowser", version, about)]

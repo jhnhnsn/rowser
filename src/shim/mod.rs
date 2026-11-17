@@ -14,8 +14,7 @@ use crate::discovery::find_tunnel_path;
 use crate::protocol::Msg;
 pub use keeper::{keeper_main, run_keeper, KeeperArgs};
 
-/// Where the Shim looks for Session sockets in production.
-pub const TUNNEL_DIR: &str = "/tmp";
+pub use crate::platform::TUNNEL_DIR;
 
 /// What the Shim reads from its environment.
 pub struct ShimEnv<W: Write> {

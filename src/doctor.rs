@@ -5,8 +5,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::cli::BROWSER_NAMES;
 use crate::discovery::find_tunnel_path;
+use crate::platform::{BROWSER_NAMES, TUNNEL_DIR};
 use crate::protocol::{Hello, Msg};
 
 /// The result of one check.
@@ -69,7 +69,7 @@ impl DoctorEnv<std::io::Stdout> {
             home: std::env::var_os("HOME")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
-            tunnel_dir: PathBuf::from(crate::shim::TUNNEL_DIR),
+            tunnel_dir: PathBuf::from(TUNNEL_DIR),
             socket_override: std::env::var_os("ROWSER_SOCKET")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
@@ -115,6 +115,12 @@ fn is_rowser(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// True when `path` is a file with an execute bit, as a shell `PATH` search needs.
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
 /// The browser symlinks in `~/.local/bin` must resolve to rowser.
 pub fn check_symlinks(home: &Path) -> Check {
     const NAME: &str = "symlinks";
@@ -155,8 +161,13 @@ pub fn check_browser(browser: Option<&OsStr>, path: Option<&OsStr>) -> Check {
     let resolves = if command.components().count() > 1 {
         is_rowser(command)
     } else {
-        path.map(|p| std::env::split_paths(p).any(|d| is_rowser(&d.join(command))))
-            .unwrap_or(false)
+        // A shell runs only the first executable match, so test only that one.
+        path.and_then(|p| {
+            std::env::split_paths(p)
+                .map(|d| d.join(command))
+                .find(|f| is_executable(f))
+        })
+        .is_some_and(|f| is_rowser(&f))
     };
     if resolves {
         Check::new(Status::Ok, NAME, format!("BROWSER={shown} is rowser"))
@@ -176,16 +187,16 @@ pub async fn check_tunnel(tunnel_dir: &Path, socket_override: Option<PathBuf>) -
     let (mut conn, socket) = match find_tunnel_path(tunnel_dir, socket_override).await {
         Ok(found) => found,
         Err(e) => {
-            let mut out = vec![];
-            if let Some(m) = e.mismatch {
-                out.push(Check::new(Status::Fail, "version", m.to_string()));
-            }
-            out.push(Check::new(
-                Status::Fail,
-                NAME,
-                "no tunnel; connect with `rowser ssh <host>` or set ROWSER_SOCKET",
-            ));
-            return out;
+            // A mismatch means a Tunnel exists; its message names both
+            // versions and the update command, so the "no tunnel" hint is wrong.
+            return match e.mismatch {
+                Some(m) => vec![Check::new(Status::Fail, "version", m.to_string())],
+                None => vec![Check::new(
+                    Status::Fail,
+                    NAME,
+                    "no tunnel; connect with `rowser ssh <host>` or set ROWSER_SOCKET",
+                )],
+            };
         }
     };
     let fail = |detail: String| vec![Check::new(Status::Fail, NAME, detail)];
@@ -315,6 +326,11 @@ mod tests {
         let bin = dir.join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("rowser"), "").unwrap();
+        std::fs::set_permissions(
+            bin.join("rowser"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
         if links {
             for n in BROWSER_NAMES {
                 std::os::unix::fs::symlink("rowser", bin.join(n)).unwrap();
@@ -366,6 +382,20 @@ mod tests {
             check_browser(Some("xdg-open".as_ref()), Some(&p)).status,
             Status::Ok
         );
+    }
+
+    #[test]
+    fn browser_shadowed_by_an_earlier_path_entry_warns() {
+        let h = home("f", true);
+        let other = h.0.join("usr/bin");
+        std::fs::create_dir_all(&other).unwrap();
+        let fake = other.join("xdg-open");
+        std::fs::write(&fake, "").unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let p = std::env::join_paths([other, h.0.join(".local/bin")]).unwrap();
+        let c = check_browser(Some("xdg-open".as_ref()), Some(&p));
+        assert_eq!(c.status, Status::Warn, "{}", c.detail);
     }
 
     #[test]

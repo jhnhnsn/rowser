@@ -16,7 +16,12 @@ fn good_home(dir: &TmpDir) -> PathBuf {
     let bin = home.join(".local/bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::write(bin.join("rowser"), "").unwrap();
-    for n in rowser::cli::BROWSER_NAMES {
+    std::fs::set_permissions(
+        bin.join("rowser"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    for n in rowser::platform::BROWSER_NAMES {
         std::os::unix::fs::symlink("rowser", bin.join(n)).unwrap();
     }
     home
@@ -125,15 +130,12 @@ async fn major_version_mismatch_fails_and_exits_1() {
     assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
     let out = lines(e);
     assert!(
-        out[out.len() - 2].starts_with(
+        out[out.len() - 1].starts_with(
             "fail version: protocol version mismatch: this rowser speaks 1.0, the peer speaks 99.0"
         ),
         "{out:?}"
     );
-    assert!(
-        out[out.len() - 1].starts_with("fail tunnel: no tunnel"),
-        "{out:?}"
-    );
+    assert!(!out.iter().any(|l| l.contains("no tunnel")), "{out:?}");
 }
 
 #[tokio::test]

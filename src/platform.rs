@@ -2,6 +2,12 @@
 
 use std::path::PathBuf;
 
+/// Names under which rowser acts as `rowser open` (installed as symlinks).
+pub const BROWSER_NAMES: [&str; 3] = ["xdg-open", "sensible-browser", "www-browser"];
+
+/// Where the Shim looks for Session sockets in production.
+pub const TUNNEL_DIR: &str = "/tmp";
+
 /// The Daemon's runtime directory: `$XDG_RUNTIME_DIR/rowser/` on Linux,
 /// `~/Library/Application Support/rowser/` on macOS.
 pub fn runtime_dir() -> Result<PathBuf, String> {

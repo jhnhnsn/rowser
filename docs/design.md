@@ -26,7 +26,7 @@ src/
   service.rs         `rowser daemon install|uninstall` (systemd unit, launchd plist, their paths)
   remote_install/    `rowser remote install <host>`
   doctor.rs          `rowser doctor`
-  platform.rs        default paths per OS (runtime dir)
+  platform.rs        default paths per OS (runtime dir, tunnel dir, browser names)
 tests/               level-2 integration tests and the level-3 sshd e2e test
 ```
 
@@ -131,7 +131,7 @@ cli ─► daemon, shim, wrapper, service, remote_install, doctor
 daemon ─► protocol
 shim ─► protocol, discovery, detect
 wrapper ─► protocol
-doctor ─► discovery, protocol
+doctor ─► discovery, protocol, platform
 discovery ─► protocol
 ```
 
