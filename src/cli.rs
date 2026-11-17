@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use url::Url;
@@ -87,6 +88,21 @@ impl Command {
             Command::Doctor => "doctor",
             Command::Remote { .. } => "remote install",
             Command::Keeper => "__keeper",
+        }
+    }
+}
+
+/// Runs a parsed command.
+pub fn run(command: Command) -> ExitCode {
+    match command {
+        Command::Daemon {
+            action: None,
+            runtime_dir,
+            open_command,
+        } => crate::daemon::run(runtime_dir, open_command),
+        other => {
+            eprintln!("rowser {}: not implemented yet", other.label());
+            ExitCode::from(2)
         }
     }
 }

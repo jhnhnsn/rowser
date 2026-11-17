@@ -3,6 +3,7 @@
 mod limit;
 mod notifier;
 mod opener;
+#[doc(hidden)]
 pub mod testing;
 
 use std::io;
@@ -85,7 +86,17 @@ impl Daemon {
     }
 }
 
-fn error(text: impl Into<String>) -> Msg {
+/// A successful `OpenResult`.
+fn open_ok() -> Msg {
+    Msg::OpenResult {
+        forward_id: None,
+        warnings: vec![],
+        error: None,
+    }
+}
+
+/// A failed `OpenResult` carrying `text`.
+fn open_error(text: impl Into<String>) -> Msg {
     Msg::OpenResult {
         forward_id: None,
         warnings: vec![],
@@ -102,7 +113,7 @@ impl Inner {
                 Some(Msg::HostStamp { alias }) => Some(alias),
                 Some(_) => {
                     return conn
-                        .send(&error("the relay socket needs a host stamp first"))
+                        .send(&open_error("the relay socket needs a host stamp first"))
                         .await
                 }
                 None => return Ok(()),
@@ -119,7 +130,7 @@ impl Inner {
                         Socket::Direct => "host stamps are not accepted on the direct socket",
                         Socket::Relay => "only one host stamp is allowed per connection",
                     };
-                    return conn.send(&error(text)).await;
+                    return conn.send(&open_error(text)).await;
                 }
                 Msg::Open {
                     url, reported_host, ..
@@ -131,14 +142,14 @@ impl Inner {
                         };
                         self.open(&url, host).await
                     } else {
-                        error(format!(
+                        open_error(format!(
                             "rate limit: at most {} URLs per {} seconds",
                             self.config.rate_max,
                             self.config.rate_window.as_secs()
                         ))
                     }
                 }
-                _ => return conn.send(&error("unexpected message")).await,
+                _ => return conn.send(&open_error("unexpected message")).await,
             };
             conn.send(&reply).await?;
         }
@@ -148,10 +159,10 @@ impl Inner {
     async fn open(&self, url: &str, host: NoticeHost) -> Msg {
         let url = match Url::parse(url) {
             Ok(u) => u,
-            Err(e) => return error(format!("invalid URL: {e}")),
+            Err(e) => return open_error(format!("invalid URL: {e}")),
         };
         if !matches!(url.scheme(), "http" | "https") {
-            return error(format!(
+            return open_error(format!(
                 "URL scheme `{}` is not allowed; only http and https",
                 url.scheme()
             ));
@@ -164,27 +175,56 @@ impl Inner {
             Ok::<_, io::Error>(())
         })
         .await;
-        match result {
-            Ok(Ok(())) => Msg::OpenResult {
-                forward_id: None,
-                warnings: vec![],
-                error: None,
-            },
-            Ok(Err(e)) => error(format!("could not open the URL: {e}")),
-            Err(e) => error(format!("could not open the URL: {e}")),
+        match result.map_err(io::Error::other).and_then(|r| r) {
+            Ok(()) => open_ok(),
+            Err(e) => open_error(format!("could not open the URL: {e}")),
         }
     }
 }
 
-/// Creates `dir` (mode 0700) and binds the direct and relay sockets in it
-/// (mode 0600). A Stale socket file is replaced; a live one is an error.
+/// Binds the direct and relay sockets (mode 0600) in the runtime directory
+/// `dir`. A missing `dir` is created with mode 0700. An existing `dir` must be
+/// owned by the current user and have no group or other permission bits; it is
+/// never changed. A Stale socket is replaced; a live one is an error.
 pub fn bind_sockets(dir: &Path) -> io::Result<(UnixListener, UnixListener)> {
-    std::fs::create_dir_all(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    prepare_dir(dir)?;
     Ok((
         bind(&dir.join(DIRECT_SOCKET))?,
         bind(&dir.join(RELAY_SOCKET))?,
     ))
+}
+
+fn prepare_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    if !dir.exists() {
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::DirBuilder::new().mode(0o700).create(dir)?;
+    }
+    let meta = std::fs::metadata(dir)?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    if meta.uid() != uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "runtime directory {} is not owned by the current user",
+                dir.display()
+            ),
+        ));
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "runtime directory {} has mode {mode:03o}; it must give no access to group or others (0700)",
+                dir.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn bind(path: &Path) -> io::Result<UnixListener> {

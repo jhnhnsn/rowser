@@ -61,6 +61,17 @@ impl Harness {
         Conn::connect(stream, Hello::current()).await.unwrap()
     }
 
+    /// Connects to the relay socket and sends the Host stamp `alias`.
+    async fn connect_relay(&self, alias: &str) -> Conn<UnixStream> {
+        let mut conn = self.connect(RELAY_SOCKET).await;
+        conn.send(&Msg::HostStamp {
+            alias: alias.into(),
+        })
+        .await
+        .unwrap();
+        conn
+    }
+
     fn opened(&self) -> Vec<String> {
         self.opener.urls().iter().map(|u| u.to_string()).collect()
     }
@@ -146,12 +157,7 @@ async fn direct_socket_rejects_a_host_stamp() {
 #[tokio::test]
 async fn relay_socket_uses_the_host_alias_from_the_stamp() {
     let h = Harness::start().await;
-    let mut conn = h.connect(RELAY_SOCKET).await;
-    conn.send(&Msg::HostStamp {
-        alias: "devbox".into(),
-    })
-    .await
-    .unwrap();
+    let mut conn = h.connect_relay("devbox").await;
     let reply = request(&mut conn, open("https://example.com/")).await;
     assert_eq!(error_of(&reply), None);
     assert_eq!(h.opened(), ["https://example.com/"]);
@@ -180,11 +186,7 @@ async fn ping_answers_pong_with_the_version_on_both_sockets() {
             version: Hello::current().version()
         }
     );
-    let mut relay = h.connect(RELAY_SOCKET).await;
-    relay
-        .send(&Msg::HostStamp { alias: "b".into() })
-        .await
-        .unwrap();
+    let mut relay = h.connect_relay("b").await;
     assert_eq!(
         request(&mut relay, Msg::Ping).await,
         Msg::Pong {
@@ -216,6 +218,63 @@ async fn rate_limit_allows_five_opens_per_ten_seconds_per_connection() {
     assert!(!h.opened().contains(&"https://example.com/5".to_string()));
 }
 
+#[tokio::test(start_paused = true)]
+async fn rate_limit_counts_rejected_scheme_requests() {
+    let h = Harness::start().await;
+    let mut conn = h.connect(DIRECT_SOCKET).await;
+    let reply = request(&mut conn, open("https://example.com/")).await;
+    assert_eq!(error_of(&reply), None);
+    let reply = request(&mut conn, open("file:///etc/passwd")).await;
+    assert!(!error_of(&reply).unwrap().contains("rate limit"));
+    for i in 0..3 {
+        let reply = request(&mut conn, open(&format!("http://example.com/{i}"))).await;
+        assert_eq!(error_of(&reply), None, "request {i}");
+    }
+    let reply = request(&mut conn, open("http://example.com/last")).await;
+    assert!(error_of(&reply).unwrap().contains("rate limit"));
+    assert_eq!(h.opened().len(), 4);
+}
+
+#[tokio::test]
+async fn notice_body_strips_control_characters_and_escapes_markup() {
+    let h = Harness::start().await;
+    let mut conn = h.connect(DIRECT_SOCKET).await;
+    let forged = Msg::Open {
+        url: "https://example.com/?a=1&b=2".into(),
+        reported_host: "devbox\n<b>trusted</b> <a href=\"x\">\u{202e}".into(),
+        callback_ports: vec![],
+    };
+    request(&mut conn, forged).await;
+    let body = h.notifier.notices()[0].body();
+    assert_eq!(
+        body,
+        "From devbox&lt;b&gt;trusted&lt;/b&gt; &lt;a href=&quot;x&quot;&gt; (unverified): \
+         https://example.com/?a=1&amp;b=2"
+    );
+}
+
+#[tokio::test]
+async fn bind_refuses_an_existing_directory_open_to_others() {
+    let dir = TmpDir::new();
+    let run = dir.0.join("run");
+    std::fs::create_dir(&run).unwrap();
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = bind_sockets(&run).unwrap_err();
+    assert!(err.to_string().contains("0700"), "{err}");
+    assert_eq!(mode(&run), 0o755, "the directory is not changed");
+    assert!(!run.join(DIRECT_SOCKET).exists());
+}
+
+#[tokio::test]
+async fn bind_accepts_an_existing_private_directory() {
+    let dir = TmpDir::new();
+    let run = dir.0.join("run");
+    std::fs::create_dir(&run).unwrap();
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _listeners = bind_sockets(&run).unwrap();
+    assert_eq!(mode(&run.join(DIRECT_SOCKET)), 0o600);
+}
+
 #[tokio::test]
 async fn sockets_are_0600_in_a_0700_directory() {
     let dir = TmpDir::new();
@@ -226,8 +285,14 @@ async fn sockets_are_0600_in_a_0700_directory() {
     assert_eq!(mode(&run.join(RELAY_SOCKET)), 0o600);
 }
 
+/// Held by tests that start child processes, and by the Stale socket test: a
+/// fork in another test thread holds a copy of a closed listener until exec,
+/// so the Stale socket can look live for a moment.
+static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[tokio::test]
 async fn bind_replaces_a_stale_socket_but_not_a_live_one() {
+    let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     let dir = TmpDir::new();
     let run = dir.0.join("run");
     drop(bind_sockets(&run).unwrap());
@@ -242,6 +307,7 @@ fn mode(p: &Path) -> u32 {
 
 #[test]
 fn command_opener_passes_the_url_as_one_argument() {
+    let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     let dir = TmpDir::new();
     let script = dir.0.join("rec.sh");
     std::fs::write(
@@ -260,16 +326,47 @@ fn command_opener_passes_the_url_as_one_argument() {
     let opener = CommandOpener::new(&format!("{} {{url}}", script.display())).unwrap();
     opener.open(&url).unwrap();
 
-    let out = std::fs::read_to_string(dir.0.join("rec.sh.out")).unwrap();
+    let out_path = dir.0.join("rec.sh.out");
+    let mut out = String::new();
+    for _ in 0..100 {
+        out = std::fs::read_to_string(&out_path).unwrap_or_default();
+        if out.ends_with('\n') && out.lines().count() == 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert_eq!(out, format!("1\n{}\n", url.as_str()));
     assert!(!pwned.exists());
 }
 
 #[test]
-fn command_opener_reports_a_failed_command() {
-    let opener = CommandOpener::new("false {url}").unwrap();
+fn command_opener_returns_without_waiting_for_the_command_to_exit() {
+    let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = TmpDir::new();
+    let script = dir.0.join("slow.sh");
+    std::fs::write(&script, "#!/bin/sh\nsleep 5\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let opener = CommandOpener::new(&format!("{} {{url}}", script.display())).unwrap();
+    let start = std::time::Instant::now();
+    opener
+        .open(&Url::parse("https://example.com/").unwrap())
+        .unwrap();
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn command_opener_reports_a_command_that_cannot_start() {
+    let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+    let opener = CommandOpener::new("/nonexistent/rowser-opener {url}").unwrap();
     assert!(opener
         .open(&Url::parse("https://example.com/").unwrap())
         .is_err());
     assert!(CommandOpener::new("   ").is_err());
+}
+
+#[test]
+fn command_opener_rejects_url_in_the_program_word() {
+    assert!(CommandOpener::new("{url}").is_err());
+    assert!(CommandOpener::new("/usr/bin/{url} --new-tab").is_err());
+    assert!(CommandOpener::new("xdg-open {url}").is_ok());
 }
