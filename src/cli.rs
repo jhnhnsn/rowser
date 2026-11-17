@@ -1,7 +1,7 @@
 //! clap definitions and argv[0] dispatch.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use url::Url;
@@ -22,6 +22,12 @@ pub enum Command {
     Daemon {
         #[command(subcommand)]
         action: Option<DaemonAction>,
+        /// Directory for the daemon's sockets (default: per-OS runtime directory).
+        #[arg(long)]
+        runtime_dir: Option<PathBuf>,
+        /// Command that opens a URL; `{url}` is replaced with the URL as one argument.
+        #[arg(long)]
+        open_command: Option<String>,
     },
     /// Run ssh with a Tunnel to the Daemon.
     Ssh {
@@ -66,12 +72,14 @@ impl Command {
     /// Display label for the command, as a user types it.
     pub fn label(&self) -> &'static str {
         match self {
-            Command::Daemon { action: None } => "daemon",
+            Command::Daemon { action: None, .. } => "daemon",
             Command::Daemon {
                 action: Some(DaemonAction::Install),
+                ..
             } => "daemon install",
             Command::Daemon {
                 action: Some(DaemonAction::Uninstall),
+                ..
             } => "daemon uninstall",
             Command::Ssh { .. } => "ssh",
             Command::Open { .. } => "open",
