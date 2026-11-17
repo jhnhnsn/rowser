@@ -13,7 +13,9 @@ All notable changes to rowser are listed here. The format follows
   back to the remote port. `rowser open` still exits at once. The forward ends when the remote
   port stops listening, a dial fails, or after 10 minutes. A busy local port still opens the URL,
   with a warning in the notification and on stderr. With `--confirm-hosts`, the ports bind only
-  after you click "Open". `rowser forward <port>` forwards a port by hand.
+  after you click "Open". `rowser forward <port>` forwards a port by hand; from a host that
+  matches `--confirm-hosts` it also waits for "Open" in a notification that names the host and
+  the port, and other hosts show a notice with the port.
   ([#8](https://github.com/jhnhnsn/rowser/issues/8))
 - `rowser daemon --confirm-hosts <pattern>` (glob, may repeat) makes URLs from matching hosts
   wait until you click "Open" in the notification (a dialog on macOS). Deny, or no answer within

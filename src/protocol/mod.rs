@@ -76,7 +76,8 @@ pub enum Msg {
         callback_ports: Vec<u16>,
     },
     /// `rowser forward`: a Callback forward without a URL. The reply is an
-    /// `OpenResult`.
+    /// `OpenResult`. `reported_host` plays the same part as in `Open`: the
+    /// notice shows it, and `--confirm-unverified` matches it.
     Forward {
         reported_host: String,
         callback_ports: Vec<u16>,
@@ -96,7 +97,10 @@ pub enum Msg {
         conn_id: u64,
         port: u16,
     },
+    /// A keeper's data connection for the browser connection `conn_id` of
+    /// the forward `forward_id`. The Daemon accepts it only when both match.
     DataConn {
+        forward_id: String,
         conn_id: u64,
     },
     Ping,
@@ -196,6 +200,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
     pub fn into_raw(self) -> (S, Vec<u8>) {
         let buffered = self.stream.buffer().to_vec();
         (self.stream.into_inner(), buffered)
+    }
+
+    /// Ends the framing and relays bytes both ways between this stream and
+    /// `other` until one side closes. Bytes already read past the last
+    /// message go to `other` first.
+    pub async fn splice<T: AsyncRead + AsyncWrite + Unpin>(
+        self,
+        other: &mut T,
+    ) -> std::io::Result<()> {
+        let (mut stream, extra) = self.into_raw();
+        other.write_all(&extra).await?;
+        tokio::io::copy_bidirectional(&mut stream, other).await?;
+        Ok(())
     }
 
     async fn write<T: Serialize>(&mut self, value: &T) -> Result<()> {

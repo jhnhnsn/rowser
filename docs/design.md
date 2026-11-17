@@ -43,8 +43,14 @@ Interface:
 - `Conn::into_raw()` hands back the stream for byte splicing after a `DataConn` message.
 
 Messages (one enum, `Msg`): `HostStamp{alias}`, `Open{url, reported_host, callback_ports}`,
+`Forward{reported_host, callback_ports}` (`rowser forward`; the reply is an `OpenResult`),
 `OpenResult{forward_id?, warnings, error?}`, `AttachForward{forward_id}`, `Dial{conn_id, port}`,
-`DataConn{conn_id}`, `Ping`, `Pong{version}`.
+`DataConn{forward_id, conn_id}`, `Ping`, `Pong{version}`. A `conn_id` is random, and the Daemon
+accepts a `DataConn` only when its `forward_id` is the forward that sent that `Dial`.
+
+The version stays 1.0 until v0.1.0 ships, so these additions do not bump it. A Daemon built
+before `Forward` cannot parse it and closes the connection, so `rowser forward` prints "daemon closed the
+connection" and exits 1.
 
 Hidden: framing, max line length, serde details, version constants, handshake ordering.
 Tests: `tokio::io::duplex` pairs; no adapters needed.

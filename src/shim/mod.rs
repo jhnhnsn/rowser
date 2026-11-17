@@ -65,11 +65,21 @@ pub async fn run_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> ExitCode {
         reported_host: env.reported_host.clone(),
         callback_ports: ports.clone(),
     };
-    let manual = format!("open this URL manually: {url}");
-    match request_forward(request, &ports, &manual, env).await {
-        Some(_) => ExitCode::SUCCESS,
-        None => ExitCode::FAILURE,
+    let no_tunnel_hint = format!("open this URL manually: {url}");
+    match request_forward(request, &ports, &no_tunnel_hint, env).await {
+        Outcome::Failed => ExitCode::FAILURE,
+        Outcome::Accepted | Outcome::KeeperStarted => ExitCode::SUCCESS,
     }
+}
+
+/// What `request_forward` did.
+enum Outcome {
+    /// The request failed; the error is on stderr.
+    Failed,
+    /// The Daemon accepted the request, but no keeper runs.
+    Accepted,
+    /// The Daemon accepted the request and a keeper holds the forward.
+    KeeperStarted,
 }
 
 /// `rowser forward <port>`: a Callback forward without a URL. Exits 0 when
@@ -79,9 +89,9 @@ pub async fn run_forward<W: Write>(port: u16, env: &mut ShimEnv<W>) -> ExitCode 
         reported_host: env.reported_host.clone(),
         callback_ports: vec![port],
     };
-    let manual = format!("cannot forward port {port}");
-    match request_forward(request, &[port], &manual, env).await {
-        Some(true) => {
+    let no_tunnel_hint = format!("cannot forward port {port}");
+    match request_forward(request, &[port], &no_tunnel_hint, env).await {
+        Outcome::KeeperStarted => {
             let _ = writeln!(
                 env.stderr,
                 "rowser: forwarding local port {port} to port {port} on this host"
@@ -93,14 +103,14 @@ pub async fn run_forward<W: Write>(port: u16, env: &mut ShimEnv<W>) -> ExitCode 
 }
 
 /// Sends `request`, prints warnings and errors, and starts a keeper when the
-/// reply has a forward id. Returns `None` on failure, else whether a keeper
-/// started.
+/// reply has a forward id. `no_tunnel_hint` follows "no tunnel; " when no
+/// Tunnel answers.
 async fn request_forward<W: Write>(
     request: Msg,
     ports: &[u16],
-    no_tunnel: &str,
+    no_tunnel_hint: &str,
     env: &mut ShimEnv<W>,
-) -> Option<bool> {
+) -> Outcome {
     let (mut conn, socket) =
         match find_tunnel_path(&env.tunnel_dir, env.socket_override.clone()).await {
             Ok(found) => found,
@@ -108,13 +118,13 @@ async fn request_forward<W: Write>(
                 if let Some(mismatch) = e.mismatch {
                     let _ = writeln!(env.stderr, "rowser: {mismatch}");
                 }
-                let _ = writeln!(env.stderr, "rowser: no tunnel; {no_tunnel}");
-                return None;
+                let _ = writeln!(env.stderr, "rowser: no tunnel; {no_tunnel_hint}");
+                return Outcome::Failed;
             }
         };
     if let Err(e) = conn.send(&request).await {
         let _ = writeln!(env.stderr, "rowser: {e}");
-        return None;
+        return Outcome::Failed;
     }
     let (forward_id, warnings, error) = match conn.recv().await {
         Ok(Some(Msg::OpenResult {
@@ -127,15 +137,15 @@ async fn request_forward<W: Write>(
                 env.stderr,
                 "rowser: unexpected reply from daemon: {other:?}"
             );
-            return None;
+            return Outcome::Failed;
         }
         Ok(None) => {
             let _ = writeln!(env.stderr, "rowser: daemon closed the connection");
-            return None;
+            return Outcome::Failed;
         }
         Err(e) => {
             let _ = writeln!(env.stderr, "rowser: {e}");
-            return None;
+            return Outcome::Failed;
         }
     };
     for w in warnings {
@@ -143,19 +153,19 @@ async fn request_forward<W: Write>(
     }
     if let Some(e) = error {
         let _ = writeln!(env.stderr, "rowser: {e}");
-        return None;
+        return Outcome::Failed;
     }
     let (Some(id), Some(exe)) = (forward_id, env.keeper_exe.as_deref()) else {
-        return Some(false);
+        return Outcome::Accepted;
     };
     match spawn_keeper(exe, &socket, &id, ports) {
-        Ok(()) => Some(true),
+        Ok(()) => Outcome::KeeperStarted,
         Err(e) => {
             let _ = writeln!(
                 env.stderr,
                 "rowser: warning: could not start the callback forward: {e}"
             );
-            Some(false)
+            Outcome::Accepted
         }
     }
 }
@@ -177,6 +187,9 @@ fn spawn_keeper(exe: &Path, socket: &Path, forward_id: &str, ports: &[u16]) -> s
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // `spawn` forks while tokio threads run. The spec's "no fork inside
+    // tokio" means no forked child that keeps running tokio code: here the
+    // child only calls setsid and then execs at once, which is safe.
     // SAFETY: setsid is async-signal-safe; nothing else runs between fork and exec.
     unsafe {
         cmd.pre_exec(|| {

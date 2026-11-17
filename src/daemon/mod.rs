@@ -9,7 +9,7 @@ mod opener;
 pub mod testing;
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -21,7 +21,7 @@ use url::Url;
 
 use crate::protocol::{Conn, Hello, Msg};
 use limit::Limit;
-pub use notifier::{DesktopNotifier, Notice, NoticeHost, Notifier};
+pub use notifier::{DesktopNotifier, Notice, NoticeHost, Notifier, Subject};
 pub use opener::{CommandOpener, Opener};
 
 /// File name of the direct socket in the runtime directory.
@@ -45,7 +45,8 @@ pub struct DaemonConfig {
     pub confirm_timeout: Duration,
     /// How long a Callback forward lives at most.
     pub forward_timeout: Duration,
-    /// Addresses the local side of a Callback forward binds.
+    /// Addresses the local side of a Callback forward binds. Only loopback
+    /// addresses are used; `Daemon::new` drops any other.
     pub loopback: Vec<IpAddr>,
 }
 
@@ -57,11 +58,8 @@ impl Default for DaemonConfig {
             confirm_hosts: vec![],
             confirm_unverified: false,
             confirm_timeout: confirm::CONFIRM_TIMEOUT,
-            forward_timeout: Duration::from_secs(600),
-            loopback: vec![
-                IpAddr::V4(Ipv4Addr::LOCALHOST),
-                IpAddr::V6(Ipv6Addr::LOCALHOST),
-            ],
+            forward_timeout: crate::callback::FORWARD_TIMEOUT,
+            loopback: crate::callback::LOOPBACK.to_vec(),
         }
     }
 }
@@ -84,7 +82,9 @@ struct Inner {
 }
 
 impl Daemon {
-    pub fn new(config: DaemonConfig, opener: impl Opener, notifier: impl Notifier) -> Daemon {
+    pub fn new(mut config: DaemonConfig, opener: impl Opener, notifier: impl Notifier) -> Daemon {
+        // The spec binds the local side on loopback only.
+        config.loopback.retain(IpAddr::is_loopback);
         Daemon {
             inner: Arc::new(Inner {
                 config,
@@ -112,9 +112,13 @@ impl Daemon {
     }
 }
 
-/// The error when `Notifier::confirm` gives `false`.
+/// The error when `Notifier::confirm` gives `false` for an Open request.
 pub const NOT_APPROVED: &str =
     "the URL was not approved: the user denied it, or the confirmation could not be shown (see the daemon log)";
+
+/// The error when `Notifier::confirm` gives `false` for `rowser forward`.
+pub const FORWARD_NOT_APPROVED: &str =
+    "the forward was not approved: the user denied it, or the confirmation could not be shown (see the daemon log)";
 
 /// A failed `OpenResult` carrying `text`.
 fn open_error(text: impl Into<String>) -> Msg {
@@ -159,23 +163,19 @@ impl Inner {
                     callback_ports,
                 } => {
                     if limit.allow() {
-                        let host = match &stamp {
-                            Some(alias) => NoticeHost::Alias(alias.clone()),
-                            None => NoticeHost::Reported(reported_host),
-                        };
+                        let host = notice_host(&stamp, reported_host);
                         self.open(&url, host, &callback_ports).await
                     } else {
                         self.rate_error()
                     }
                 }
-                Msg::Forward { callback_ports, .. } => {
+                Msg::Forward {
+                    reported_host,
+                    callback_ports,
+                } => {
                     if limit.allow() {
-                        let created = self.forward(&callback_ports);
-                        Msg::OpenResult {
-                            forward_id: created.forward_id,
-                            warnings: created.warnings,
-                            error: None,
-                        }
+                        let host = notice_host(&stamp, reported_host);
+                        self.manual_forward(host, callback_ports).await
                     } else {
                         self.rate_error()
                     }
@@ -186,9 +186,12 @@ impl Inner {
                         Err(mut conn) => conn.send(&open_error("unknown forward id")).await,
                     };
                 }
-                Msg::DataConn { conn_id } => {
-                    return match self.forwards.take_pending(conn_id) {
-                        Some(browser) => Ok(forward::splice(conn, browser).await?),
+                Msg::DataConn {
+                    forward_id,
+                    conn_id,
+                } => {
+                    return match self.forwards.take_pending(&forward_id, conn_id) {
+                        Some(mut browser) => Ok(conn.splice(&mut browser).await?),
                         None => conn.send(&open_error("unknown connection id")).await,
                     };
                 }
@@ -212,6 +215,33 @@ impl Inner {
             .create(ports, &self.config.loopback, self.config.forward_timeout)
     }
 
+    /// `rowser forward`: the same `--confirm-hosts` rules as an Open
+    /// request. A matching host waits for "Open"; other hosts get a notice.
+    async fn manual_forward(&self, host: NoticeHost, ports: Vec<u16>) -> Msg {
+        let confirm = self.config.needs_confirm(&host);
+        let mut notice = Notice {
+            subject: Subject::Forward(ports.clone()),
+            host,
+            warnings: vec![],
+        };
+        if confirm {
+            if let Err(error) = self.confirm(notice.clone()).await {
+                return error;
+            }
+        }
+        let created = self.forward(&ports);
+        if !confirm || !created.warnings.is_empty() {
+            notice.warnings = created.warnings.clone();
+            let notifier = self.notifier.clone();
+            tokio::task::spawn_blocking(move || notifier.notify(notice));
+        }
+        Msg::OpenResult {
+            forward_id: created.forward_id,
+            warnings: created.warnings,
+            error: None,
+        }
+    }
+
     async fn open(&self, url: &str, host: NoticeHost, ports: &[u16]) -> Msg {
         let url = match Url::parse(url) {
             Ok(u) => u,
@@ -227,7 +257,7 @@ impl Inner {
         if confirm {
             if let Err(error) = self
                 .confirm(Notice {
-                    url: url.clone(),
+                    subject: Subject::Url(url.clone()),
                     host: host.clone(),
                     warnings: vec![],
                 })
@@ -248,7 +278,7 @@ impl Inner {
             // unless it carries a forward warning.
             if !confirm || !warnings.is_empty() {
                 notifier.notify(Notice {
-                    url,
+                    subject: Subject::Url(url),
                     host,
                     warnings,
                 });
@@ -262,13 +292,24 @@ impl Inner {
                 warnings: created.warnings,
                 error: None,
             },
-            Err(e) => open_error(format!("could not open the URL: {e}")),
+            Err(e) => {
+                // No keeper attaches when the Shim gets an error: free the
+                // ports now, not after the forward timeout.
+                if let Some(id) = &created.forward_id {
+                    self.forwards.close(id);
+                }
+                open_error(format!("could not open the URL: {e}"))
+            }
         }
     }
 
     /// Waits for the user's answer. A denial, a timeout or a failed
     /// Notifier gives the error reply for the Shim.
     async fn confirm(&self, notice: Notice) -> Result<(), Msg> {
+        let (not_approved, not_done) = match notice.subject {
+            Subject::Url(_) => (NOT_APPROVED, "the URL was not opened"),
+            Subject::Forward(_) => (FORWARD_NOT_APPROVED, "the port was not forwarded"),
+        };
         let notifier = self.notifier.clone();
         let answer = tokio::task::spawn_blocking(move || notifier.confirm(notice));
         let timeout = self.config.confirm_timeout;
@@ -277,13 +318,22 @@ impl Inner {
             // `confirm` gives only a bool, so a denial and a confirmation
             // that could not be shown look the same here; the Notifier logs
             // the second.
-            Ok(Ok(false)) => Err(open_error(NOT_APPROVED)),
+            Ok(Ok(false)) => Err(open_error(not_approved)),
             Ok(Err(e)) => Err(open_error(format!("confirmation failed: {e}"))),
             Err(_) => Err(open_error(format!(
-                "no confirmation within {} seconds; the URL was not opened",
+                "no confirmation within {} seconds; {not_done}",
                 timeout.as_secs()
             ))),
         }
+    }
+}
+
+/// The host name of a request: the Host stamp's alias on the relay socket,
+/// else the Reported host name.
+fn notice_host(stamp: &Option<String>, reported_host: String) -> NoticeHost {
+    match stamp {
+        Some(alias) => NoticeHost::Alias(alias.clone()),
+        None => NoticeHost::Reported(reported_host),
     }
 }
 

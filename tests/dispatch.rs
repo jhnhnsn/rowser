@@ -76,6 +76,23 @@ fn forward_rejects_privileged_ports() {
 }
 
 #[test]
+fn daemon_loopback_accepts_only_loopback_addresses() {
+    for ip in ["0.0.0.0", "::", "192.168.1.2"] {
+        let err = parse_from(["rowser", "daemon", "--loopback", ip]).unwrap_err();
+        assert!(
+            err.to_string().contains("is not a loopback address"),
+            "{err}"
+        );
+    }
+    for ip in ["127.0.0.1", "::1"] {
+        assert!(
+            parse_from(["rowser", "daemon", "--loopback", ip]).is_ok(),
+            "{ip}"
+        );
+    }
+}
+
+#[test]
 fn ssh_passes_its_arguments_through() {
     match parse_from(["rowser", "ssh", "-p", "22", "host"]).expect("parse") {
         Command::Ssh { args } => assert_eq!(args, ["-p", "22", "host"]),

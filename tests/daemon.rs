@@ -1,36 +1,18 @@
+mod common;
+
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::Path;
 use std::time::Duration;
 
+use common::TmpDir;
 use rowser::daemon::testing::{Answer, RecordingNotifier, RecordingOpener, ScriptedNotifier};
 use rowser::daemon::{
     bind_sockets, CommandOpener, Daemon, DaemonConfig, NoticeHost, Notifier, Opener, DIRECT_SOCKET,
-    NOT_APPROVED, RELAY_SOCKET,
+    FORWARD_NOT_APPROVED, NOT_APPROVED, RELAY_SOCKET,
 };
 use rowser::protocol::{Conn, Hello, Msg};
 use tokio::net::UnixStream;
 use url::Url;
-
-/// A short temp dir under /tmp (Unix socket paths are limited to ~104 bytes).
-struct TmpDir(PathBuf);
-
-impl TmpDir {
-    fn new() -> TmpDir {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let n = N.fetch_add(1, Ordering::SeqCst);
-        let p = PathBuf::from(format!("/tmp/rw.{}.{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        TmpDir(p)
-    }
-}
-
-impl Drop for TmpDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 struct Harness<N = RecordingNotifier> {
     dir: TmpDir,
@@ -47,7 +29,7 @@ impl Harness {
 impl<N: Notifier + Clone> Harness<N> {
     /// A Daemon with `config` and `notifier`; the harness keeps a clone of it.
     async fn with(config: DaemonConfig, notifier: N) -> Harness<N> {
-        let dir = TmpDir::new();
+        let dir = TmpDir::new("d");
         let run = dir.0.join("run");
         let (direct, relay) = bind_sockets(&run).unwrap();
         let opener = RecordingOpener::default();
@@ -360,7 +342,7 @@ async fn confirm_unverified_matches_the_reported_host_name() {
 
 #[tokio::test]
 async fn bind_refuses_an_existing_directory_open_to_others() {
-    let dir = TmpDir::new();
+    let dir = TmpDir::new("d");
     let run = dir.0.join("run");
     std::fs::create_dir(&run).unwrap();
     std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -372,7 +354,7 @@ async fn bind_refuses_an_existing_directory_open_to_others() {
 
 #[tokio::test]
 async fn bind_accepts_an_existing_private_directory() {
-    let dir = TmpDir::new();
+    let dir = TmpDir::new("d");
     let run = dir.0.join("run");
     std::fs::create_dir(&run).unwrap();
     std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -382,7 +364,7 @@ async fn bind_accepts_an_existing_private_directory() {
 
 #[tokio::test]
 async fn sockets_are_0600_in_a_0700_directory() {
-    let dir = TmpDir::new();
+    let dir = TmpDir::new("d");
     let run = dir.0.join("run");
     let _listeners = bind_sockets(&run).unwrap();
     assert_eq!(mode(&run), 0o700);
@@ -398,7 +380,7 @@ static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[tokio::test]
 async fn bind_replaces_a_stale_socket_but_not_a_live_one() {
     let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TmpDir::new();
+    let dir = TmpDir::new("d");
     let run = dir.0.join("run");
     drop(bind_sockets(&run).unwrap());
     let live = bind_sockets(&run).expect("stale sockets are replaced");
@@ -413,7 +395,7 @@ fn mode(p: &Path) -> u32 {
 #[test]
 fn command_opener_passes_the_url_as_one_argument() {
     let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TmpDir::new();
+    let dir = TmpDir::new("d");
     let script = dir.0.join("rec.sh");
     std::fs::write(
         &script,
@@ -447,7 +429,7 @@ fn command_opener_passes_the_url_as_one_argument() {
 #[test]
 fn command_opener_returns_without_waiting_for_the_command_to_exit() {
     let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TmpDir::new();
+    let dir = TmpDir::new("d");
     let script = dir.0.join("slow.sh");
     std::fs::write(&script, "#!/bin/sh\nsleep 5\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -535,4 +517,132 @@ async fn approved_url_with_callback_port_gets_a_forward() {
         }
     ));
     assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err());
+}
+
+fn manual_forward(port: u16) -> Msg {
+    Msg::Forward {
+        reported_host: "devbox.internal".into(),
+        callback_ports: vec![port],
+    }
+}
+
+#[tokio::test]
+async fn denied_manual_forward_binds_nothing() {
+    let h = forward_confirm_harness(Answer::Deny).await;
+    let port = free_port();
+    let mut conn = h.connect_relay("db.prod").await;
+    let reply = request(&mut conn, manual_forward(port)).await;
+    assert_eq!(error_of(&reply), Some(FORWARD_NOT_APPROVED));
+    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+    let asked = h.notifier.confirms();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].host, NoticeHost::Alias("db.prod".into()));
+    let body = asked[0].body();
+    assert!(
+        body.contains("db.prod") && body.contains(&port.to_string()),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn approved_manual_forward_binds_the_port() {
+    let h = forward_confirm_harness(Answer::Approve).await;
+    let port = free_port();
+    let mut conn = h.connect_relay("db.prod").await;
+    let reply = request(&mut conn, manual_forward(port)).await;
+    assert_eq!(error_of(&reply), None);
+    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err());
+    assert_eq!(h.notifier.confirms().len(), 1);
+    assert!(h.notifier.notices().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn manual_forward_binds_nothing_after_the_confirmation_timeout() {
+    let h = forward_confirm_harness(Answer::Hang).await;
+    let port = free_port();
+    let mut conn = h.connect_relay("db.prod").await;
+    let asked = tokio::spawn(async move {
+        let reply = request(&mut conn, manual_forward(port)).await;
+        error_of(&reply).map(str::to_owned)
+    });
+    while h.notifier.confirms().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(60)).await;
+    assert_eq!(
+        asked.await.unwrap().as_deref(),
+        Some("no confirmation within 60 seconds; the port was not forwarded")
+    );
+    h.notifier.release(true);
+    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+}
+
+#[tokio::test]
+async fn manual_forward_from_a_non_matching_host_shows_a_notice_with_the_port() {
+    let h = forward_confirm_harness(Answer::Deny).await;
+    let port = free_port();
+    let mut conn = h.connect_relay("devbox").await;
+    let reply = request(&mut conn, manual_forward(port)).await;
+    assert_eq!(error_of(&reply), None);
+    assert!(h.notifier.confirms().is_empty());
+    // The notice is sent off the request path.
+    for _ in 0..100 {
+        if !h.notifier.notices().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let notices = h.notifier.notices();
+    assert_eq!(notices.len(), 1);
+    let body = notices[0].body();
+    assert!(
+        body.contains("devbox") && body.contains(&port.to_string()),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn manual_forward_on_the_direct_socket_matches_the_reported_host_with_confirm_unverified() {
+    let config = DaemonConfig {
+        confirm_hosts: vec!["devbox.*".into()],
+        confirm_unverified: true,
+        loopback: vec!["127.0.0.1".parse().unwrap()],
+        ..DaemonConfig::default()
+    };
+    let h = Harness::with(config, ScriptedNotifier::new(Answer::Deny)).await;
+    let port = free_port();
+    let mut conn = h.connect(DIRECT_SOCKET).await;
+    let reply = request(&mut conn, manual_forward(port)).await;
+    assert_eq!(error_of(&reply), Some(FORWARD_NOT_APPROVED));
+    assert_eq!(
+        h.notifier.confirms()[0].host,
+        NoticeHost::Reported("devbox.internal".into())
+    );
+}
+
+struct FailingOpener;
+
+impl Opener for FailingOpener {
+    fn open(&self, _: &Url) -> std::io::Result<()> {
+        Err(std::io::Error::other("no browser"))
+    }
+}
+
+#[tokio::test]
+async fn a_failed_open_closes_the_forward() {
+    let dir = TmpDir::new("d");
+    let run = dir.0.join("run");
+    let (direct, relay) = bind_sockets(&run).unwrap();
+    let config = DaemonConfig {
+        loopback: vec!["127.0.0.1".parse().unwrap()],
+        ..DaemonConfig::default()
+    };
+    let daemon = Daemon::new(config, FailingOpener, RecordingNotifier::default());
+    tokio::spawn(daemon.serve(direct, relay));
+    let stream = UnixStream::connect(run.join(DIRECT_SOCKET)).await.unwrap();
+    let mut conn = Conn::connect(stream, Hello::current()).await.unwrap();
+    let port = free_port();
+    let reply = request(&mut conn, open_with_port("https://example.com/", port)).await;
+    assert!(error_of(&reply).is_some());
+    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
 }

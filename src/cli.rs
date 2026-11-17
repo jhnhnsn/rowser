@@ -45,7 +45,7 @@ pub enum Command {
         confirm_timeout: Option<u64>,
         /// Test hook: loopback addresses for Callback forwards (default
         /// 127.0.0.1 and ::1). Repeat for more than one.
-        #[arg(long, hide = true)]
+        #[arg(long, hide = true, value_parser = parse_loopback)]
         loopback: Vec<std::net::IpAddr>,
     },
     /// Run ssh with a Tunnel to the Daemon.
@@ -115,6 +115,16 @@ impl Command {
             Command::Remote { .. } => "remote install",
             Command::Keeper { .. } => "__keeper",
         }
+    }
+}
+
+/// A `--loopback` value: the Daemon binds Callback forwards on loopback only.
+fn parse_loopback(text: &str) -> Result<std::net::IpAddr, String> {
+    let ip: std::net::IpAddr = text.parse().map_err(|e| format!("{e}"))?;
+    if ip.is_loopback() {
+        Ok(ip)
+    } else {
+        Err(format!("{ip} is not a loopback address"))
     }
 }
 

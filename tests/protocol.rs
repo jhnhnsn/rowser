@@ -47,7 +47,10 @@ fn all_messages() -> Vec<Msg> {
             conn_id: 7,
             port: 8400,
         },
-        Msg::DataConn { conn_id: 7 },
+        Msg::DataConn {
+            forward_id: "f".into(),
+            conn_id: 7,
+        },
         Msg::Ping,
         Msg::Pong { version: current() },
     ]
@@ -169,16 +172,17 @@ async fn recv_after_over_long_line_keeps_failing() {
 #[tokio::test]
 async fn into_raw_keeps_bytes_after_data_conn() {
     let (mut client, server) = pair().await;
-    client.send(&Msg::DataConn { conn_id: 3 }).await.unwrap();
+    let data_conn = Msg::DataConn {
+        forward_id: "f".into(),
+        conn_id: 3,
+    };
+    client.send(&data_conn).await.unwrap();
     let (mut raw, _) = client.into_raw();
     raw.write_all(b"spliced bytes").await.unwrap();
     drop(raw);
 
     let mut server = server;
-    assert_eq!(
-        server.recv().await.unwrap(),
-        Some(Msg::DataConn { conn_id: 3 })
-    );
+    assert_eq!(server.recv().await.unwrap(), Some(data_conn));
     let (stream, buffered) = server.into_raw();
     let mut rest = buffered;
     BufReader::new(stream).read_to_end(&mut rest).await.unwrap();

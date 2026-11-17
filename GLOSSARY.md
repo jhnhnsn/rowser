@@ -82,6 +82,11 @@ The temporary path that carries browser connections to a Callback port on the Lo
 through the Tunnel to the same Callback port on the Remote host.
 _Avoid_: port forward, tunnel (reserved for Tunnel), proxy
 
+**Keeper**:
+The detached `rowser __keeper` process on the Remote host that holds one Callback forward. It
+dials the Callback port for each browser connection and carries the bytes through the Tunnel.
+_Avoid_: helper, background shim, daemon (reserved for Daemon)
+
 **Confirmed host**:
 A Remote host whose Open requests wait for the user to approve them before the browser opens.
 _Avoid_: untrusted host, prompt host

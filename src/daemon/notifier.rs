@@ -11,19 +11,40 @@ pub enum NoticeHost {
     Reported(String),
 }
 
-/// What the Daemon tells the user about an Open request.
+/// What a notice is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Subject {
+    /// An Open request for this URL.
+    Url(Url),
+    /// A `rowser forward` request for these Callback ports.
+    Forward(Vec<u16>),
+}
+
+/// What the Daemon tells the user about an Open request or a `rowser
+/// forward` request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
-    pub url: Url,
+    pub subject: Subject,
     pub host: NoticeHost,
-    /// Problems with the request that did not stop the URL from opening,
-    /// such as a busy Callback port.
+    /// Problems with the request that did not stop it, such as a busy
+    /// Callback port.
     pub warnings: Vec<String>,
 }
 
 impl Notice {
     pub fn summary(&self) -> String {
-        "rowser: opened a URL".into()
+        match self.subject {
+            Subject::Url(_) => "rowser: opened a URL".into(),
+            Subject::Forward(_) => "rowser: forwarded a port".into(),
+        }
+    }
+
+    /// The question of a confirmation, without the "rowser: " prefix.
+    pub fn question(&self) -> &'static str {
+        match self.subject {
+            Subject::Url(_) => "Open this URL?",
+            Subject::Forward(_) => "Forward this port?",
+        }
     }
 
     /// The notification body. Host names and the URL have control characters
@@ -47,7 +68,14 @@ impl Notice {
                 n => format!("{n} (unverified)"),
             },
         };
-        let mut body = format!("From {host}: {}", clean(self.url.as_str(), escape));
+        let what = match &self.subject {
+            Subject::Url(url) => clean(url.as_str(), escape),
+            Subject::Forward(ports) => {
+                let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
+                format!("forward local port {}", ports.join(", "))
+            }
+        };
+        let mut body = format!("From {host}: {what}");
         for w in &self.warnings {
             body.push_str("\nWarning: ");
             body.push_str(&clean(w, escape));
@@ -78,7 +106,7 @@ fn clean(text: &str, escape: bool) -> String {
 pub trait Notifier: Send + Sync + 'static {
     fn notify(&self, notice: Notice);
 
-    /// Asks the user to approve opening `notice.url`. Blocks until the user
+    /// Asks the user to approve `notice.subject`. Blocks until the user
     /// answers; `true` means "Open". The Daemon applies its own timeout and
     /// ignores a late answer.
     fn confirm(&self, notice: Notice) -> bool;
@@ -106,7 +134,7 @@ impl Notifier for DesktopNotifier {
         match confirm_desktop(&notice) {
             Ok(answer) => answer,
             Err(e) => {
-                tracing::warn!("confirmation failed, URL not opened: {e}");
+                tracing::warn!("confirmation failed, request refused: {e}");
                 false
             }
         }
@@ -117,7 +145,7 @@ impl Notifier for DesktopNotifier {
 #[cfg(not(target_os = "macos"))]
 fn confirm_desktop(notice: &Notice) -> Result<bool, String> {
     let handle = notify_rust::Notification::new()
-        .summary("rowser: open this URL?")
+        .summary(&format!("rowser: {}", notice.question().to_lowercase()))
         .body(&notice.body())
         .action("open", "Open")
         .action("deny", "Deny")
@@ -148,7 +176,7 @@ fn confirm_desktop(notice: &Notice) -> Result<bool, String> {
     let out = std::process::Command::new("osascript")
         .arg("-e")
         .arg(script)
-        .arg(format!("Open this URL?\n\n{}", notice.plain_body()))
+        .arg(format!("{}\n\n{}", notice.question(), notice.plain_body()))
         .output()
         .map_err(|e| e.to_string())?;
     Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "Open")

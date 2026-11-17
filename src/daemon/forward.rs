@@ -3,11 +3,9 @@
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
@@ -19,14 +17,20 @@ const MIN_PORT: u16 = 1024;
 
 type Control = Conn<UnixStream>;
 
+/// A browser connection that waits for the keeper's data connection.
+struct Pending {
+    forward_id: String,
+    browser: TcpStream,
+}
+
 /// All Callback forwards of one Daemon.
 #[derive(Default)]
 pub(super) struct Forwards {
     /// Forwards whose keeper has not attached yet.
     waiting: Mutex<HashMap<String, oneshot::Sender<Control>>>,
-    /// Browser connections a keeper was asked to dial, by `conn_id`.
-    pending: Mutex<HashMap<u64, TcpStream>>,
-    next_conn: AtomicU64,
+    /// Browser connections a keeper was asked to dial, by `conn_id`. The ids
+    /// are random, and a `DataConn` must also name the forward.
+    pending: Mutex<HashMap<u64, Pending>>,
 }
 
 /// What `Forwards::create` did.
@@ -54,7 +58,9 @@ impl Forwards {
                 continue;
             }
             match bind_port(port, loopback) {
-                Ok(ls) if !ls.is_empty() => listeners.extend(ls.into_iter().map(|l| (port, l))),
+                Ok(bound) if !bound.is_empty() => {
+                    listeners.extend(bound.into_iter().map(|listener| (port, listener)))
+                }
                 Ok(_) => warnings.push(format!(
                     "no loopback address is available for local port {port}"
                 )),
@@ -70,8 +76,8 @@ impl Forwards {
                 warnings,
             };
         }
-        let id = match random_id() {
-            Ok(id) => id,
+        let id = match random_bytes::<16>() {
+            Ok(bytes) => bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
             Err(e) => {
                 warnings.push(format!("could not make a forward id: {e}"));
                 return Created {
@@ -83,15 +89,21 @@ impl Forwards {
         let (tx, rx) = oneshot::channel();
         self.waiting.lock().unwrap().insert(id.clone(), tx);
         let this = self.clone();
-        let fid = id.clone();
+        let forward_id = id.clone();
         tokio::spawn(async move {
-            this.run(listeners, rx, timeout).await;
-            this.waiting.lock().unwrap().remove(&fid);
+            this.run(&forward_id, listeners, rx, timeout).await;
+            this.waiting.lock().unwrap().remove(&forward_id);
         });
         Created {
             forward_id: Some(id),
             warnings,
         }
+    }
+
+    /// Ends a forward whose keeper has not attached, and frees its ports.
+    pub fn close(&self, forward_id: &str) {
+        // Dropping the sender ends `run`, which drops the listeners.
+        self.waiting.lock().unwrap().remove(forward_id);
     }
 
     /// Hands the keeper's control connection to its forward.
@@ -103,13 +115,19 @@ impl Forwards {
         }
     }
 
-    /// The browser connection a keeper was asked to dial as `conn_id`.
-    pub fn take_pending(&self, conn_id: u64) -> Option<TcpStream> {
-        self.pending.lock().unwrap().remove(&conn_id)
+    /// The browser connection that the keeper of `forward_id` was asked to
+    /// dial as `conn_id`. A wrong forward id leaves the connection pending.
+    pub fn take_pending(&self, forward_id: &str, conn_id: u64) -> Option<TcpStream> {
+        let mut pending = self.pending.lock().unwrap();
+        match pending.get(&conn_id) {
+            Some(p) if p.forward_id == forward_id => pending.remove(&conn_id).map(|p| p.browser),
+            _ => None,
+        }
     }
 
     async fn run(
         &self,
+        forward_id: &str,
         listeners: Vec<(u16, TcpListener)>,
         attach: oneshot::Receiver<Control>,
         timeout: Duration,
@@ -118,11 +136,11 @@ impl Forwards {
         tokio::pin!(deadline);
         let (tx, mut rx) = mpsc::channel(64);
         let mut accepts = JoinSet::new();
-        for (port, l) in listeners {
+        for (port, listener) in listeners {
             let tx = tx.clone();
             accepts.spawn(async move {
-                while let Ok((s, _)) = l.accept().await {
-                    if tx.send((port, s)).await.is_err() {
+                while let Ok((browser, _)) = listener.accept().await {
+                    if tx.send((port, browser)).await.is_err() {
                         break;
                     }
                 }
@@ -139,20 +157,22 @@ impl Forwards {
                     Ok(c) => break c,
                     Err(_) => return,
                 },
-                Some(x) = rx.recv() => queued.push(x),
+                Some(accepted) = rx.recv() => queued.push(accepted),
             }
         };
         let mut dialed = vec![];
-        for (port, s) in queued {
-            if self.dial(&mut control, port, s, &mut dialed).await.is_err() {
+        for (port, browser) in queued {
+            let dial = self.dial(&mut control, forward_id, port, browser, &mut dialed);
+            if dial.await.is_err() {
                 return self.forget(&dialed);
             }
         }
         loop {
             tokio::select! {
                 _ = &mut deadline => break,
-                Some((port, s)) = rx.recv() => {
-                    if self.dial(&mut control, port, s, &mut dialed).await.is_err() {
+                Some((port, browser)) = rx.recv() => {
+                    let dial = self.dial(&mut control, forward_id, port, browser, &mut dialed);
+                    if dial.await.is_err() {
                         break;
                     }
                 }
@@ -167,12 +187,19 @@ impl Forwards {
     async fn dial(
         &self,
         control: &mut Control,
+        forward_id: &str,
         port: u16,
-        s: TcpStream,
+        browser: TcpStream,
         dialed: &mut Vec<u64>,
     ) -> crate::protocol::Result<()> {
-        let conn_id = self.next_conn.fetch_add(1, Ordering::Relaxed);
-        self.pending.lock().unwrap().insert(conn_id, s);
+        let conn_id = u64::from_ne_bytes(random_bytes::<8>()?);
+        self.pending.lock().unwrap().insert(
+            conn_id,
+            Pending {
+                forward_id: forward_id.into(),
+                browser,
+            },
+        );
         dialed.push(conn_id);
         control.send(&Msg::Dial { conn_id, port }).await
     }
@@ -186,21 +213,13 @@ impl Forwards {
     }
 }
 
-/// Splices a keeper's data connection to the browser connection `browser`.
-pub(super) async fn splice(data: Control, mut browser: TcpStream) -> io::Result<()> {
-    let (mut data, extra) = data.into_raw();
-    browser.write_all(&extra).await?;
-    tokio::io::copy_bidirectional(&mut data, &mut browser).await?;
-    Ok(())
-}
-
 /// Binds `port` on every address in `loopback`. Addresses the host lacks are
 /// skipped; any other failure is returned.
 fn bind_port(port: u16, loopback: &[IpAddr]) -> io::Result<Vec<TcpListener>> {
     let mut out = vec![];
     for &ip in loopback {
         let std = match std::net::TcpListener::bind(SocketAddr::new(ip, port)) {
-            Ok(l) => l,
+            Ok(listener) => listener,
             Err(e) if e.kind() == io::ErrorKind::AddrNotAvailable => continue,
             Err(e) => return Err(e),
         };
@@ -210,9 +229,9 @@ fn bind_port(port: u16, loopback: &[IpAddr]) -> io::Result<Vec<TcpListener>> {
     Ok(out)
 }
 
-/// 32 hex characters from the OS random source.
-fn random_id() -> io::Result<String> {
-    let mut bytes = [0u8; 16];
+/// `N` bytes from the OS random source.
+fn random_bytes<const N: usize>() -> io::Result<[u8; N]> {
+    let mut bytes = [0u8; N];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(bytes)
 }

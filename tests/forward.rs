@@ -1,10 +1,12 @@
 //! Callback forwards: Daemon side with a fake keeper.
 
+mod common;
+
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use common::TmpDir;
 use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
 use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET};
 use rowser::detect::Procfs;
@@ -14,26 +16,6 @@ use std::process::ExitCode;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use url::Url;
-
-/// A short temp dir under /tmp (Unix socket paths are limited to ~104 bytes).
-struct TmpDir(PathBuf);
-
-impl TmpDir {
-    fn new() -> TmpDir {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let n = N.fetch_add(1, Ordering::SeqCst);
-        let p = PathBuf::from(format!("/tmp/rw.f{}.{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        TmpDir(p)
-    }
-}
-
-impl Drop for TmpDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 const V6: IpAddr = IpAddr::V6(Ipv6Addr::LOCALHOST);
 
@@ -51,7 +33,7 @@ struct Harness {
 
 impl Harness {
     async fn start(config: DaemonConfig) -> Harness {
-        let dir = TmpDir::new();
+        let dir = TmpDir::new("f");
         let (direct, relay) = bind_sockets(&dir.0.join("run")).unwrap();
         let opener = RecordingOpener::default();
         let notifier = RecordingNotifier::default();
@@ -114,19 +96,20 @@ async fn a_browser_connection_waits_for_the_keeper_and_is_spliced() {
 
     let mut control = h.connect().await;
     control
-        .send(&Msg::AttachForward { forward_id: id })
+        .send(&Msg::AttachForward {
+            forward_id: id.clone(),
+        })
         .await
         .unwrap();
-    let conn_id = match control.recv().await.unwrap() {
-        Some(Msg::Dial { conn_id, port: p }) => {
-            assert_eq!(p, port);
-            conn_id
-        }
-        other => panic!("unexpected {other:?}"),
-    };
+    let conn_id = expect_dial(&mut control, port).await;
 
     let mut data = h.connect().await;
-    data.send(&Msg::DataConn { conn_id }).await.unwrap();
+    data.send(&Msg::DataConn {
+        forward_id: id,
+        conn_id,
+    })
+    .await
+    .unwrap();
     let (mut data, extra) = data.into_raw();
     assert!(extra.is_empty());
     let mut buf = [0u8; 7];
@@ -136,6 +119,72 @@ async fn a_browser_connection_waits_for_the_keeper_and_is_spliced() {
     let mut buf = [0u8; 6];
     browser.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"200 OK");
+}
+
+async fn expect_dial(control: &mut Conn<UnixStream>, port: u16) -> u64 {
+    match control.recv().await.unwrap() {
+        Some(Msg::Dial { conn_id, port: p }) => {
+            assert_eq!(p, port);
+            conn_id
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+/// Sends a `DataConn` and expects the Daemon to refuse it.
+async fn data_conn_refused(h: &Harness, forward_id: &str, conn_id: u64) {
+    let mut data = h.connect().await;
+    data.send(&Msg::DataConn {
+        forward_id: forward_id.into(),
+        conn_id,
+    })
+    .await
+    .unwrap();
+    match data.recv().await.unwrap() {
+        Some(Msg::OpenResult { error: Some(_), .. }) => {}
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_data_conn_of_another_forward_or_a_wrong_id_gets_no_connection() {
+    let h = Harness::start(v6_config()).await;
+    let port = free_port().await;
+    let other_port = free_port().await;
+    let id = h.open(vec![port]).await.0.unwrap();
+    let other = h.open(vec![other_port]).await.0.unwrap();
+    let mut control = h.connect().await;
+    control
+        .send(&Msg::AttachForward {
+            forward_id: id.clone(),
+        })
+        .await
+        .unwrap();
+    let mut browser = TcpStream::connect(SocketAddr::new(V6, port)).await.unwrap();
+    let conn_id = expect_dial(&mut control, port).await;
+    let mut browser2 = TcpStream::connect(SocketAddr::new(V6, port)).await.unwrap();
+    let conn_id2 = expect_dial(&mut control, port).await;
+    assert_ne!(conn_id2, conn_id.wrapping_add(1), "ids are not sequential");
+
+    data_conn_refused(&h, &id, conn_id ^ 1).await;
+    data_conn_refused(&h, &other, conn_id).await;
+    data_conn_refused(&h, "", conn_id).await;
+
+    // The refusals did not take the browser connections.
+    for (cid, b) in [(conn_id, &mut browser), (conn_id2, &mut browser2)] {
+        let mut data = h.connect().await;
+        data.send(&Msg::DataConn {
+            forward_id: id.clone(),
+            conn_id: cid,
+        })
+        .await
+        .unwrap();
+        let (mut data, _) = data.into_raw();
+        b.write_all(b"hi").await.unwrap();
+        let mut buf = [0u8; 2];
+        data.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hi");
+    }
 }
 
 #[tokio::test]
@@ -208,6 +257,9 @@ async fn the_forward_closes_when_the_keeper_disconnects() {
     until_closed(port).await;
 }
 
+// A real 200 ms timeout, not `start_paused`: the Daemon and this test talk
+// over real sockets, and a paused clock jumps ahead while the runtime waits
+// on socket I/O, so the timeout could fire before the keeper attaches.
 #[tokio::test]
 async fn the_forward_closes_after_the_timeout() {
     let h = Harness::start(DaemonConfig {
