@@ -13,3 +13,5 @@ Read before changing code:
 Checks: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`.
 
 Commit messages: do not add `Co-Authored-By` lines.
+
+Ticket loop: see docs/agents/ticket-loop.md
