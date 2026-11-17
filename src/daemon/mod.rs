@@ -1,5 +1,6 @@
 //! The Daemon: serves Open requests on the direct and relay sockets.
 
+mod confirm;
 mod limit;
 mod notifier;
 mod opener;
@@ -49,46 +50,9 @@ impl Default for DaemonConfig {
             rate_window: Duration::from_secs(10),
             confirm_hosts: vec![],
             confirm_unverified: false,
-            confirm_timeout: Duration::from_secs(60),
+            confirm_timeout: confirm::CONFIRM_TIMEOUT,
         }
     }
-}
-
-impl DaemonConfig {
-    /// Whether an Open request from `host` must wait for confirmation.
-    fn needs_confirm(&self, host: &NoticeHost) -> bool {
-        let name = match host {
-            NoticeHost::Alias(alias) => alias,
-            NoticeHost::Reported(name) if self.confirm_unverified => name,
-            NoticeHost::Reported(_) => return false,
-        };
-        self.confirm_hosts.iter().any(|p| glob_match(p, name))
-    }
-}
-
-/// Matches `name` against a glob `pattern` with `*` (any run) and `?` (one
-/// character), ignoring ASCII case.
-fn glob_match(pattern: &str, name: &str) -> bool {
-    let p: Vec<char> = pattern.chars().map(|c| c.to_ascii_lowercase()).collect();
-    let n: Vec<char> = name.chars().map(|c| c.to_ascii_lowercase()).collect();
-    let (mut pi, mut ni) = (0, 0);
-    let mut star: Option<(usize, usize)> = None;
-    while ni < n.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
-            pi += 1;
-            ni += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some((pi, ni));
-            pi += 1;
-        } else if let Some((sp, sn)) = star {
-            pi = sp + 1;
-            ni = sn + 1;
-            star = Some((sp, sn + 1));
-        } else {
-            return false;
-        }
-    }
-    p[pi..].iter().all(|&c| c == '*')
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -143,6 +107,10 @@ fn open_ok() -> Msg {
         error: None,
     }
 }
+
+/// The error when `Notifier::confirm` gives `false`.
+pub const NOT_APPROVED: &str =
+    "the URL was not approved: the user denied it, or the confirmation could not be shown (see the daemon log)";
 
 /// A failed `OpenResult` carrying `text`.
 fn open_error(text: impl Into<String>) -> Msg {
@@ -253,7 +221,10 @@ impl Inner {
         let timeout = self.config.confirm_timeout;
         match tokio::time::timeout(timeout, answer).await {
             Ok(Ok(true)) => Ok(()),
-            Ok(Ok(false)) => Err(open_error("the user denied the URL")),
+            // `confirm` gives only a bool, so a denial and a confirmation
+            // that could not be shown look the same here; the Notifier logs
+            // the second.
+            Ok(Ok(false)) => Err(open_error(NOT_APPROVED)),
             Ok(Err(e)) => Err(open_error(format!("confirmation failed: {e}"))),
             Err(_) => Err(open_error(format!(
                 "no confirmation within {} seconds; the URL was not opened",

@@ -77,7 +77,7 @@ pub trait Notifier: Send + Sync + 'static {
 }
 
 /// Seconds the confirmation notification or dialog stays up.
-const CONFIRM_SECS: u32 = 60;
+const CONFIRM_SECS: u64 = super::confirm::CONFIRM_TIMEOUT.as_secs();
 
 /// Desktop notifications through notify-rust.
 #[derive(Debug, Clone, Default)]
@@ -112,13 +112,16 @@ fn confirm_desktop(notice: &Notice) -> Result<bool, String> {
         .summary("rowser: open this URL?")
         .body(&notice.body())
         .action("open", "Open")
-        .action("default", "Open")
         .action("deny", "Deny")
-        .timeout(notify_rust::Timeout::Milliseconds(CONFIRM_SECS * 1000))
+        .timeout(notify_rust::Timeout::Milliseconds(
+            (CONFIRM_SECS * 1000) as u32,
+        ))
         .show()
         .map_err(|e| e.to_string())?;
+    // Only the "Open" button approves. A click on the notification body (the
+    // "default" action on many servers), a close or "Deny" all deny.
     let mut approved = false;
-    handle.wait_for_action(|action| approved = matches!(action, "open" | "default"));
+    handle.wait_for_action(|action| approved = action == "open");
     Ok(approved)
 }
 
