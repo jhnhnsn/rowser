@@ -149,6 +149,14 @@ pub fn run(command: Command) -> ExitCode {
             confirm_timeout,
             loopback,
         }),
+        Command::Daemon {
+            action: Some(DaemonAction::Install),
+            ..
+        } => crate::service::install(),
+        Command::Daemon {
+            action: Some(DaemonAction::Uninstall),
+            ..
+        } => crate::service::uninstall(),
         Command::Open { url } => crate::shim::open_main(&url),
         Command::Ssh { args } => ssh(args),
         Command::Forward { port } => crate::shim::forward_main(port),

@@ -7,5 +7,6 @@ pub mod detect;
 pub mod discovery;
 pub mod platform;
 pub mod protocol;
+pub mod service;
 pub mod shim;
 pub mod wrapper;

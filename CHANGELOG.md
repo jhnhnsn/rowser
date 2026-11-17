@@ -8,6 +8,12 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser daemon install` runs the daemon at login: it writes a systemd user unit
+  (`~/.config/systemd/user/rowser.service`) on Linux or a LaunchAgent
+  (`~/Library/LaunchAgents/io.github.jhnhnsn.rowser.plist`) on macOS for the current `rowser`
+  binary, and starts it. Running it again rewrites the file and restarts the daemon.
+  `rowser daemon uninstall` stops and removes it, and only prints a message when nothing is
+  installed. ([#10](https://github.com/jhnhnsn/rowser/issues/10))
 - OAuth `localhost` callbacks work: when `rowser open` finds callback ports, the daemon listens
   on the same ports on local loopback and a detached keeper carries each browser connection
   back to the remote port. `rowser open` still exits at once. The forward ends when the remote
