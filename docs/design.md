@@ -23,10 +23,10 @@ src/
     limit.rs         internal: per-connection rate limit
   shim/              `rowser open`, `rowser forward`, `__keeper`
   wrapper/           `rowser ssh`: destination resolution, relay with Host stamp
-  service/           `rowser daemon install|uninstall` (systemd unit, launchd plist)
+  service.rs         `rowser daemon install|uninstall` (systemd unit, launchd plist, their paths)
   remote_install/    `rowser remote install <host>`
   doctor.rs          `rowser doctor`
-  platform.rs        default paths per OS (runtime dir, service file locations)
+  platform.rs        default paths per OS (runtime dir)
 tests/               level-2 integration tests and the level-3 sshd e2e test
 ```
 

@@ -42,7 +42,8 @@ rowser is a CLI; test it from the terminal.
   `ssh` script first on `PATH` and set `XDG_RUNTIME_DIR` to a short temp dir to test it.
 - `rowser daemon install|uninstall` writes the unit under `$XDG_CONFIG_HOME/systemd/user/` and
   runs the `systemctl` on `PATH`: set `XDG_CONFIG_HOME` to a temp dir and put a fake `systemctl`
-  script first on `PATH` that records its arguments. Never touch the real user units.
+  script first on `PATH` that records its arguments. Never touch the real user units. Check that
+  daemon flags given before `install` appear in the unit's `ExecStart`.
 - Unix socket paths are limited to about 104–108 bytes: put test sockets in a short temp dir
   (e.g. `/tmp/rw.XXXX`), never under a long scratchpad or worktree path; remove it afterwards.
 - Never open the real browser or show real desktop notifications in a test.

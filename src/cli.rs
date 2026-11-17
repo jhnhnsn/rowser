@@ -149,10 +149,16 @@ pub fn run(command: Command) -> ExitCode {
             confirm_timeout,
             loopback,
         }),
-        Command::Daemon {
+        cmd @ Command::Daemon {
             action: Some(DaemonAction::Install),
             ..
-        } => crate::service::install(),
+        } => match install_args(&cmd) {
+            Ok(args) => crate::service::install(&args),
+            Err(e) => {
+                eprintln!("rowser daemon install: {e}");
+                ExitCode::from(2)
+            }
+        },
         Command::Daemon {
             action: Some(DaemonAction::Uninstall),
             ..
@@ -170,6 +176,53 @@ pub fn run(command: Command) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// The daemon flags of `rowser daemon <flags> install`, as `rowser daemon`
+/// arguments for the service, so the installed daemon runs with them
+/// (no config file in v1). Refuses the hidden test flags. A relative
+/// `--runtime-dir` becomes absolute, as the service does not run in this
+/// directory.
+pub fn install_args(cmd: &Command) -> Result<Vec<String>, String> {
+    let Command::Daemon {
+        runtime_dir,
+        open_command,
+        confirm_hosts,
+        confirm_unverified,
+        test_confirm,
+        confirm_timeout,
+        loopback,
+        ..
+    } = cmd
+    else {
+        return Ok(Vec::new());
+    };
+    if test_confirm.is_some() || confirm_timeout.is_some() || !loopback.is_empty() {
+        return Err(
+            "test flags (--test-confirm, --confirm-timeout, --loopback) \
+                    cannot go into the installed service"
+                .into(),
+        );
+    }
+    let mut args = Vec::new();
+    if let Some(dir) = runtime_dir {
+        let dir = std::path::absolute(dir)
+            .map_err(|e| format!("cannot resolve --runtime-dir {}: {e}", dir.display()))?;
+        let dir = dir
+            .to_str()
+            .ok_or_else(|| format!("--runtime-dir {} is not UTF-8", dir.display()))?;
+        args.extend(["--runtime-dir".to_string(), dir.to_string()]);
+    }
+    if let Some(open) = open_command {
+        args.extend(["--open-command".to_string(), open.clone()]);
+    }
+    for host in confirm_hosts {
+        args.extend(["--confirm-hosts".to_string(), host.clone()]);
+    }
+    if *confirm_unverified {
+        args.push("--confirm-unverified".to_string());
+    }
+    Ok(args)
 }
 
 /// `rowser ssh <args…>`: finds the Daemon's runtime directory and runs the Wrapper.
@@ -206,4 +259,75 @@ where
         });
     }
     Cli::try_parse_from(args).map(|cli| cli.command)
+}
+
+#[cfg(test)]
+mod install_args_tests {
+    use super::*;
+
+    fn args_of(argv: &[&str]) -> Result<Vec<String>, String> {
+        install_args(&parse_from(argv).unwrap())
+    }
+
+    #[test]
+    fn install_carries_the_daemon_flags() {
+        let args = args_of(&[
+            "rowser",
+            "daemon",
+            "--runtime-dir",
+            "/run/r",
+            "--open-command",
+            "firefox {url}",
+            "--confirm-hosts",
+            "a*",
+            "--confirm-hosts",
+            "b",
+            "--confirm-unverified",
+            "install",
+        ])
+        .unwrap();
+        assert_eq!(
+            args,
+            [
+                "--runtime-dir",
+                "/run/r",
+                "--open-command",
+                "firefox {url}",
+                "--confirm-hosts",
+                "a*",
+                "--confirm-hosts",
+                "b",
+                "--confirm-unverified",
+            ]
+        );
+    }
+
+    #[test]
+    fn install_with_no_flags_carries_none() {
+        assert!(args_of(&["rowser", "daemon", "install"])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn install_makes_a_relative_runtime_dir_absolute() {
+        let args = args_of(&["rowser", "daemon", "--runtime-dir", "rt", "install"]).unwrap();
+        let want = std::env::current_dir().unwrap().join("rt");
+        assert_eq!(args, ["--runtime-dir", want.to_str().unwrap()]);
+    }
+
+    #[test]
+    fn install_refuses_each_test_flag() {
+        for flag in [
+            &["--test-confirm", "approve"][..],
+            &["--confirm-timeout", "5"],
+            &["--loopback", "127.0.0.1"],
+        ] {
+            let mut argv = vec!["rowser", "daemon"];
+            argv.extend(flag);
+            argv.push("install");
+            let err = args_of(&argv).unwrap_err();
+            assert!(err.contains("test flags"), "{flag:?}: {err}");
+        }
+    }
 }
