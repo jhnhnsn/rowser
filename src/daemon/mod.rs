@@ -31,6 +31,15 @@ pub struct DaemonConfig {
     /// Most Open requests one connection may make in `rate_window`.
     pub rate_max: usize,
     pub rate_window: Duration,
+    /// `--confirm-hosts` glob patterns (`*`, `?`; ASCII case is ignored).
+    /// Open requests whose Host alias matches wait for `Notifier::confirm`.
+    pub confirm_hosts: Vec<String>,
+    /// `--confirm-unverified`: on the direct socket, also match the patterns
+    /// against the Reported host name. Without it, requests on the direct
+    /// socket never wait for confirmation.
+    pub confirm_unverified: bool,
+    /// How long a confirmation may take before the request is refused.
+    pub confirm_timeout: Duration,
 }
 
 impl Default for DaemonConfig {
@@ -38,8 +47,48 @@ impl Default for DaemonConfig {
         DaemonConfig {
             rate_max: 5,
             rate_window: Duration::from_secs(10),
+            confirm_hosts: vec![],
+            confirm_unverified: false,
+            confirm_timeout: Duration::from_secs(60),
         }
     }
+}
+
+impl DaemonConfig {
+    /// Whether an Open request from `host` must wait for confirmation.
+    fn needs_confirm(&self, host: &NoticeHost) -> bool {
+        let name = match host {
+            NoticeHost::Alias(alias) => alias,
+            NoticeHost::Reported(name) if self.confirm_unverified => name,
+            NoticeHost::Reported(_) => return false,
+        };
+        self.confirm_hosts.iter().any(|p| glob_match(p, name))
+    }
+}
+
+/// Matches `name` against a glob `pattern` with `*` (any run) and `?` (one
+/// character), ignoring ASCII case.
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().map(|c| c.to_ascii_lowercase()).collect();
+    let n: Vec<char> = name.chars().map(|c| c.to_ascii_lowercase()).collect();
+    let (mut pi, mut ni) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ni));
+            pi += 1;
+        } else if let Some((sp, sn)) = star {
+            pi = sp + 1;
+            ni = sn + 1;
+            star = Some((sp, sn + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -167,17 +216,49 @@ impl Inner {
                 url.scheme()
             ));
         }
+        let confirm = self.config.needs_confirm(&host);
+        if confirm {
+            if let Err(error) = self
+                .confirm(Notice {
+                    url: url.clone(),
+                    host: host.clone(),
+                })
+                .await
+            {
+                return error;
+            }
+        }
         let opener = self.opener.clone();
         let notifier = self.notifier.clone();
         let result = tokio::task::spawn_blocking(move || {
             opener.open(&url)?;
-            notifier.notify(Notice { url, host });
+            // The user saw the confirmation; a second notice adds nothing.
+            if !confirm {
+                notifier.notify(Notice { url, host });
+            }
             Ok::<_, io::Error>(())
         })
         .await;
         match result.map_err(io::Error::other).and_then(|r| r) {
             Ok(()) => open_ok(),
             Err(e) => open_error(format!("could not open the URL: {e}")),
+        }
+    }
+
+    /// Waits for the user's answer. A denial, a timeout or a failed
+    /// Notifier gives the error reply for the Shim.
+    async fn confirm(&self, notice: Notice) -> Result<(), Msg> {
+        let notifier = self.notifier.clone();
+        let answer = tokio::task::spawn_blocking(move || notifier.confirm(notice));
+        let timeout = self.config.confirm_timeout;
+        match tokio::time::timeout(timeout, answer).await {
+            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(false)) => Err(open_error("the user denied the URL")),
+            Ok(Err(e)) => Err(open_error(format!("confirmation failed: {e}"))),
+            Err(_) => Err(open_error(format!(
+                "no confirmation within {} seconds; the URL was not opened",
+                timeout.as_secs()
+            ))),
         }
     }
 }
@@ -243,8 +324,8 @@ fn bind(path: &Path) -> io::Result<UnixListener> {
 }
 
 /// `rowser daemon`: runs the Daemon in the foreground.
-pub fn run(runtime_dir: Option<PathBuf>, open_command: Option<String>) -> ExitCode {
-    match run_inner(runtime_dir, open_command) {
+pub fn run(args: RunArgs) -> ExitCode {
+    match run_inner(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("rowser daemon: {e}");
@@ -253,18 +334,44 @@ pub fn run(runtime_dir: Option<PathBuf>, open_command: Option<String>) -> ExitCo
     }
 }
 
-fn run_inner(runtime_dir: Option<PathBuf>, open_command: Option<String>) -> Result<(), String> {
-    let dir = match runtime_dir {
+/// The `rowser daemon` flags.
+#[derive(Debug, Default)]
+pub struct RunArgs {
+    pub runtime_dir: Option<PathBuf>,
+    pub open_command: Option<String>,
+    pub confirm_hosts: Vec<String>,
+    pub confirm_unverified: bool,
+    /// Test hook: a scripted Notifier answer instead of the desktop.
+    pub test_confirm: Option<testing::Answer>,
+    /// Test hook: confirmation timeout in seconds.
+    pub confirm_timeout: Option<u64>,
+}
+
+fn run_inner(args: RunArgs) -> Result<(), String> {
+    let dir = match args.runtime_dir {
         Some(d) => d,
         None => crate::platform::runtime_dir()?,
     };
-    let template = open_command.unwrap_or_else(|| crate::platform::default_open_command().into());
+    let template = args
+        .open_command
+        .unwrap_or_else(|| crate::platform::default_open_command().into());
     let opener = CommandOpener::new(&template)?;
+    let mut config = DaemonConfig {
+        confirm_hosts: args.confirm_hosts,
+        confirm_unverified: args.confirm_unverified,
+        ..DaemonConfig::default()
+    };
+    if let Some(secs) = args.confirm_timeout {
+        config.confirm_timeout = Duration::from_secs(secs);
+    }
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
         let (direct, relay) = bind_sockets(&dir).map_err(|e| e.to_string())?;
         eprintln!("rowser daemon: listening in {}", dir.display());
-        let daemon = Daemon::new(DaemonConfig::default(), opener, DesktopNotifier);
+        let daemon = match args.test_confirm {
+            Some(answer) => Daemon::new(config, opener, testing::ScriptedNotifier::new(answer)),
+            None => Daemon::new(config, opener, DesktopNotifier),
+        };
         daemon.serve(direct, relay).await.map_err(|e| e.to_string())
     })
 }

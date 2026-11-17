@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
+use rowser::daemon::testing::{Answer, RecordingNotifier, RecordingOpener, ScriptedNotifier};
 use rowser::daemon::{
     bind_sockets, CommandOpener, Daemon, DaemonConfig, NoticeHost, Opener, DIRECT_SOCKET,
     RELAY_SOCKET,
@@ -250,6 +250,104 @@ async fn notice_body_strips_control_characters_and_escapes_markup() {
         body,
         "From devbox&lt;b&gt;trusted&lt;/b&gt; &lt;a href=&quot;x&quot;&gt; (unverified): \
          https://example.com/?a=1&amp;b=2"
+    );
+}
+
+/// A Daemon with `--confirm-hosts` patterns and a scripted Notifier answer.
+async fn confirm_harness(
+    patterns: &[&str],
+    unverified: bool,
+    answer: Answer,
+) -> (Harness, ScriptedNotifier) {
+    let dir = TmpDir::new();
+    let (direct, relay) = bind_sockets(&dir.0.join("run")).unwrap();
+    let opener = RecordingOpener::default();
+    let notifier = ScriptedNotifier::new(answer);
+    let config = DaemonConfig {
+        confirm_hosts: patterns.iter().map(|p| p.to_string()).collect(),
+        confirm_unverified: unverified,
+        confirm_timeout: Duration::from_secs(1),
+        ..DaemonConfig::default()
+    };
+    let daemon = Daemon::new(config, opener.clone(), notifier.clone());
+    tokio::spawn(daemon.serve(direct, relay));
+    let h = Harness {
+        dir,
+        opener,
+        notifier: RecordingNotifier::default(),
+    };
+    (h, notifier)
+}
+
+#[tokio::test]
+async fn confirmed_host_opens_after_the_user_approves() {
+    let (h, n) = confirm_harness(&["*.prod"], false, Answer::Approve).await;
+    let mut conn = h.connect_relay("db.prod").await;
+    let reply = request(&mut conn, open("https://example.com/ok")).await;
+    assert_eq!(error_of(&reply), None);
+    assert_eq!(h.opened(), ["https://example.com/ok"]);
+    let asked = n.confirms();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].host, NoticeHost::Alias("db.prod".into()));
+}
+
+#[tokio::test]
+async fn confirmed_host_is_not_opened_when_the_user_denies() {
+    let (h, n) = confirm_harness(&["db.prod"], false, Answer::Deny).await;
+    let mut conn = h.connect_relay("DB.prod").await;
+    let reply = request(&mut conn, open("https://example.com/no")).await;
+    assert_eq!(error_of(&reply), Some("the user denied the URL"));
+    assert!(h.opened().is_empty());
+    assert_eq!(n.confirms().len(), 1);
+}
+
+#[tokio::test]
+async fn confirmed_host_is_not_opened_after_the_timeout() {
+    let (h, n) = confirm_harness(&["db*"], false, Answer::Hang).await;
+    let mut conn = h.connect_relay("db1").await;
+    let reply = request(&mut conn, open("https://example.com/late")).await;
+    assert_eq!(
+        error_of(&reply),
+        Some("no confirmation within 1 seconds; the URL was not opened")
+    );
+    // A late approval does not open the URL.
+    n.release(true);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(h.opened().is_empty());
+}
+
+#[tokio::test]
+async fn non_matching_host_opens_immediately() {
+    let (h, n) = confirm_harness(&["*.prod"], false, Answer::Deny).await;
+    let mut conn = h.connect_relay("devbox").await;
+    let reply = request(&mut conn, open("https://example.com/now")).await;
+    assert_eq!(error_of(&reply), None);
+    assert_eq!(h.opened(), ["https://example.com/now"]);
+    assert!(n.confirms().is_empty());
+    assert_eq!(n.notices().len(), 1);
+}
+
+#[tokio::test]
+async fn direct_socket_ignores_confirm_hosts_without_confirm_unverified() {
+    let (h, n) = confirm_harness(&["devbox.*"], false, Answer::Deny).await;
+    let mut conn = h.connect(DIRECT_SOCKET).await;
+    let reply = request(&mut conn, open("https://example.com/d")).await;
+    assert_eq!(error_of(&reply), None);
+    assert_eq!(h.opened(), ["https://example.com/d"]);
+    assert!(n.confirms().is_empty());
+}
+
+#[tokio::test]
+async fn confirm_unverified_matches_the_reported_host_name() {
+    let (h, n) = confirm_harness(&["devbox.*"], true, Answer::Deny).await;
+    let mut conn = h.connect(DIRECT_SOCKET).await;
+    let reply = request(&mut conn, open("https://example.com/d")).await;
+    assert_eq!(error_of(&reply), Some("the user denied the URL"));
+    assert!(h.opened().is_empty());
+    let asked = n.confirms();
+    assert_eq!(
+        asked[0].host,
+        NoticeHost::Reported("devbox.internal".into())
     );
 }
 

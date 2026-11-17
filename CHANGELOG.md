@@ -8,6 +8,12 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser daemon --confirm-hosts <pattern>` (glob, may repeat) makes URLs from matching hosts
+  wait until you click "Open" in the notification (a dialog on macOS). Deny, or no answer within
+  60 seconds, refuses the URL and `rowser open` exits 1 with the reason. Patterns match the Host
+  alias from `rowser ssh`; add `--confirm-unverified` to also match the untrusted host name on
+  the direct socket (`ssh_config` setups).
+  ([#9](https://github.com/jhnhnsn/rowser/issues/9))
 - `rowser ssh <ssh args…>` runs `ssh` with a per-session Tunnel to the daemon, passing every
   argument through unchanged, and stamps each URL with the Host alias you typed (from `ssh -G`,
   else the ssh arguments). It passes ssh's exit code through, removes its socket on exit, and

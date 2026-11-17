@@ -29,6 +29,8 @@ rowser is a CLI; test it from the terminal.
 - Test hooks: `--runtime-dir <tmp>`, `ROWSER_SOCKET`, `--open-command` writing URLs to a file,
   the test Opener and Notifier adapters, `ROWSER_E2E=1` with a throwaway unprivileged `sshd` on
   localhost (`/usr/bin/sshd` is installed).
+- Confirmations: hidden daemon flags `--test-confirm approve|deny|hang` (scripted Notifier, no
+  desktop) and `--confirm-timeout <secs>` (default 60).
 - `rowser ssh` uses the `ssh` on `PATH` and the Daemon in `$XDG_RUNTIME_DIR/rowser/`: put a fake
   `ssh` script first on `PATH` and set `XDG_RUNTIME_DIR` to a short temp dir to test it.
 - Unix socket paths are limited to about 104–108 bytes: put test sockets in a short temp dir

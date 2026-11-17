@@ -29,6 +29,20 @@ pub enum Command {
         /// Command that opens a URL; `{url}` is replaced with the URL as one argument.
         #[arg(long)]
         open_command: Option<String>,
+        /// Hosts (glob, may repeat) whose URLs wait until you click "Open".
+        /// Matches the Host alias from `rowser ssh`.
+        #[arg(long = "confirm-hosts", value_name = "PATTERN")]
+        confirm_hosts: Vec<String>,
+        /// Also match --confirm-hosts against the untrusted host name that
+        /// the remote host reports on the direct socket (ssh_config setups).
+        #[arg(long)]
+        confirm_unverified: bool,
+        /// Test hook: answer every confirmation with approve, deny or hang.
+        #[arg(long, hide = true)]
+        test_confirm: Option<crate::daemon::testing::Answer>,
+        /// Test hook: confirmation timeout in seconds (default 60).
+        #[arg(long, hide = true)]
+        confirm_timeout: Option<u64>,
     },
     /// Run ssh with a Tunnel to the Daemon.
     Ssh {
@@ -99,7 +113,18 @@ pub fn run(command: Command) -> ExitCode {
             action: None,
             runtime_dir,
             open_command,
-        } => crate::daemon::run(runtime_dir, open_command),
+            confirm_hosts,
+            confirm_unverified,
+            test_confirm,
+            confirm_timeout,
+        } => crate::daemon::run(crate::daemon::RunArgs {
+            runtime_dir,
+            open_command,
+            confirm_hosts,
+            confirm_unverified,
+            test_confirm,
+            confirm_timeout,
+        }),
         Command::Open { url } => crate::shim::open_main(&url),
         Command::Ssh { args } => ssh(args),
         other => {
