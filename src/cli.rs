@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use url::Url;
 
 /// Names under which rowser acts as `rowser open` (installed as symlinks).
-const BROWSER_NAMES: [&str; 3] = ["xdg-open", "sensible-browser", "www-browser"];
+pub const BROWSER_NAMES: [&str; 3] = ["xdg-open", "sensible-browser", "www-browser"];
 
 #[derive(Debug, Parser)]
 #[command(name = "rowser", version, about)]
@@ -166,6 +166,7 @@ pub fn run(command: Command) -> ExitCode {
         Command::Open { url } => crate::shim::open_main(&url),
         Command::Ssh { args } => ssh(args),
         Command::Forward { port } => crate::shim::forward_main(port),
+        Command::Doctor => crate::doctor::doctor_main(),
         Command::Keeper {
             socket,
             forward_id,

@@ -8,6 +8,10 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser doctor` on the remote host checks that `~/.local/bin` comes before `/usr/bin` on
+  `PATH`, that the browser symlinks and `BROWSER` resolve to rowser, and that a tunnel answers
+  a ping; it shows the daemon's protocol version and any version skew, and exits 1 when a
+  check fails. ([#11](https://github.com/jhnhnsn/rowser/issues/11))
 - `rowser daemon install` runs the daemon at login: it writes a systemd user unit
   (`~/.config/systemd/user/rowser.service`) on Linux or a LaunchAgent
   (`~/Library/LaunchAgents/io.github.jhnhnsn.rowser.plist`) on macOS for the current `rowser`
