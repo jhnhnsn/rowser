@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use url::{Host, Url};
 
@@ -26,7 +26,8 @@ impl Procfs {
         Self { root: root.into() }
     }
 
-    pub fn root(&self) -> &Path {
+    #[cfg(target_os = "linux")]
+    fn root(&self) -> &std::path::Path {
         &self.root
     }
 }

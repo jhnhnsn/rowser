@@ -88,13 +88,32 @@ fn fixture() -> Procfs {
 #[cfg(target_os = "linux")]
 #[test]
 fn proc_walk_finds_loopback_listeners_of_caller_and_ancestors() {
-    // Fixture: 100 -> 50 -> 1; 200 is unrelated.
-    // 100 listens on 127.0.0.1:8085, 0.0.0.0:8086 (not loopback), 127.0.0.1:80 (below range).
+    // Fixture: 100 -> 50 -> 1 -> 0; 200 is unrelated.
+    // 100 listens on 127.0.0.1:8085, 0.0.0.0:8086 (not loopback), 127.0.0.1:80 (below range),
+    // 127.0.0.2:8089, [::ffff:127.0.0.2]:8090 and [::ffff:127.0.0.1]:8091.
     // 50 listens on [::1]:9000 and has an established 127.0.0.1:7000 (not LISTEN).
     // 200 listens on 127.0.0.1:8087. 1 listens on 127.0.0.1:8088.
     let url = Url::parse("https://example.com/").unwrap();
     let got = callback_ports(&url, &fixture(), 100);
-    assert_eq!(got, BTreeSet::from([8085, 9000]));
+    assert_eq!(got, BTreeSet::from([8085, 8088, 8091, 9000]));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn proc_walk_ignores_loopback_addresses_other_than_127_0_0_1() {
+    let url = Url::parse("https://example.com/").unwrap();
+    let got = callback_ports(&url, &fixture(), 100);
+    assert!(!got.contains(&8089), "127.0.0.2 counted: {got:?}");
+    assert!(!got.contains(&8090), "::ffff:127.0.0.2 counted: {got:?}");
+    assert!(got.contains(&8091), "::ffff:127.0.0.1 missed: {got:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn proc_walk_includes_pid_1_when_it_is_an_ancestor() {
+    let url = Url::parse("https://example.com/").unwrap();
+    assert!(callback_ports(&url, &fixture(), 100).contains(&8088));
+    assert_eq!(callback_ports(&url, &fixture(), 1), BTreeSet::from([8088]));
 }
 
 #[cfg(target_os = "linux")]
@@ -105,7 +124,7 @@ fn proc_walk_unites_with_url_ports() {
     )
     .unwrap();
     let got = callback_ports(&url, &fixture(), 100);
-    assert_eq!(got, BTreeSet::from([5555, 8085, 9000]));
+    assert_eq!(got, BTreeSet::from([5555, 8085, 8088, 8091, 9000]));
 }
 
 #[cfg(target_os = "linux")]
