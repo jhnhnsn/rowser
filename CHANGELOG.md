@@ -8,6 +8,10 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser remote install` now checks the downloaded release asset against the release's
+  `SHA256SUMS` before it installs anything. A mismatch, a missing entry or a missing
+  `SHA256SUMS` stops the install with a clear error and leaves the Remote host unchanged.
+  `--local-build` skips the check. ([#25](https://github.com/jhnhnsn/rowser/issues/25))
 - A user README: install from release binaries or `cargo install --git`, local and Remote host
   setup, `alias ssh='rowser ssh'`, the `ssh_config` alternative, tmux and jump hosts, the
   environment variables, the security model, and the known limits.
