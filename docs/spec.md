@@ -34,8 +34,9 @@ is invoked through a symlink named `xdg-open`, `sensible-browser` or `www-browse
   - Linux: `$XDG_RUNTIME_DIR/rowser/`; macOS: `~/Library/Application Support/rowser/`.
     Overridable with `ROWSER_RUNTIME_DIR` (read by `rowser daemon` and `rowser ssh`) and, for
     `rowser daemon`, with `--runtime-dir`, which wins over the variable. An empty
-    `ROWSER_RUNTIME_DIR` is ignored. A set value must be an absolute path; a relative value is
-    an error, because each process would resolve it against its own current directory.
+    `ROWSER_RUNTIME_DIR` is ignored. When it is read, a set value must be an absolute path; a
+    relative value is an error, because each process would resolve it against its own current
+    directory.
   - `rowserd.sock` — direct socket, for `ssh_config` forwards. Host stamps are rejected here;
     the host name is the shim's untrusted reported name.
   - `rowserd-relay.sock` — relay socket, for Wrappers only. The first frame after the
@@ -127,8 +128,8 @@ No config file in v1. Flags and environment variables only (`ROWSER_SOCKET`, `RO
 
 ## Stack
 
-tokio, clap, serde / serde_json, url, notify-rust, tracing, tracing-subscriber (features `env-filter`, `fmt`,
-`ansi`, `std`), sha2.
+tokio, clap, serde / serde_json, url, notify-rust, tracing, tracing-subscriber (features
+`env-filter`, `fmt`, `ansi`, `std`), sha2.
 
 ## Tests
 
