@@ -18,6 +18,8 @@ const MIN_PORT: u16 = 1024;
 /// Root of a `/proc` filesystem: `/proc` in production, a fixture directory in tests.
 #[derive(Debug, Clone)]
 pub struct Procfs {
+    // Read only by the Linux `/proc` scan; other targets keep it so `Procfs::new` is portable.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     root: PathBuf,
 }
 
