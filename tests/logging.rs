@@ -61,6 +61,7 @@ fn daemon(
 }
 
 /// Lines that arrive within `wait`.
+#[cfg(target_os = "linux")]
 fn drain(rx: &mpsc::Receiver<String>, wait: Duration) -> Vec<String> {
     let mut out = Vec::new();
     while let Ok(line) = rx.recv_timeout(wait) {
@@ -78,6 +79,8 @@ fn rowser_log_debug_shows_debug_lines_on_stderr() {
     assert!(early.iter().any(|l| l.contains("DEBUG")), "{early:?}");
 }
 
+// The notification fails only where notify-rust uses DBUS_SESSION_BUS_ADDRESS.
+#[cfg(target_os = "linux")]
 #[test]
 fn without_rowser_log_a_failed_notification_shows_one_warning() {
     let dir = TmpDir::new("logw");

@@ -20,5 +20,8 @@ pub fn init() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
+        // A failed stderr write (EPIPE) must not reach `eprintln!`, which panics.
+        .log_internal_errors(false)
         .try_init();
+    tracing::debug!("rowser {} started", env!("CARGO_PKG_VERSION"));
 }
