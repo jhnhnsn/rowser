@@ -137,12 +137,30 @@ fn real_proc_finds_own_loopback_listener() {
     assert!(got.contains(&port), "{port} not in {got:?}");
 }
 
-/// A fake `/proc` in a fresh temp dir. Each process is `(pid, comm, ppid, socket inodes)`;
-/// `tcp` lines are `(hex address:port, inode)` LISTEN entries.
+/// Removes a fake `/proc` dir when the test ends.
 #[cfg(target_os = "linux")]
-fn fake_proc(name: &str, procs: &[(u32, &str, u32, &[u64])], tcp: &[(&str, u64)]) -> Procfs {
+struct TmpDir(PathBuf);
+
+#[cfg(target_os = "linux")]
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A fake `/proc` in a fresh temp dir, removed when the returned guard drops. Each process is
+/// `(pid, comm, ppid, socket inodes)`; `tcp` and `tcp6` lines are `(hex address:port, inode)`
+/// LISTEN entries.
+#[cfg(target_os = "linux")]
+fn fake_proc(
+    name: &str,
+    procs: &[(u32, &str, u32, &[u64])],
+    tcp: &[(&str, u64)],
+    tcp6: &[(&str, u64)],
+) -> (Procfs, TmpDir) {
     let root = std::env::temp_dir().join(format!("rowser-proc-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
+    let guard = TmpDir(root.clone());
     for (pid, comm, ppid, inodes) in procs {
         let dir = root.join(pid.to_string());
         std::fs::create_dir_all(dir.join("fd")).unwrap();
@@ -159,28 +177,59 @@ fn fake_proc(name: &str, procs: &[(u32, &str, u32, &[u64])], tcp: &[(&str, u64)]
             .unwrap();
         }
     }
-    let mut table = String::from("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
-    for (i, (addr, inode)) in tcp.iter().enumerate() {
-        table.push_str(&format!(
-            "   {i}: {addr} 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 {inode} 1 0000000000000000 100 0 0 10 0\n"
-        ));
-    }
     std::fs::create_dir_all(root.join("net")).unwrap();
-    std::fs::write(root.join("net/tcp"), table).unwrap();
-    Procfs::new(root)
+    for (file, lines, remote) in [
+        ("net/tcp", tcp, "00000000:0000"),
+        ("net/tcp6", tcp6, "00000000000000000000000000000000:0000"),
+    ] {
+        let mut table = String::from("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
+        for (i, (addr, inode)) in lines.iter().enumerate() {
+            table.push_str(&format!(
+                "   {i}: {addr} {remote} 0A 00000000:00000000 00:00000000 00000000  1000        0 {inode} 1 0000000000000000 100 0 0 10 0\n"
+            ));
+        }
+        std::fs::write(root.join(file), table).unwrap();
+    }
+    (Procfs::new(root), guard)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn proc_walk_reads_comm_with_spaces_and_parentheses() {
+    // 40 "a) (b" -> 30 "x) (sshd" (not sshd) -> 20 sshd. Both are walked; sshd stops the walk.
+    let (procs, _dir) = fake_proc(
+        "comm-parens",
+        &[
+            (40, "a) (b", 30, &[1]),
+            (30, "x) (sshd", 20, &[2]),
+            (20, "sshd", 1, &[3]),
+        ],
+        &[
+            ("0100007F:1F95", 1),
+            ("0100007F:1F96", 2),
+            ("0100007F:08AE", 3),
+        ],
+        &[],
+    );
+    let url = Url::parse("https://example.com/").unwrap();
+    assert_eq!(
+        callback_ports(&url, &procs, 40),
+        BTreeSet::from([8085, 8086])
+    );
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn proc_walk_stops_at_sshd_listening_on_high_loopback_port() {
     // OpenSSH 9.8+: shell 30 -> sshd-session 20 -> sshd listener 10 -> init 1.
-    // sshd listens on 127.0.0.1:2222; the session holds 127.0.0.1:2223; init 127.0.0.1:8088.
-    let procs = fake_proc(
+    // sshd listens on 127.0.0.1:2222 and [::1]:2222; the session holds 127.0.0.1:2223;
+    // init 127.0.0.1:8088.
+    let (procs, _dir) = fake_proc(
         "sshd-new",
         &[
             (30, "bash", 20, &[1]),
             (20, "sshd-session", 10, &[2]),
-            (10, "sshd", 1, &[3]),
+            (10, "sshd", 1, &[3, 5]),
             (1, "init", 0, &[4]),
         ],
         &[
@@ -189,6 +238,7 @@ fn proc_walk_stops_at_sshd_listening_on_high_loopback_port() {
             ("0100007F:08AE", 3),
             ("0100007F:1F98", 4),
         ],
+        &[("00000000000000000000000001000000:08AE", 5)],
     );
     let url = Url::parse("https://example.com/").unwrap();
     assert_eq!(callback_ports(&url, &procs, 30), BTreeSet::from([8085]));
@@ -198,7 +248,7 @@ fn proc_walk_stops_at_sshd_listening_on_high_loopback_port() {
 #[test]
 fn proc_walk_stops_at_pre_9_8_sshd_session() {
     // Before OpenSSH 9.8 the session process is also named "sshd".
-    let procs = fake_proc(
+    let (procs, _dir) = fake_proc(
         "sshd-old",
         &[
             (30, "bash", 20, &[1]),
@@ -210,6 +260,7 @@ fn proc_walk_stops_at_pre_9_8_sshd_session() {
             ("0100007F:08AF", 2),
             ("0100007F:08AE", 3),
         ],
+        &[],
     );
     let url = Url::parse("https://example.com/").unwrap();
     assert_eq!(callback_ports(&url, &procs, 30), BTreeSet::from([8085]));

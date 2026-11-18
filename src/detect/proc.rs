@@ -1,4 +1,5 @@
-//! Linux `/proc` walk: loopback LISTEN sockets owned by a process and its ancestors.
+//! Linux `/proc` walk: loopback LISTEN sockets owned by a process and its ancestors, up to the
+//! first sshd process.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
@@ -31,7 +32,7 @@ pub(super) fn listening_ports(root: &Path, caller_pid: u32) -> BTreeSet<u16> {
 /// Socket inodes held by `pid` and its ancestors, pid 1 included (in a container the caller's
 /// shell can be pid 1). Stops at pid 0, when a process has no readable parent, or at the first
 /// sshd process, whose listeners and ancestors are not taken (ticket #29: with OpenSSH 9.8+
-/// the sshd listener is an ancestor, and a high loopback sshd port is not a callback).
+/// the sshd listener is an ancestor, and a high loopback sshd port is not a Callback port).
 fn tree_socket_inodes(root: &Path, pid: u32) -> HashSet<u64> {
     let mut inodes = HashSet::new();
     let mut seen = HashSet::new();
