@@ -51,12 +51,20 @@ fn a_url_as_first_argument_acts_as_open() {
 }
 
 #[test]
-fn subcommand_names_are_never_taken_as_urls() {
+fn a_non_http_url_as_first_argument_acts_as_open() {
+    // The Daemon, not the Shim, applies the scheme allowlist.
+    assert_eq!(open_url(&["rowser", "ftp://x/"]), "ftp://x/");
+    assert_eq!(open_url(&["rowser", "ssh://host"]), "ssh://host");
+}
+
+#[test]
+fn non_url_first_arguments_keep_subcommand_parsing() {
     assert!(matches!(
         parse_from(["rowser", "doctor"]).expect("parse"),
         Command::Doctor
     ));
     assert!(parse_from(["rowser", "not a url"]).is_err());
+    assert!(parse_from(["rowser", "://x"]).is_err());
     assert!(parse_from(["rowser", "--help"]).is_err());
 }
 

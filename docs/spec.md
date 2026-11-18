@@ -64,7 +64,7 @@ is invoked through a symlink named `xdg-open`, `sensible-browser` or `www-browse
   `StreamLocalBindUnlink yes` in `sshd_config`. Host names then come from the shim (untrusted,
   shown as such).
 
-### Shim (remote) — `rowser open <url>` (and the symlinks)
+### Shim (remote) — `rowser open <url>`, `rowser <url>` (and the symlinks)
 
 - Socket discovery: tries `ROWSER_SOCKET` if set, then every `/tmp/rowser-*.sock` owned by the
   shim's own UID (others are ignored), newest first (by mtime). Uses the first one that answers the handshake. Removes sockets it owns that
