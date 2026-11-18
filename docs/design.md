@@ -24,7 +24,7 @@ src/
   shim/              `rowser open`, `rowser forward`, `__keeper`
   wrapper/           `rowser ssh`: destination resolution, relay with Host stamp
   service.rs         `rowser daemon install|uninstall` (systemd unit, launchd plist, their paths)
-  remote_install/    `rowser remote install <host>`
+  remote_install.rs  `rowser remote install <host>`
   doctor.rs          `rowser doctor`
   platform.rs        default paths per OS (runtime dir, tunnel dir, browser names)
 tests/               level-2 integration tests and the level-3 sshd e2e test
@@ -132,6 +132,7 @@ daemon ─► protocol
 shim ─► protocol, discovery, detect
 wrapper ─► protocol
 doctor ─► discovery, protocol, platform
+remote_install ─► platform
 discovery ─► protocol
 ```
 

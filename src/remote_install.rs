@@ -3,7 +3,8 @@
 //! Shallow on purpose: `ssh`, `curl` and `tar` run directly from `PATH`. The
 //! one seam is [`BinarySource`]: a release download or a local build.
 
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
 use crate::platform::BROWSER_NAMES;
@@ -24,71 +25,82 @@ pub fn asset_for(uname: &str) -> Result<&'static str, String> {
         (Some("Linux"), Some("x86_64"), None) => Ok("x86_64-unknown-linux-musl"),
         (Some("Linux"), Some("aarch64" | "arm64"), None) => Ok("aarch64-unknown-linux-musl"),
         _ => Err(format!(
-            "unsupported remote system `{uname}`: rowser runs on Linux x86_64 and aarch64 \
-             remote hosts"
+            "unsupported system on the remote host `{uname}`: rowser runs on Linux x86_64 \
+             and aarch64 remote hosts"
         )),
     }
 }
 
 /// Gives the rowser binary for one release asset.
 pub trait BinarySource {
-    /// Returns the path of the binary for `asset`. `work` is an empty
-    /// directory the source may write to.
-    fn binary(&self, asset: &str, work: &Path) -> Result<PathBuf, String>;
+    /// Returns the bytes of the binary for `asset`. Writes no files.
+    fn binary(&self, asset: &str) -> Result<Vec<u8>, String>;
 }
 
 /// A binary the user built (`--local-build <path>`).
 pub struct LocalBuild(pub PathBuf);
 
 impl BinarySource for LocalBuild {
-    fn binary(&self, _asset: &str, _work: &Path) -> Result<PathBuf, String> {
-        if self.0.is_file() {
-            Ok(self.0.clone())
-        } else {
-            Err(format!("--local-build {} is not a file", self.0.display()))
+    fn binary(&self, _asset: &str) -> Result<Vec<u8>, String> {
+        if !self.0.is_file() {
+            return Err(format!("--local-build {} is not a file", self.0.display()));
         }
+        std::fs::read(&self.0).map_err(|e| format!("cannot read {}: {e}", self.0.display()))
     }
 }
 
-/// The release asset `<base>/rowser-<asset>.tar.gz`, fetched with `curl`
-/// and unpacked with `tar`.
+/// The release asset `<base>/rowser-<asset>.tar.gz`: `curl` piped into
+/// `tar -xzO`, read into memory. No temporary files.
 pub struct ReleaseDownload {
     pub base_url: String,
 }
 
 impl BinarySource for ReleaseDownload {
-    fn binary(&self, asset: &str, work: &Path) -> Result<PathBuf, String> {
+    fn binary(&self, asset: &str) -> Result<Vec<u8>, String> {
         let name = format!("rowser-{asset}.tar.gz");
         let url = format!("{}/{name}", self.base_url.trim_end_matches('/'));
-        let archive = work.join(&name);
-        let out = Command::new("curl")
-            .args(["-fsSL", "-o"])
-            .arg(&archive)
+        let mut curl = Command::new("curl")
+            .args(["-fsSL", "--"])
             .arg(&url)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| format!("cannot run curl: {e}"))?;
-        if !out.status.success() {
+        let body = curl.stdout.take().expect("piped stdout");
+        let tar = Command::new("tar")
+            .args(["-xzO", "-f", "-", "rowser"])
+            .stdin(body)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let tar = match tar {
+            Ok(tar) => tar,
+            Err(e) => {
+                let _ = curl.kill();
+                let _ = curl.wait();
+                return Err(format!("cannot run tar: {e}"));
+            }
+        };
+        let tar_out = tar
+            .wait_with_output()
+            .map_err(|e| format!("cannot run tar: {e}"))?;
+        let curl_out = curl
+            .wait_with_output()
+            .map_err(|e| format!("cannot run curl: {e}"))?;
+        if !curl_out.status.success() {
             return Err(format!(
                 "cannot download {url}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
+                String::from_utf8_lossy(&curl_out.stderr).trim()
             ));
         }
-        let out = Command::new("tar")
-            .arg("-xzf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(work)
-            .arg("rowser")
-            .output()
-            .map_err(|e| format!("cannot run tar: {e}"))?;
-        let bin = work.join("rowser");
-        if !out.status.success() || !bin.is_file() {
+        if !tar_out.status.success() || tar_out.stdout.is_empty() {
             return Err(format!(
                 "{name} does not hold a rowser binary: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
+                String::from_utf8_lossy(&tar_out.stderr).trim()
             ));
         }
-        Ok(bin)
+        Ok(tar_out.stdout)
     }
 }
 
@@ -98,7 +110,7 @@ impl BinarySource for ReleaseDownload {
 pub fn remote_script() -> String {
     let mut s = String::from(
         "set -e; [ -n \"$HOME\" ] || { echo \"HOME is not set\" >&2; exit 1; }; \
-         d=\"$HOME/.local/bin\"; mkdir -p \"$d\"; cat > \"$d/.rowser.tmp\"; \
+         d=\"$HOME/.local/bin\"; mkdir -p \"$d\"; rm -f \"$d/.rowser.tmp\"; cat >\"$d/.rowser.tmp\"; \
          chmod 755 \"$d/.rowser.tmp\"; mv -f \"$d/.rowser.tmp\" \"$d/rowser\";",
     );
     for name in BROWSER_NAMES {
@@ -120,26 +132,20 @@ pub fn install(host: &str, source: &dyn BinarySource) -> Result<(), String> {
     }
     let asset = asset_for(&String::from_utf8_lossy(&out.stdout))?;
 
-    let work = std::env::temp_dir().join(format!("rowser-install-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&work).map_err(|e| format!("cannot create {}: {e}", work.display()))?;
-    let result = copy(host, source, asset, &work);
-    let _ = std::fs::remove_dir_all(&work);
-    result
-}
-
-fn copy(host: &str, source: &dyn BinarySource, asset: &str, work: &Path) -> Result<(), String> {
-    let bin = source.binary(asset, work)?;
-    let file =
-        std::fs::File::open(&bin).map_err(|e| format!("cannot read {}: {e}", bin.display()))?;
-    let status = Command::new("ssh")
+    let bin = source.binary(asset)?;
+    let mut ssh = Command::new("ssh")
         .args(["--", host, &format!("sh -c '{}'", remote_script())])
-        .stdin(file)
-        .status()
+        .stdin(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("cannot run ssh: {e}"))?;
+    let mut stdin = ssh.stdin.take().expect("piped stdin");
+    let written = stdin.write_all(&bin);
+    drop(stdin);
+    let status = ssh.wait().map_err(|e| format!("cannot run ssh: {e}"))?;
     if !status.success() {
         return Err(format!("copy to {host} failed ({status})"));
     }
+    written.map_err(|e| format!("copy to {host} failed: {e}"))?;
     Ok(())
 }
 

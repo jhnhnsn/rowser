@@ -371,3 +371,59 @@ async fn a_proxyjump_session_opens_the_url_with_the_target_alias() {
     assert_eq!(w.urls(), ["https://example.test/jump"]);
     assert_eq!(w.hosts(), [NoticeHost::Alias("e2e-jump".into())]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_install_puts_the_binary_and_links_in_the_remote_home() {
+    if !enabled() {
+        return;
+    }
+    let _lock = LOCK.lock().await;
+    let w = World::start().await;
+    // sshd sets HOME from the passwd entry, so the `ssh` wrapper puts a temp
+    // HOME in front of the remote command (`ssh -- <host> <command>`). The
+    // install never touches the real home of the test user.
+    let home = w.dir.0.join("remote-home");
+    std::fs::create_dir(&home).unwrap();
+    let wrap = w.dir.0.join("wrap");
+    std::fs::create_dir(&wrap).unwrap();
+    let ssh = wrap.join("ssh");
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = -- ] && [ $# -eq 3 ] || exit 99\n\
+             exec /usr/bin/ssh -F {} -- \"$2\" \"HOME={} $3\"\n",
+            w.path("ssh_config"),
+            home.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", wrap.display(), std::env::var("PATH").unwrap());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rowser"))
+        .args(["remote", "install", "e2e-a", "--local-build"])
+        .arg(env!("CARGO_BIN_EXE_rowser"))
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+
+    let bin = home.join(".local/bin");
+    assert_eq!(
+        std::fs::read(bin.join("rowser")).unwrap(),
+        std::fs::read(env!("CARGO_BIN_EXE_rowser")).unwrap()
+    );
+    let mode = std::fs::metadata(bin.join("rowser"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o755);
+    for name in ["xdg-open", "sensible-browser", "www-browser"] {
+        assert_eq!(
+            std::fs::read_link(bin.join(name)).unwrap(),
+            Path::new("rowser")
+        );
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("export BROWSER=rowser"), "{stdout}");
+}

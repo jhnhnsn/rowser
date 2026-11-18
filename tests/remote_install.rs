@@ -64,12 +64,10 @@ fn release_download_fetches_and_unpacks_the_asset() {
     let dir = temp_dir("dl");
     let body = tarball(&dir, "BINARY-x86");
     let base = serve("/v0.1.0/rowser-x86_64-unknown-linux-musl.tar.gz", body);
-    let work = dir.join("work");
-    std::fs::create_dir_all(&work).unwrap();
     let bin = ReleaseDownload { base_url: base }
-        .binary("x86_64-unknown-linux-musl", &work)
+        .binary("x86_64-unknown-linux-musl")
         .unwrap();
-    assert_eq!(std::fs::read_to_string(bin).unwrap(), "BINARY-x86");
+    assert_eq!(bin, b"BINARY-x86");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -80,7 +78,7 @@ fn release_download_names_the_url_on_a_missing_asset() {
     let err = ReleaseDownload {
         base_url: base.clone(),
     }
-    .binary("aarch64-unknown-linux-musl", &dir)
+    .binary("aarch64-unknown-linux-musl")
     .unwrap_err();
     assert!(
         err.contains(&format!("{base}/rowser-aarch64-unknown-linux-musl.tar.gz")),
@@ -94,10 +92,8 @@ fn local_build_gives_its_path_and_refuses_a_missing_file() {
     let dir = temp_dir("local");
     let bin = dir.join("rowser");
     std::fs::write(&bin, "x").unwrap();
-    assert_eq!(LocalBuild(bin.clone()).binary("any", &dir).unwrap(), bin);
-    let err = LocalBuild(dir.join("nope"))
-        .binary("any", &dir)
-        .unwrap_err();
+    assert_eq!(LocalBuild(bin).binary("any").unwrap(), b"x");
+    let err = LocalBuild(dir.join("nope")).binary("any").unwrap_err();
     assert!(err.contains("is not a file"), "{err}");
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -170,6 +166,28 @@ fn install_copies_the_binary_links_the_names_and_prints_the_browser_line() {
 }
 
 #[test]
+fn install_does_not_write_through_a_planted_temp_symlink() {
+    let dir = temp_dir("link");
+    let home = dir.join("home");
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let outside = dir.join("outside");
+    std::fs::write(&outside, "KEEP").unwrap();
+    std::os::unix::fs::symlink(&outside, bin.join(".rowser.tmp")).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "KEEP");
+    assert_eq!(
+        std::fs::read_to_string(bin.join("rowser")).unwrap(),
+        "LOCAL"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn install_refuses_an_unsupported_remote_and_writes_nothing() {
     let dir = temp_dir("unsup");
     let home = dir.join("home");
@@ -181,7 +199,7 @@ fn install_refuses_an_unsupported_remote_and_writes_nothing() {
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("unsupported remote system `Darwin arm64`"),
+        stderr.contains("unsupported system on the remote host `Darwin arm64`"),
         "{stderr}"
     );
     assert!(!home.join(".local").exists());
