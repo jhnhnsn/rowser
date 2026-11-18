@@ -8,6 +8,9 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `ROWSER_LOG` sets the log level of every rowser process (default `warn`): for example,
+  `ROWSER_LOG=debug rowser daemon` shows debug lines, and a failed desktop notification now shows
+  a warning. Log lines go to stderr only. ([#17](https://github.com/jhnhnsn/rowser/issues/17))
 - An OAuth callback forward on Linux now ends a few seconds after the remote program stops
   listening, also when the program closed the callback connection first: the keeper reads the
   listening ports in `/proc/net/tcp` and `/proc/net/tcp6` (macOS keeps the bind check). Before,
