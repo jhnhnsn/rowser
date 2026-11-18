@@ -79,7 +79,8 @@ fn check_sha256(sums: &str, name: &str, body: &[u8]) -> Result<(), String> {
     let want = sums
         .lines()
         .filter_map(|line| line.split_once(char::is_whitespace))
-        .find(|(_, file)| file.trim_start().trim_start_matches('*') == name)
+        .map(|(hash, file)| (hash, file.trim_start()))
+        .find(|(_, file)| file.strip_prefix('*').unwrap_or(file) == name)
         .map(|(hash, _)| hash.to_ascii_lowercase())
         .ok_or_else(|| format!("SHA256SUMS has no entry for {name}"))?;
     let got: String = Sha256::digest(body)
@@ -113,6 +114,8 @@ impl BinarySource for ReleaseDownload {
         let tar_out = tar
             .wait_with_output()
             .map_err(|e| format!("cannot run tar: {e}"))?;
+        // A failed write (e.g. tar exits early) is safe to ignore: tar then
+        // fails or gives no output, and the check below refuses that.
         let _ = writer.join();
         if !tar_out.status.success() || tar_out.stdout.is_empty() {
             return Err(format!(
@@ -229,5 +232,22 @@ mod tests {
         assert!(!s.contains('\''), "{s}");
         assert!(s.contains("ln -sfn rowser \"$d/xdg-open\""), "{s}");
         assert!(s.contains("ln -sfn rowser \"$d/www-browser\""), "{s}");
+    }
+
+    // SHA-256 of "abc" (FIPS 180-2 example).
+    const ABC: &str = "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD";
+
+    #[test]
+    fn check_sha256_takes_the_binary_mode_star_and_an_uppercase_hash() {
+        assert_eq!(
+            check_sha256(&format!("{ABC} *a.tgz\n"), "a.tgz", b"abc"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn check_sha256_takes_only_one_star() {
+        let err = check_sha256(&format!("{ABC} **a.tgz\n"), "a.tgz", b"abc").unwrap_err();
+        assert!(err.contains("no entry for a.tgz"), "{err}");
     }
 }

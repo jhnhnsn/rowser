@@ -66,16 +66,14 @@ fn tarball(dir: &Path, content: &str) -> Vec<u8> {
 }
 
 /// The `sha256sum` line for `body` named `name`, as the release workflow writes it.
-fn sums_line(dir: &Path, name: &str, body: &[u8]) -> String {
-    let file = dir.join(name);
-    std::fs::write(&file, body).unwrap();
-    let out = Command::new("sha256sum")
-        .arg(name)
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    String::from_utf8(out.stdout).unwrap()
+/// Computed with `sha2`, so the tests need no `sha256sum` (macOS has none).
+fn sums_line(name: &str, body: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let hash: String = Sha256::digest(body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("{hash}  {name}\n")
 }
 
 const X86_TGZ: &str = "/v0.1.0/rowser-x86_64-unknown-linux-musl.tar.gz";
@@ -85,8 +83,8 @@ const SUMS: &str = "/v0.1.0/SHA256SUMS";
 fn release_download_fetches_checks_and_unpacks_the_asset() {
     let dir = temp_dir("dl");
     let body = tarball(&dir, "BINARY-x86");
-    let other = sums_line(&dir, "rowser-aarch64-unknown-linux-musl.tar.gz", b"other");
-    let mine = sums_line(&dir, "rowser-x86_64-unknown-linux-musl.tar.gz", &body);
+    let other = sums_line("rowser-aarch64-unknown-linux-musl.tar.gz", b"other");
+    let mine = sums_line("rowser-x86_64-unknown-linux-musl.tar.gz", &body);
     let sums = format!("{other}{mine}").into_bytes();
     let base = serve_all(vec![(X86_TGZ, body), (SUMS, sums)]);
     let bin = ReleaseDownload { base_url: base }
@@ -100,7 +98,7 @@ fn release_download_fetches_checks_and_unpacks_the_asset() {
 fn release_download_refuses_a_hash_mismatch() {
     let dir = temp_dir("dlbad");
     let body = tarball(&dir, "BINARY-x86");
-    let sums = sums_line(&dir, "rowser-x86_64-unknown-linux-musl.tar.gz", b"tampered");
+    let sums = sums_line("rowser-x86_64-unknown-linux-musl.tar.gz", b"tampered");
     let base = serve_all(vec![(X86_TGZ, body), (SUMS, sums.into_bytes())]);
     let err = ReleaseDownload { base_url: base }
         .binary("x86_64-unknown-linux-musl")
@@ -116,7 +114,7 @@ fn release_download_refuses_a_hash_mismatch() {
 fn release_download_refuses_an_asset_without_an_entry() {
     let dir = temp_dir("dlnoent");
     let body = tarball(&dir, "BINARY-x86");
-    let sums = sums_line(&dir, "rowser-aarch64-unknown-linux-musl.tar.gz", &body);
+    let sums = sums_line("rowser-aarch64-unknown-linux-musl.tar.gz", &body);
     let base = serve_all(vec![(X86_TGZ, body), (SUMS, sums.into_bytes())]);
     let err = ReleaseDownload { base_url: base }
         .binary("x86_64-unknown-linux-musl")
@@ -189,14 +187,20 @@ fn fake_ssh(dir: &Path) -> PathBuf {
 }
 
 fn run_install(dir: &Path, home: &Path, uname: &str, local: &Path) -> std::process::Output {
+    let local = local.to_str().unwrap();
+    run_install_with(dir, home, uname, &["--local-build", local])
+}
+
+/// `rowser remote install myhost <extra>` over the fake `ssh`, with `HOME` at `home`.
+fn run_install_with(dir: &Path, home: &Path, uname: &str, extra: &[&str]) -> std::process::Output {
     let path = format!(
         "{}:{}",
         fake_ssh(dir).display(),
         std::env::var("PATH").unwrap()
     );
     Command::new(env!("CARGO_BIN_EXE_rowser"))
-        .args(["remote", "install", "myhost", "--local-build"])
-        .arg(local)
+        .args(["remote", "install", "myhost"])
+        .args(extra)
         .env("PATH", path)
         .env("HOME", home)
         .env("FAKE_UNAME", uname)
@@ -277,5 +281,43 @@ fn install_refuses_an_unsupported_remote_and_writes_nothing() {
         "{stderr}"
     );
     assert!(!home.join(".local").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_refuses_a_download_that_does_not_match_sha256sums_and_writes_nothing() {
+    let dir = temp_dir("instbad");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let body = tarball(&dir, "BINARY-x86");
+    let sums = sums_line("rowser-x86_64-unknown-linux-musl.tar.gz", b"tampered");
+    let base = serve_all(vec![(X86_TGZ, body), (SUMS, sums.into_bytes())]);
+
+    let out = run_install_with(&dir, &home, "Linux x86_64", &["--release-url", &base]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("does not match SHA256SUMS"), "{stderr}");
+    assert!(!home.join(".local").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_with_a_local_build_skips_the_sha256sums_check() {
+    let dir = temp_dir("instskip");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+    // The release URL serves no SHA256SUMS: a check would refuse the install.
+    let base = serve("/v0.1.0/none", Vec::new());
+
+    let local = local.to_str().unwrap();
+    let args = ["--local-build", local, "--release-url", &base];
+    let out = run_install_with(&dir, &home, "Linux x86_64", &args);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(home.join(".local/bin/rowser")).unwrap(),
+        "LOCAL"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }

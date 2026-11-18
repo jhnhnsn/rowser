@@ -125,7 +125,7 @@ No config file in v1. Flags and environment variables only (`ROWSER_SOCKET`, `RO
 
 ## Stack
 
-tokio, clap, serde / serde_json, url, notify-rust, tracing.
+tokio, clap, serde / serde_json, url, notify-rust, tracing, sha2.
 
 ## Tests
 
