@@ -189,17 +189,24 @@ async fn connect_loopback(port: u16) -> io::Result<TcpStream> {
 ///
 /// Linux: a LISTEN entry in `/proc/net/tcp` or `/proc/net/tcp6`. A bind
 /// probe would see a TIME-WAIT entry (the program closed a connection
-/// first) as "in use" for about 60 s. Elsewhere, or if `/proc` is not
+/// first) as "in use" for about 60 s. Elsewhere, or if `/proc/net/tcp` is not
 /// readable: the bind probe.
 fn in_use(ip: IpAddr, port: u16) -> bool {
     #[cfg(target_os = "linux")]
-    if let (Ok(v4), Ok(v6)) = (
-        std::fs::read_to_string("/proc/net/tcp"),
-        std::fs::read_to_string("/proc/net/tcp6"),
-    ) {
-        return proc_listens(&v4, &v6, ip, port);
+    if let Some(listens) = proc_in_use(|p| std::fs::read_to_string(p), ip, port) {
+        return listens;
     }
     bind_probe(ip, port)
+}
+
+/// The `/proc` answer for `in_use`, with `read` to read a file. `None` if
+/// `/proc/net/tcp` is not readable. If `/proc/net/tcp6` is not readable
+/// (IPv6 off), there are no IPv6 entries.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_in_use(read: impl Fn(&str) -> io::Result<String>, ip: IpAddr, port: u16) -> Option<bool> {
+    let v4 = read("/proc/net/tcp").ok()?;
+    let v6 = read("/proc/net/tcp6").unwrap_or_default();
+    Some(proc_listens(&v4, &v6, ip, port))
 }
 
 /// Whether the `/proc/net/tcp` (`v4`) and `/proc/net/tcp6` (`v6`) text
@@ -263,7 +270,7 @@ pub fn keeper_main(socket: PathBuf, forward_id: String, ports: Vec<u16>) -> Exit
 /// Sample `/proc` text is in little-endian words.
 #[cfg(all(test, target_endian = "little"))]
 mod tests {
-    use super::proc_listens;
+    use super::{proc_in_use, proc_listens};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     const HEAD: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
@@ -311,6 +318,24 @@ mod tests {
         let any6 = v6("00000000000000000000000000000000:1F90", "0A");
         assert!(proc_listens(HEAD, &any6, V4, 8080));
         assert!(proc_listens(HEAD, &any6, V6, 8080));
+    }
+
+    #[test]
+    fn without_proc_net_tcp6_the_ipv4_text_alone_decides() {
+        let t = v4("0100007F:1F90", "0A");
+        let read = |path: &str| match path {
+            "/proc/net/tcp" => Ok(t.clone()),
+            _ => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        };
+        assert_eq!(proc_in_use(read, V4, 8080), Some(true));
+        assert_eq!(proc_in_use(read, V4, 8081), Some(false));
+        assert_eq!(proc_in_use(read, V6, 8080), Some(false));
+    }
+
+    #[test]
+    fn without_proc_net_tcp_proc_does_not_decide() {
+        let read = |_: &str| Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(proc_in_use(read, V4, 8080), None);
     }
 
     #[test]
