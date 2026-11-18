@@ -158,12 +158,24 @@ pub fn install(args: &[String]) -> ExitCode {
         Err(e) => return fail("install", format!("cannot find the rowser binary: {e}")),
     };
     match install_with(&exe, args) {
-        Ok(path) => {
+        Ok(Installed { path, started }) => {
             println!("rowser daemon installed: {}", path.display());
+            if !started {
+                println!(
+                    "rowser daemon is not started: no graphical session is active; \
+                     it starts with the next graphical session"
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(e) => fail("install", e),
     }
+}
+
+struct Installed {
+    path: PathBuf,
+    /// False when the service waits for the next graphical session.
+    started: bool,
 }
 
 /// `rowser daemon uninstall`: stops and removes the service. Not installed
@@ -198,7 +210,7 @@ fn gui_domain() -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn install_with(exe: &Path, args: &[String]) -> Result<PathBuf, String> {
+fn install_with(exe: &Path, args: &[String]) -> Result<Installed, String> {
     let path = launchd_plist_path()?;
     write_file(&path, &render_launchd_plist(exe, args))?;
     let domain = gui_domain();
@@ -212,7 +224,12 @@ fn install_with(exe: &Path, args: &[String]) -> Result<PathBuf, String> {
     let mut tries = 0;
     loop {
         match run("launchctl", &["bootstrap", &domain, &plist]) {
-            Ok(()) => return Ok(path),
+            Ok(()) => {
+                return Ok(Installed {
+                    path,
+                    started: true,
+                })
+            }
             Err(_) if tries < 5 => {
                 tries += 1;
                 std::thread::sleep(std::time::Duration::from_millis(300));
@@ -240,14 +257,37 @@ fn uninstall_inner() -> Result<Uninstalled, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn install_with(exe: &Path, args: &[String]) -> Result<PathBuf, String> {
+fn install_with(exe: &Path, args: &[String]) -> Result<Installed, String> {
     let path = systemd_unit_path()?;
     write_file(&path, &render_systemd_unit(exe, args))?;
     run("systemctl", &["--user", "daemon-reload"])?;
-    run("systemctl", &["--user", "enable", UNIT_NAME])?;
+    // reenable, not enable: drops a default.target.wants link left by an
+    // install from before the unit moved to graphical-session.target.
+    run("systemctl", &["--user", "reenable", UNIT_NAME])?;
+    // Outside a graphical session (an install over SSH) the user manager
+    // has no DISPLAY: leave the start to the next graphical session.
+    if !graphical_session_active() {
+        return Ok(Installed {
+            path,
+            started: false,
+        });
+    }
     // restart, not start: a second install picks up a new binary path.
     run("systemctl", &["--user", "restart", UNIT_NAME])?;
-    Ok(path)
+    Ok(Installed {
+        path,
+        started: true,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn graphical_session_active() -> bool {
+    Command::new("systemctl")
+        .args(["--user", "is-active", "graphical-session.target"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 #[cfg(not(target_os = "macos"))]
