@@ -8,6 +8,9 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser <url>` now acts as `rowser open <url>`, so `BROWSER=rowser` works on a Remote host as
+  the install hint says. A first argument of the form `scheme://…` counts as a URL; the Daemon
+  still opens only http and https. ([#21](https://github.com/jhnhnsn/rowser/issues/21))
 - `ROWSER_RUNTIME_DIR` sets the Daemon's runtime directory for both `rowser daemon` and
   `rowser ssh`, so `rowser ssh` can find a Daemon that does not use the default directory. The
   `--runtime-dir` flag of `rowser daemon` wins over it. The value must be an absolute path.
