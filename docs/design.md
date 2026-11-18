@@ -26,6 +26,7 @@ src/
   service.rs         `rowser daemon install|uninstall` (systemd unit, launchd plist, their paths)
   remote_install.rs  `rowser remote install <host>`
   doctor.rs          `rowser doctor`
+  logging.rs         tracing subscriber on stderr, level from ROWSER_LOG (default warn)
   platform.rs        default paths per OS (runtime dir, tunnel dir, browser names)
 tests/               level-2 integration tests and the level-3 sshd e2e test
 ```
