@@ -89,6 +89,9 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- `cargo test` no longer fails at random in `a_failed_open_closes_the_forward`: the test now
+  waits up to 5 seconds for a failed open's forward to free its local port.
+  ([#23](https://github.com/jhnhnsn/rowser/issues/23))
 - rowser builds on macOS with `cargo clippy -- -D warnings` again: an unused field in the
   callback port detection no longer stops the macOS build.
   ([#16](https://github.com/jhnhnsn/rowser/issues/16))
