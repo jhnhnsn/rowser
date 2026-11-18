@@ -6,7 +6,7 @@ to `localhost` on the remote host.
 A program on the remote host runs `xdg-open <url>` (or uses `$BROWSER`). rowser sends the URL
 over your SSH connection to a daemon on your local machine, which opens it in your browser and
 shows a notification naming the host. When the URL starts an OAuth flow with a `localhost`
-callback, rowser forwards that callback port back to the remote host, so CLI logins
+callback, rowser sets up a callback forward for that callback port to the remote host, so CLI logins
 (`gh auth login`, `gcloud auth login`, …) just work.
 
 | Role | Platforms |
@@ -61,7 +61,8 @@ You can also run the daemon in the foreground with `rowser daemon [flags]`.
   with the arguments `browser` and the URL. Use a path without spaces, or a small wrapper script.
 - `--confirm-hosts <pattern>` — glob, may repeat. URLs from matching hosts wait until you click
   "Open" in the notification (or a dialog where notifications have no actions). Matches the host
-  alias you typed to `rowser ssh`. Default: no confirmation.
+  alias you typed to `rowser ssh`. Default: no confirmation. If you do not click within 60
+  seconds, the confirmation ends and the URL does not open.
 - `--confirm-unverified` — also match `--confirm-hosts` against the host name the remote host
   reports about itself on the direct socket (the `ssh_config` setup below). That name is
   untrusted: a remote host can report any name. Without this flag, `--confirm-hosts` only
@@ -110,7 +111,7 @@ does a live round trip to the daemon.
 ## Usage
 
 Connect with `rowser ssh` instead of `ssh`. It runs plain `ssh` with every argument unchanged,
-plus a forward of a per-session socket to the daemon:
+plus a tunnel from a per-session socket to the daemon:
 
 ```sh
 rowser ssh myhost
@@ -122,7 +123,7 @@ Most people alias it:
 alias ssh='rowser ssh'
 ```
 
-If the daemon is not running, `rowser ssh` prints a warning and runs `ssh` without the forward.
+If the daemon is not running, `rowser ssh` prints a warning and runs `ssh` without a tunnel.
 
 On the remote host:
 
@@ -144,28 +145,43 @@ or after 10 minutes. Use `rowser forward <port>` when detection misses a port.
 
 ### tmux
 
-The shim finds the newest tunnel socket in `/tmp` that you own. A tmux session reattached from a
-new SSH session therefore uses the new connection; nothing to update.
+The shim uses the newest tunnel socket in `/tmp` that you own and that answers the handshake. A
+tmux session reattached from a new SSH session therefore uses the new connection; nothing to
+update.
+
+### Environment variables
+
+- `ROWSER_SOCKET` — a socket path the shim (and `rowser doctor`) tries before it looks in `/tmp`.
+  Set it when the tunnel socket is somewhere else.
+- `ROWSER_LOG` — the log level (for example `debug`). Default `warn`.
+- `ROWSER_RUNTIME_DIR` — see Runtime directory.
 
 ### Jump hosts
 
-`rowser ssh` passes `-J` / `ProxyJump` through unchanged. The forward goes to the final host, so
+`rowser ssh` passes `-J` / `ProxyJump` through unchanged. The tunnel ends at the final host, so
 install rowser there, not on the jump host.
 
 ## Alternative: `ssh_config` without the wrapper
 
-If you cannot use `rowser ssh`, forward the daemon's direct socket in `~/.ssh/config`:
+If you cannot use `rowser ssh`, tunnel the daemon's direct socket in `~/.ssh/config`:
 
 ```
 Host myhost
     RemoteForward /tmp/rowser-%C.sock /run/user/1000/rowser/rowserd.sock
-    StreamLocalBindUnlink yes
 ```
 
-Replace `/run/user/1000/rowser` with your runtime directory (on macOS,
-`~/Library/Application Support/rowser`, written as an absolute path). This only works reliably
-when the remote `sshd_config` also has `StreamLocalBindUnlink yes`; without it, a stale socket
-from an earlier session blocks the forward. In this setup the host name comes from the remote
+Replace `/run/user/1000/rowser` with your runtime directory. On macOS the path has a space, so
+quote it:
+
+```
+Host myhost
+    RemoteForward /tmp/rowser-%C.sock "/Users/me/Library/Application Support/rowser/rowserd.sock"
+```
+
+The remote host creates the socket, so only the remote `sshd_config` setting
+`StreamLocalBindUnlink yes` removes a stale socket from an earlier session; the same option in
+your own `~/.ssh/config` has no effect on a `RemoteForward`. Without the remote setting, a stale
+socket blocks the tunnel. In this setup the host name comes from the remote
 host itself, so notifications mark it as unverified, and `--confirm-hosts` ignores it unless the
 daemon runs with `--confirm-unverified`.
 
@@ -176,13 +192,13 @@ daemon runs with `--confirm-unverified`.
   - `rowserd-relay.sock` — the relay socket, for `rowser ssh` only. The wrapper stamps each
     connection with the host alias you typed. A remote host cannot choose which local socket its
     tunnel reaches, so that name is trusted.
-  - `rowserd.sock` — the direct socket, for `ssh_config` forwards. The host name is what the
+  - `rowserd.sock` — the direct socket, for `ssh_config` tunnels. The host name is what the
     remote host reports, and it is shown as untrusted.
 - Rate limit: at most 5 URLs per 10 seconds per connection; more are rejected with an error.
 - By default URLs open immediately with a notification. Use `--confirm-hosts` to require a click
   for hosts you trust less.
 - Callback forwards bind on loopback only (`127.0.0.1` and `[::1]`), ports 1024–65535.
-- rowser never changes files outside your home directory, apart from its own sockets in `/tmp`.
+- rowser never changes files outside your home directory, apart from its own sockets in `/tmp` and in its runtime directory.
 
 ## Known limits
 
@@ -193,6 +209,8 @@ daemon runs with `--confirm-unverified`.
   warning.
 - `--open-command` splits on spaces and has no quoting.
 - macOS as a remote host works only through `BROWSER=rowser`; rowser does not replace `open`.
+  `rowser remote install` refuses a macOS host: copy the `aarch64-apple-darwin` or
+  `x86_64-apple-darwin` binary to it by hand, then set `BROWSER=rowser`.
 
 ## Out of scope for v1
 
