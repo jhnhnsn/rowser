@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod doctor;
 pub mod platform;
 pub mod protocol;
+pub mod remote_install;
 pub mod service;
 pub mod shim;
 pub mod wrapper;

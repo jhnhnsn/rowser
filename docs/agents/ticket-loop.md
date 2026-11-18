@@ -44,6 +44,10 @@ rowser is a CLI; test it from the terminal.
   runs the `systemctl` on `PATH`: set `XDG_CONFIG_HOME` to a temp dir and put a fake `systemctl`
   script first on `PATH` that records its arguments. Never touch the real user units. Check that
   daemon flags given before `install` appear in the unit's `ExecStart`.
+- `rowser remote install <host>` runs the `ssh`, `curl` and `tar` on `PATH`: put a fake `ssh`
+  first on `PATH` that answers `uname -sm` and runs the copy command locally with `sh -c`, and set
+  `HOME` to a temp dir. `--local-build <path>` skips the download; the hidden `--release-url
+  <base>` points the download at a local HTTP server serving `rowser-<target>.tar.gz`.
 - Unix socket paths are limited to about 104–108 bytes: put test sockets in a short temp dir
   (e.g. `/tmp/rw.XXXX`), never under a long scratchpad or worktree path; remove it afterwards.
 - Never open the real browser or show real desktop notifications in a test.

@@ -91,7 +91,15 @@ pub enum DaemonAction {
 #[derive(Debug, Subcommand)]
 pub enum RemoteAction {
     /// Install rowser on a remote host.
-    Install { host: String },
+    Install {
+        host: String,
+        /// Copy this rowser binary instead of the release download.
+        #[arg(long, value_name = "PATH")]
+        local_build: Option<PathBuf>,
+        /// Test hook: base URL for the release asset download.
+        #[arg(long, hide = true)]
+        release_url: Option<String>,
+    },
 }
 
 impl Command {
@@ -171,10 +179,14 @@ pub fn run(command: Command) -> ExitCode {
             forward_id,
             ports,
         } => crate::shim::keeper_main(socket, forward_id, ports),
-        other => {
-            eprintln!("rowser {}: not implemented yet", other.label());
-            ExitCode::from(2)
-        }
+        Command::Remote {
+            action:
+                RemoteAction::Install {
+                    host,
+                    local_build,
+                    release_url,
+                },
+        } => crate::remote_install::install_main(&host, local_build, release_url),
     }
 }
 
