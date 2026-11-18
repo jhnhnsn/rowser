@@ -93,6 +93,10 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- When sshd on the Remote host listens on a loopback port of 1024 or more (for example in a
+  container), rowser no longer takes that port as a Callback port. Before, the forward and the
+  ssh session stayed open until the 10-minute timeout. Callback port detection now stops at the
+  first sshd process. ([#29](https://github.com/jhnhnsn/rowser/issues/29))
 - On Linux, the daemon installed by `rowser daemon install` now starts with your graphical
   session and stops when it ends, so it always has `DISPLAY` or `WAYLAND_DISPLAY` to open the
   browser. The systemd user unit binds to `graphical-session.target`. Run outside a graphical
