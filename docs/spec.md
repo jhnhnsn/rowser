@@ -21,7 +21,8 @@ macOS as a remote host is supported only through `BROWSER=rowser`; rowser does n
 
 One Rust binary, `rowser`. The mode comes from the subcommand, or from argv[0] when the binary
 is invoked through a symlink named `xdg-open`, `sensible-browser` or `www-browser` (which act as
-`rowser open`).
+`rowser open`). `rowser <url>`, where the first argument is a `scheme://` URL, also acts as
+`rowser open <url>`, so `BROWSER=rowser` works.
 
 ### Daemon (local) — `rowser daemon`
 

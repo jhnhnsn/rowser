@@ -34,7 +34,30 @@ fn unknown_argv0_falls_back_to_subcommand_parsing() {
         parse_from(["something-else", "doctor"]).expect("parse"),
         Command::Doctor
     ));
-    assert!(parse_from(["something-else", "https://example.com/"]).is_err());
+    assert!(parse_from(["something-else", "not-a-url"]).is_err());
+}
+
+#[test]
+fn a_url_as_first_argument_acts_as_open() {
+    // BROWSER=rowser: a program runs `rowser <url>`.
+    assert_eq!(
+        open_url(&["/usr/bin/rowser", "https://example.com/a?b=c"]),
+        "https://example.com/a?b=c"
+    );
+    assert_eq!(
+        open_url(&["rowser", "http://localhost:8080/cb"]),
+        "http://localhost:8080/cb"
+    );
+}
+
+#[test]
+fn subcommand_names_are_never_taken_as_urls() {
+    assert!(matches!(
+        parse_from(["rowser", "doctor"]).expect("parse"),
+        Command::Doctor
+    ));
+    assert!(parse_from(["rowser", "not a url"]).is_err());
+    assert!(parse_from(["rowser", "--help"]).is_err());
 }
 
 #[test]

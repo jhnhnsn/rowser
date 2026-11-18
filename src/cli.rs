@@ -261,7 +261,8 @@ fn ssh(args: Vec<OsString>) -> ExitCode {
 }
 
 /// Parse a full argv. When argv[0]'s file name is a browser name (`xdg-open`, `sensible-browser`, `www-browser`),
-/// the arguments are parsed as `rowser open …`; otherwise as normal subcommands.
+/// or the first argument is a `scheme://` URL, the arguments are parsed as
+/// `rowser open …`; otherwise as normal subcommands.
 pub fn parse_from<I, T>(argv: I) -> Result<Command, clap::Error>
 where
     I: IntoIterator<Item = T>,
@@ -273,7 +274,15 @@ where
         .and_then(|a0| Path::new(a0).file_name())
         .and_then(|n| n.to_str())
         .is_some_and(|n| BROWSER_NAMES.contains(&n));
-    if as_browser {
+    // `BROWSER=rowser` runs `rowser <url>`: a first argument of the form
+    // `scheme://…` that parses as a URL acts as `rowser open <url>`. No
+    // subcommand name contains `://`. The Daemon still applies its scheme
+    // allowlist.
+    let url_first = args
+        .get(1)
+        .and_then(|a| a.to_str())
+        .is_some_and(|a| a.contains("://") && Url::parse(a).is_ok());
+    if as_browser || url_first {
         args[0] = "rowser".into();
         args.insert(1, "open".into());
     } else if args.get(1).is_some_and(|a| a == "ssh") {
