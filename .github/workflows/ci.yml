@@ -21,3 +21,18 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install sshd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server openssh-client python3
+          sudo mkdir -p /run/sshd
+      - run: cargo test --test e2e_sshd
+        env:
+          ROWSER_E2E: "1"
