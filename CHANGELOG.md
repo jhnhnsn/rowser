@@ -8,6 +8,10 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- A user README: install from release binaries or `cargo install --git`, local and Remote host
+  setup, `alias ssh='rowser ssh'`, the `ssh_config` alternative, tmux and jump hosts, the
+  environment variables, the security model, and the known limits.
+  ([#15](https://github.com/jhnhnsn/rowser/issues/15))
 - `rowser <url>` now acts as `rowser open <url>`, so `BROWSER=rowser` works on a Remote host as
   the install hint says. A first argument of the form `scheme://…` counts as a URL; the Daemon
   still opens only http and https. ([#21](https://github.com/jhnhnsn/rowser/issues/21))
