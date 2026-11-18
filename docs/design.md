@@ -105,7 +105,8 @@ Interface: `run_open(url, ShimEnv) -> ExitCode`, `run_forward(port, ShimEnv) -> 
 
 `ShimEnv`: tunnel directory, `ROWSER_SOCKET`, procfs root, caller pid, reported host name, path
 to the own executable (for the keeper re-exec), stderr writer. Hidden: discovery, detection,
-message flow, keeper spawn (`setsid`, re-exec), reverse-dial handling, remote-port liveness.
+message flow, keeper spawn (`setsid`, re-exec), reverse-dial handling, remote-port liveness
+(LISTEN entries in `/proc/net/tcp{,6}` on Linux, a bind probe elsewhere; ADR 0005).
 
 ### `wrapper` — deep
 

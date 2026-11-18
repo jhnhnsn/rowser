@@ -184,10 +184,68 @@ async fn connect_loopback(port: u16) -> io::Result<TcpStream> {
     Err(last.unwrap_or_else(|| io::ErrorKind::ConnectionRefused.into()))
 }
 
-/// Whether something holds `port` on `ip`. It tries to bind the port: a bind
-/// refused with "address in use" means a program holds it. This never
+/// Whether a program listens on `port` at `ip` (see ADR 0005). This never
 /// connects to the program.
+///
+/// Linux: a LISTEN entry in `/proc/net/tcp` or `/proc/net/tcp6`. A bind
+/// probe would see a TIME-WAIT entry (the program closed a connection
+/// first) as "in use" for about 60 s. Elsewhere, or if `/proc` is not
+/// readable: the bind probe.
 fn in_use(ip: IpAddr, port: u16) -> bool {
+    #[cfg(target_os = "linux")]
+    if let (Ok(v4), Ok(v6)) = (
+        std::fs::read_to_string("/proc/net/tcp"),
+        std::fs::read_to_string("/proc/net/tcp6"),
+    ) {
+        return proc_listens(&v4, &v6, ip, port);
+    }
+    bind_probe(ip, port)
+}
+
+/// Whether the `/proc/net/tcp` (`v4`) and `/proc/net/tcp6` (`v6`) text
+/// has a LISTEN entry that a dial to `ip`:`port` reaches: one on `ip`, or
+/// on the unspecified address of the family. A `[::]` listener also takes
+/// IPv4 dials unless it is IPv6-only, which `/proc` does not show; it
+/// counts as listening on both.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proc_listens(v4: &str, v6: &str, ip: IpAddr, port: u16) -> bool {
+    let reaches = |addr: IpAddr| {
+        addr == ip
+            || addr.is_unspecified() && (addr.is_ipv6() || ip.is_ipv4())
+            || matches!(addr, IpAddr::V6(a) if a.to_ipv4_mapped().map(IpAddr::V4) == Some(ip))
+    };
+    v4.lines()
+        .chain(v6.lines())
+        .filter_map(proc_listener)
+        .any(|(addr, p)| p == port && reaches(addr))
+}
+
+/// The local address of one `/proc/net/tcp{,6}` line in state LISTEN
+/// (`0A`). The address is hex in 32-bit words of host byte order.
+fn proc_listener(line: &str) -> Option<(IpAddr, u16)> {
+    let mut fields = line.split_whitespace();
+    let local = fields.nth(1)?;
+    if fields.nth(1)? != "0A" {
+        return None;
+    }
+    let (addr, port) = local.split_once(':')?;
+    let port = u16::from_str_radix(port, 16).ok()?;
+    let mut bytes = Vec::with_capacity(16);
+    for i in (0..addr.len()).step_by(8) {
+        let word = u32::from_str_radix(addr.get(i..i + 8)?, 16).ok()?;
+        bytes.extend_from_slice(&word.to_ne_bytes());
+    }
+    let ip = match bytes.len() {
+        4 => IpAddr::from(<[u8; 4]>::try_from(bytes).ok()?),
+        16 => IpAddr::from(<[u8; 16]>::try_from(bytes).ok()?),
+        _ => return None,
+    };
+    Some((ip, port))
+}
+
+/// Whether something holds `port` on `ip`: a bind refused with "address in
+/// use" means a program holds it.
+fn bind_probe(ip: IpAddr, port: u16) -> bool {
     matches!(
         std::net::TcpListener::bind(SocketAddr::new(ip, port)),
         Err(e) if e.kind() == io::ErrorKind::AddrInUse
@@ -199,5 +257,65 @@ pub fn keeper_main(socket: PathBuf, forward_id: String, ports: Vec<u16>) -> Exit
     match tokio::runtime::Runtime::new() {
         Ok(rt) => rt.block_on(run_keeper(KeeperArgs::new(socket, forward_id, ports))),
         Err(_) => ExitCode::FAILURE,
+    }
+}
+
+/// Sample `/proc` text is in little-endian words.
+#[cfg(all(test, target_endian = "little"))]
+mod tests {
+    use super::proc_listens;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    const HEAD: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+    const V4: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    const V6: IpAddr = IpAddr::V6(Ipv6Addr::LOCALHOST);
+
+    fn v4(local: &str, st: &str) -> String {
+        format!("{HEAD}   0: {local} 00000000:0000 {st} 00000000:00000000 00:00000000 00000000  1000        0 1 1 0\n")
+    }
+
+    fn v6(local: &str, st: &str) -> String {
+        format!("{HEAD}   0: {local} 00000000000000000000000000000000:0000 {st} 00000000:00000000 00:00000000 00000000  1000        0 1 1 0\n")
+    }
+
+    #[test]
+    fn a_listen_entry_on_the_dialed_address_and_port_listens() {
+        let t = v4("0100007F:1F90", "0A");
+        assert!(proc_listens(&t, HEAD, V4, 8080));
+        assert!(!proc_listens(&t, HEAD, V4, 8081));
+        assert!(!proc_listens(&t, HEAD, V6, 8080));
+    }
+
+    #[test]
+    fn states_other_than_listen_do_not_listen() {
+        for st in ["06", "01", "08", "07"] {
+            assert!(
+                !proc_listens(&v4("0100007F:1F90", st), HEAD, V4, 8080),
+                "{st}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ipv6_loopback_listener_listens_for_ipv6_only() {
+        let t = v6("00000000000000000000000001000000:1F90", "0A");
+        assert!(proc_listens(HEAD, &t, V6, 8080));
+        assert!(!proc_listens(HEAD, &t, V4, 8080));
+    }
+
+    #[test]
+    fn unspecified_listeners_take_dials_of_their_family_and_any_takes_both() {
+        let any4 = v4("00000000:1F90", "0A");
+        assert!(proc_listens(&any4, HEAD, V4, 8080));
+        assert!(!proc_listens(&any4, HEAD, V6, 8080));
+        let any6 = v6("00000000000000000000000000000000:1F90", "0A");
+        assert!(proc_listens(HEAD, &any6, V4, 8080));
+        assert!(proc_listens(HEAD, &any6, V6, 8080));
+    }
+
+    #[test]
+    fn another_address_or_a_malformed_line_does_not_listen() {
+        assert!(!proc_listens(&v4("0101007F:1F90", "0A"), HEAD, V4, 8080));
+        assert!(!proc_listens("   0: zz:1F90 0:0 0A\n", HEAD, V4, 8080));
     }
 }

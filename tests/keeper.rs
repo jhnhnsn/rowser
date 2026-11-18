@@ -10,7 +10,7 @@ use std::time::Duration;
 use rowser::protocol::{Conn, Msg};
 use rowser::shim::{run_keeper, KeeperArgs};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpSocket, UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream, UnixListener, UnixStream};
 use tokio::time::Instant;
 
 fn tmp() -> common::TmpDir {
@@ -95,6 +95,46 @@ async fn the_keeper_ends_when_the_remote_port_stops_listening() {
     let (remote, port) = remote_listener().await;
     let keeper = tokio::spawn(run_keeper(args(sock, port)));
     let _control = attached(&tunnel).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(!keeper.is_finished(), "alive while the port listens");
+    let start = Instant::now();
+    drop(remote);
+    keeper.await.unwrap();
+    assert!(
+        start.elapsed() <= Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// The remote program closes a callback connection first, so its side of
+/// that connection stays in TIME-WAIT on the Callback port for about 60 s.
+/// That is not a listener: the forward still ends when the port stops
+/// listening.
+#[cfg(target_os = "linux")]
+#[tokio::test(start_paused = true)]
+async fn the_keeper_ends_when_the_remote_port_stops_listening_after_it_closed_a_connection() {
+    let dir = tmp();
+    let sock = dir.0.join("t.sock");
+    let tunnel = UnixListener::bind(&sock).unwrap();
+    // Like Python's `socket.listen`: no SO_REUSEADDR, so the TIME-WAIT
+    // entry blocks a plain bind of the port.
+    let plain = TcpSocket::new_v4().unwrap();
+    plain
+        .bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+        .unwrap();
+    let port = plain.local_addr().unwrap().port();
+    let remote = plain.listen(1).unwrap();
+    let keeper = tokio::spawn(run_keeper(args(sock, port)));
+    let _control = attached(&tunnel).await;
+    let mut browser = TcpStream::connect(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port))
+        .await
+        .unwrap();
+    let (served, _) = remote.accept().await.unwrap();
+    drop(served);
+    let mut rest = Vec::new();
+    browser.read_to_end(&mut rest).await.unwrap();
+    drop(browser);
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert!(!keeper.is_finished(), "alive while the port listens");
     let start = Instant::now();
