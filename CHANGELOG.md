@@ -10,7 +10,9 @@ All notable changes to rowser are listed here. The format follows
 
 - `ROWSER_RUNTIME_DIR` sets the Daemon's runtime directory for both `rowser daemon` and
   `rowser ssh`, so `rowser ssh` can find a Daemon that does not use the default directory. The
-  `--runtime-dir` flag of `rowser daemon` wins over it. ([#19](https://github.com/jhnhnsn/rowser/issues/19))
+  `--runtime-dir` flag of `rowser daemon` wins over it. The value must be an absolute path.
+  `rowser daemon install` writes it into the service as `--runtime-dir` when no flag is given.
+  ([#19](https://github.com/jhnhnsn/rowser/issues/19))
 - `ROWSER_LOG` sets the log level of every rowser process (default `warn`): for example,
   `ROWSER_LOG=debug rowser daemon` shows debug lines, and a failed desktop notification now shows
   a warning. Log lines go to stderr only. ([#17](https://github.com/jhnhnsn/rowser/issues/17))

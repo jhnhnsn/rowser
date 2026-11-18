@@ -114,7 +114,8 @@ clear error naming both versions and the update command.
 
 ## Configuration
 
-No config file in v1. Flags and environment variables only (`ROWSER_SOCKET`, `ROWSER_LOG`, `ROWSER_RUNTIME_DIR`, …).
+No config file in v1. Flags and environment variables only (`ROWSER_SOCKET`, `ROWSER_LOG`,
+`ROWSER_RUNTIME_DIR`, …).
 
 ## Stack
 

@@ -16,20 +16,42 @@ pub fn runtime_dir() -> Result<PathBuf, String> {
     runtime_dir_from(|k| std::env::var_os(k))
 }
 
-fn runtime_dir_from(var: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
-    if let Some(dir) = var("ROWSER_RUNTIME_DIR").filter(|d| !d.is_empty()) {
-        return Ok(PathBuf::from(dir));
+/// `$ROWSER_RUNTIME_DIR` when set and not empty. A relative value is
+/// refused: each process would resolve it against its own current
+/// directory, so the Daemon and the Wrapper could use different ones.
+pub fn rowser_runtime_dir_from(
+    var: impl Fn(&str) -> Option<OsString>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(dir) = var("ROWSER_RUNTIME_DIR").filter(|d| !d.is_empty()) else {
+        return Ok(None);
+    };
+    let dir = PathBuf::from(dir);
+    if dir.is_relative() {
+        return Err(format!(
+            "ROWSER_RUNTIME_DIR must be an absolute path, not {}",
+            dir.display()
+        ));
+    }
+    Ok(Some(dir))
+}
+
+pub(crate) fn runtime_dir_from(var: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
+    if let Some(dir) = rowser_runtime_dir_from(&var)? {
+        return Ok(dir);
     }
     #[cfg(target_os = "macos")]
     {
-        let home = var("HOME").ok_or("HOME is not set; pass --runtime-dir")?;
+        let home = var("HOME").ok_or(
+            "HOME is not set; set ROWSER_RUNTIME_DIR (or pass --runtime-dir to rowser daemon)",
+        )?;
         Ok(PathBuf::from(home).join("Library/Application Support/rowser"))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let dir = var("XDG_RUNTIME_DIR")
-            .filter(|d| !d.is_empty())
-            .ok_or("XDG_RUNTIME_DIR is not set; pass --runtime-dir")?;
+        let dir = var("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()).ok_or(
+            "XDG_RUNTIME_DIR is not set; set ROWSER_RUNTIME_DIR \
+             (or pass --runtime-dir to rowser daemon)",
+        )?;
         Ok(PathBuf::from(dir).join("rowser"))
     }
 }
@@ -59,6 +81,20 @@ mod tests {
             ("HOME", "/h"),
         ];
         assert_eq!(runtime_dir_from(env(&vars)), Ok(PathBuf::from("/tmp/rt")));
+    }
+
+    #[test]
+    fn a_relative_rowser_runtime_dir_is_refused() {
+        let vars = [("ROWSER_RUNTIME_DIR", "rt"), ("XDG_RUNTIME_DIR", "/run/u")];
+        let err = runtime_dir_from(env(&vars)).unwrap_err();
+        assert!(err.contains("ROWSER_RUNTIME_DIR"), "{err}");
+        assert!(err.contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_default_names_the_variable_not_an_ssh_flag() {
+        let err = runtime_dir_from(env(&[])).unwrap_err();
+        assert!(err.contains("set ROWSER_RUNTIME_DIR"), "{err}");
     }
 
     #[test]

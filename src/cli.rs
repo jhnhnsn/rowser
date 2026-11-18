@@ -194,8 +194,16 @@ pub fn run(command: Command) -> ExitCode {
 /// arguments for the service, so the installed daemon runs with them
 /// (no config file in v1). Refuses the hidden test flags. A relative
 /// `--runtime-dir` becomes absolute, as the service does not run in this
-/// directory.
+/// directory. With no `--runtime-dir`, a set `ROWSER_RUNTIME_DIR` goes
+/// into the service as `--runtime-dir`, so one variable sets both sides.
 pub fn install_args(cmd: &Command) -> Result<Vec<String>, String> {
+    install_args_from(cmd, |k| std::env::var_os(k))
+}
+
+fn install_args_from(
+    cmd: &Command,
+    var: impl Fn(&str) -> Option<OsString>,
+) -> Result<Vec<String>, String> {
     let Command::Daemon {
         runtime_dir,
         open_command,
@@ -223,6 +231,11 @@ pub fn install_args(cmd: &Command) -> Result<Vec<String>, String> {
         let dir = dir
             .to_str()
             .ok_or_else(|| format!("--runtime-dir {} is not UTF-8", dir.display()))?;
+        args.extend(["--runtime-dir".to_string(), dir.to_string()]);
+    } else if let Some(dir) = crate::platform::rowser_runtime_dir_from(var)? {
+        let dir = dir
+            .to_str()
+            .ok_or_else(|| format!("ROWSER_RUNTIME_DIR {} is not UTF-8", dir.display()))?;
         args.extend(["--runtime-dir".to_string(), dir.to_string()]);
     }
     if let Some(open) = open_command {
@@ -278,7 +291,39 @@ mod install_args_tests {
     use super::*;
 
     fn args_of(argv: &[&str]) -> Result<Vec<String>, String> {
-        install_args(&parse_from(argv).unwrap())
+        install_args_from(&parse_from(argv).unwrap(), |_| None)
+    }
+
+    fn args_with_env(argv: &[&str], value: &str) -> Result<Vec<String>, String> {
+        let value = OsString::from(value);
+        install_args_from(&parse_from(argv).unwrap(), move |k| {
+            (k == "ROWSER_RUNTIME_DIR").then(|| value.clone())
+        })
+    }
+
+    #[test]
+    fn install_carries_rowser_runtime_dir_when_no_flag_is_given() {
+        let args = args_with_env(&["rowser", "daemon", "install"], "/tmp/rt").unwrap();
+        assert_eq!(args, ["--runtime-dir", "/tmp/rt"]);
+    }
+
+    #[test]
+    fn install_prefers_the_flag_over_rowser_runtime_dir() {
+        let argv = ["rowser", "daemon", "--runtime-dir", "/run/r", "install"];
+        let args = args_with_env(&argv, "/tmp/rt").unwrap();
+        assert_eq!(args, ["--runtime-dir", "/run/r"]);
+    }
+
+    #[test]
+    fn install_ignores_an_empty_rowser_runtime_dir() {
+        let args = args_with_env(&["rowser", "daemon", "install"], "").unwrap();
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn install_refuses_a_relative_rowser_runtime_dir() {
+        let err = args_with_env(&["rowser", "daemon", "install"], "rt").unwrap_err();
+        assert!(err.contains("ROWSER_RUNTIME_DIR"), "{err}");
     }
 
     #[test]

@@ -189,6 +189,7 @@ fn rowser_ssh_warns_when_the_daemon_is_not_running() {
         .args(["ssh", "h", "true"])
         .env("PATH", path)
         .env("XDG_RUNTIME_DIR", &dir.0)
+        .env_remove("ROWSER_RUNTIME_DIR")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(5));
@@ -284,6 +285,7 @@ fn signal_reaches_ssh(sig: libc::c_int, name: &str) {
         .args(["ssh", "h"])
         .env("PATH", path)
         .env("XDG_RUNTIME_DIR", &dir.0)
+        .env_remove("ROWSER_RUNTIME_DIR")
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
@@ -322,10 +324,65 @@ fn rowser_ssh_keeps_a_double_dash_and_help_flags() {
         .args(["ssh", "-h", "--", "h"])
         .env("PATH", path)
         .env("XDG_RUNTIME_DIR", &dir.0)
+        .env_remove("ROWSER_RUNTIME_DIR")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(argv(&dir.0), ["-h", "--", "h"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rowser_ssh_finds_the_daemon_through_rowser_runtime_dir() {
+    let dir = TmpDir::new();
+    let run = dir.0.join("rt");
+    let (direct, relay) = bind_sockets(&run).unwrap();
+    let d = Daemon::new(
+        DaemonConfig::default(),
+        RecordingOpener::default(),
+        RecordingNotifier::default(),
+    );
+    tokio::spawn(d.serve(direct, relay));
+    fake_ssh(&dir.0, Some("h"), 0);
+    let path = format!("{}:{}", dir.0.display(), std::env::var("PATH").unwrap());
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_rowser"))
+        .args(["ssh", "h"])
+        .env("PATH", path)
+        .env("XDG_RUNTIME_DIR", dir.0.join("elsewhere"))
+        .env("ROWSER_RUNTIME_DIR", &run)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let got = argv(&dir.0);
+    std::fs::write(dir.0.join("done"), "").unwrap();
+    let out = tokio::task::spawn_blocking(|| child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(got[0], "-R", "{}", String::from_utf8_lossy(&out.stderr));
+    let local = got[1].split_once(':').unwrap().1;
+    assert_eq!(Path::new(local).parent().unwrap(), run);
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+#[cfg(unix)]
+fn rowser_ssh_refuses_a_relative_rowser_runtime_dir() {
+    let dir = TmpDir::new();
+    fake_ssh(&dir.0, Some("h"), 0);
+    std::fs::write(dir.0.join("done"), "").unwrap();
+    let path = format!("{}:{}", dir.0.display(), std::env::var("PATH").unwrap());
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rowser"))
+        .args(["ssh", "h"])
+        .env("PATH", path)
+        .env("ROWSER_RUNTIME_DIR", "rt")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "rowser ssh: ROWSER_RUNTIME_DIR must be an absolute path, not rt; \
+         running ssh without the URL forward\n"
+    );
+    assert_eq!(argv(&dir.0), ["h"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

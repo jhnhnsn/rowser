@@ -38,8 +38,9 @@ rowser is a CLI; test it from the terminal.
   so the daemon on `[::1]` does not keep it alive. It ends when a port that listened once stops
   (2 s checks); before that, only the 10-minute timeout ends it. Kill leftover keepers with
   `pkill -f __keeper`.
-- `rowser ssh` uses the `ssh` on `PATH` and the Daemon in `$XDG_RUNTIME_DIR/rowser/`: put a fake
-  `ssh` script first on `PATH` and set `XDG_RUNTIME_DIR` to a short temp dir to test it.
+- `rowser ssh` uses the `ssh` on `PATH` and the Daemon in `$ROWSER_RUNTIME_DIR` (absolute) or
+  else `$XDG_RUNTIME_DIR/rowser/`: put a fake `ssh` script first on `PATH` and set one of them to
+  a short temp dir to test it. Unset `ROWSER_RUNTIME_DIR` when a test relies on the default.
 - `rowser daemon install|uninstall` writes the unit under `$XDG_CONFIG_HOME/systemd/user/` and
   runs the `systemctl` on `PATH`: set `XDG_CONFIG_HOME` to a temp dir and put a fake `systemctl`
   script first on `PATH` that records its arguments. Never touch the real user units. Check that
