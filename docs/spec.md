@@ -29,7 +29,8 @@ is invoked through a symlink named `xdg-open`, `sensible-browser` or `www-browse
   `rowser daemon install` writes and starts it; `rowser daemon uninstall` removes it.
 - Listens on two Unix sockets in its runtime directory:
   - Linux: `$XDG_RUNTIME_DIR/rowser/`; macOS: `~/Library/Application Support/rowser/`.
-    Overridable with `--runtime-dir`.
+    Overridable with `ROWSER_RUNTIME_DIR` (read by `rowser daemon` and `rowser ssh`) and, for
+    `rowser daemon`, with `--runtime-dir`, which wins over the variable.
   - `rowserd.sock` — direct socket, for `ssh_config` forwards. Host stamps are rejected here;
     the host name is the shim's untrusted reported name.
   - `rowserd-relay.sock` — relay socket, for Wrappers only. The first frame after the
@@ -113,7 +114,7 @@ clear error naming both versions and the update command.
 
 ## Configuration
 
-No config file in v1. Flags and environment variables only (`ROWSER_SOCKET`, `ROWSER_LOG`, …).
+No config file in v1. Flags and environment variables only (`ROWSER_SOCKET`, `ROWSER_LOG`, `ROWSER_RUNTIME_DIR`, …).
 
 ## Stack
 
