@@ -97,6 +97,9 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- `docs/spec.md` now says that an empty `ROWSER_RUNTIME_DIR` is ignored and that a set value
+  must be an absolute path when rowser reads it, as the code does. Its Stack list now names
+  `tracing-subscriber`. ([#31](https://github.com/jhnhnsn/rowser/issues/31))
 - When sshd on the Remote host listens on a loopback port of 1024 or more (for example in a
   container), rowser no longer takes that port as a Callback port. Before, the forward and the
   ssh session stayed open until the 10-minute timeout. Callback port detection now stops at the
