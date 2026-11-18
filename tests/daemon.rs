@@ -644,7 +644,7 @@ async fn a_failed_open_closes_the_forward() {
     let port = free_port();
     let reply = request(&mut conn, open_with_port("https://example.com/", port)).await;
     assert!(error_of(&reply).is_some());
-    // The forward task drops its listeners after the reply goes out, so
+    // The forward task can drop its listeners after the reply, so
     // wait (with a deadline) for the port to come free.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
