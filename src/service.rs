@@ -23,6 +23,8 @@ pub fn render_systemd_unit(exe: &Path, args: &[String]) -> String {
     format!(
         "[Unit]\n\
          Description=rowser daemon: open URLs from SSH sessions in the local browser\n\
+         PartOf=graphical-session.target\n\
+         After=graphical-session.target\n\
          \n\
          [Service]\n\
          ExecStart={exec}\n\
@@ -30,7 +32,7 @@ pub fn render_systemd_unit(exe: &Path, args: &[String]) -> String {
          RestartSec=2\n\
          \n\
          [Install]\n\
-         WantedBy=default.target\n"
+         WantedBy=graphical-session.target\n"
     )
 }
 
@@ -279,6 +281,8 @@ mod tests {
             unit,
             "[Unit]
 Description=rowser daemon: open URLs from SSH sessions in the local browser
+PartOf=graphical-session.target
+After=graphical-session.target
 
 [Service]
 ExecStart=\"/home/u/.cargo/bin/rowser\" daemon
@@ -286,7 +290,7 @@ Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 "
         );
     }

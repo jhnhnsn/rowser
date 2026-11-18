@@ -26,7 +26,7 @@ is invoked through a symlink named `xdg-open`, `sensible-browser` or `www-browse
 
 ### Daemon (local) — `rowser daemon`
 
-- Runs as a systemd user unit (Linux) or a launchd LaunchAgent (macOS).
+- Runs as a systemd user unit bound to `graphical-session.target` (Linux) or a launchd LaunchAgent (macOS).
   `rowser daemon install` writes and starts it; `rowser daemon uninstall` removes it.
 - Listens on two Unix sockets in its runtime directory:
   - Linux: `$XDG_RUNTIME_DIR/rowser/`; macOS: `~/Library/Application Support/rowser/`.
