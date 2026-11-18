@@ -99,6 +99,11 @@ impl Drop for World {
 
 impl World {
     async fn start() -> World {
+        World::start_on("127.0.0.2").await
+    }
+
+    /// sshd listens on `addr` with a high port.
+    async fn start_on(addr: &str) -> World {
         let dir = TmpDir::new("e");
         let d = dir.0.display().to_string();
         for key in ["host_key", "id"] {
@@ -108,12 +113,10 @@ impl World {
                 .arg(dir.0.join(key)));
         }
         std::fs::copy(dir.0.join("id.pub"), dir.0.join("authorized_keys")).unwrap();
-        // sshd listens on 127.0.0.2. With OpenSSH 9.8+ the sshd listener is
-        // an ancestor of the remote program, and detection takes the
-        // 127.0.0.1 and [::1] listeners of the ancestors as Callback ports.
-        // The keeper would then watch the sshd port, which never stops
-        // listening. A real sshd on port 22 is below 1024 and not taken.
-        let port = TcpListener::bind("127.0.0.2:0")
+        // With OpenSSH 9.8+ the sshd listener is an ancestor of the remote
+        // program. The /proc walk stops at sshd (#29), so a high sshd port on
+        // 127.0.0.1 is not a Callback port.
+        let port = TcpListener::bind((addr, 0))
             .unwrap()
             .local_addr()
             .unwrap()
@@ -123,13 +126,13 @@ impl World {
         let (kind, key) = (fields.next().unwrap(), fields.next().unwrap());
         std::fs::write(
             dir.0.join("known_hosts"),
-            format!("[127.0.0.2]:{port} {kind} {key}\n"),
+            format!("[{addr}]:{port} {kind} {key}\n"),
         )
         .unwrap();
         std::fs::write(
             dir.0.join("sshd_config"),
             format!(
-                "Port {port}\nListenAddress 127.0.0.2\nHostKey {d}/host_key\n\
+                "Port {port}\nListenAddress {addr}\nHostKey {d}/host_key\n\
                  PidFile {d}/sshd.pid\nAuthorizedKeysFile {d}/authorized_keys\n\
                  UsePAM no\nStrictModes no\nPasswordAuthentication no\n\
                  KbdInteractiveAuthentication no\nPubkeyAuthentication yes\n\
@@ -142,7 +145,7 @@ impl World {
             dir.0.join("ssh_config"),
             format!(
                 "Host e2e-jump\n  ProxyJump e2e-a\n\
-                 Host *\n  HostName 127.0.0.2\n  Port {port}\n  IdentityFile {d}/id\n\
+                 Host *\n  HostName {addr}\n  Port {port}\n  IdentityFile {d}/id\n\
                  \x20 IdentitiesOnly yes\n  UserKnownHostsFile {d}/known_hosts\n\
                  \x20 GlobalKnownHostsFile /dev/null\n  StrictHostKeyChecking yes\n\
                  \x20 BatchMode yes\n  ExitOnForwardFailure yes\n  ControlMaster no\n\
@@ -162,7 +165,7 @@ impl World {
             .spawn()
             .unwrap();
         wait_until("sshd to listen", || {
-            TcpStream::connect(("127.0.0.2", port)).is_ok()
+            TcpStream::connect((addr, port)).is_ok()
         });
 
         let bin = dir.0.join("bin");
@@ -300,7 +303,22 @@ async fn an_oauth_callback_reaches_the_remote_program() {
         return;
     }
     let _lock = LOCK.lock().await;
-    let w = World::start().await;
+    oauth_callback(World::start().await).await;
+}
+
+/// #29: sshd on 127.0.0.1 with a high port. The /proc walk stops at sshd, so
+/// the sshd port is not a Callback port, and the session ends when the
+/// remote program stops listening (not at the 10-minute timeout).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oauth_callback_works_when_sshd_listens_on_a_high_loopback_port() {
+    if !enabled() {
+        return;
+    }
+    let _lock = LOCK.lock().await;
+    oauth_callback(World::start_on("127.0.0.1").await).await;
+}
+
+async fn oauth_callback(w: World) {
     let script = w.dir.0.join("oauth.py");
     std::fs::write(&script, OAUTH_PY).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();

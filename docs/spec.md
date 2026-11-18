@@ -89,7 +89,8 @@ is invoked through a symlink named `xdg-open`, `sensible-browser` or `www-browse
      `localhost`, `127.0.0.1` or `[::1]`.
   2. The URL's own port when the URL itself points at one of those addresses.
   3. (Linux remote) Loopback TCP ports that the shim's parent process tree (parent and
-     ancestors) is listening on, found through `/proc`.
+     ancestors) is listening on, found through `/proc`. The walk stops at the first sshd
+     process: it does not take the listeners of that process or of its ancestors.
 - `rowser forward <port>` forwards a port manually.
 - Only ports 1024–65535. The daemon binds the local side on loopback only (`127.0.0.1` and
   `[::1]`).

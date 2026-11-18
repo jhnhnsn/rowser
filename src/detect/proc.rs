@@ -29,13 +29,19 @@ pub(super) fn listening_ports(root: &Path, caller_pid: u32) -> BTreeSet<u16> {
 }
 
 /// Socket inodes held by `pid` and its ancestors, pid 1 included (in a container the caller's
-/// shell can be pid 1). Stops at pid 0 or when a process has no readable parent.
+/// shell can be pid 1). Stops at pid 0, when a process has no readable parent, or at the first
+/// sshd process, whose listeners and ancestors are not taken (ticket #29: with OpenSSH 9.8+
+/// the sshd listener is an ancestor, and a high loopback sshd port is not a callback).
 fn tree_socket_inodes(root: &Path, pid: u32) -> HashSet<u64> {
     let mut inodes = HashSet::new();
     let mut seen = HashSet::new();
     let mut pid = pid;
     while pid > 0 && seen.insert(pid) {
         let dir = root.join(pid.to_string());
+        let stat = fs::read_to_string(dir.join("stat")).ok();
+        if stat.as_deref().and_then(comm).is_some_and(is_sshd) {
+            break;
+        }
         if let Ok(entries) = fs::read_dir(dir.join("fd")) {
             for entry in entries.flatten() {
                 if let Ok(target) = fs::read_link(entry.path()) {
@@ -45,10 +51,7 @@ fn tree_socket_inodes(root: &Path, pid: u32) -> HashSet<u64> {
                 }
             }
         }
-        match fs::read_to_string(dir.join("stat"))
-            .ok()
-            .and_then(|s| parent_pid(&s))
-        {
+        match stat.as_deref().and_then(parent_pid) {
             Some(ppid) => pid = ppid,
             None => break,
         }
@@ -62,6 +65,17 @@ fn socket_inode(target: &str) -> Option<u64> {
         .strip_suffix(']')?
         .parse()
         .ok()
+}
+
+/// The comm field of `/proc/<pid>/stat`, between the first `(` and the last `)`.
+fn comm(stat: &str) -> Option<&str> {
+    stat.get(stat.find('(')? + 1..stat.rfind(')')?)
+}
+
+/// sshd by comm: `sshd` (listener, and session before OpenSSH 9.8) or `sshd-*` (`sshd-session`,
+/// `sshd-auth`). comm, not `exe`: `exe` of a root-owned sshd is unreadable to the user.
+fn is_sshd(comm: &str) -> bool {
+    comm == "sshd" || comm.starts_with("sshd-")
 }
 
 /// The ppid field of `/proc/<pid>/stat`. The comm field may hold spaces and parentheses, so
