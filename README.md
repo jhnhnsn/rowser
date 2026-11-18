@@ -86,9 +86,10 @@ rowser remote install myhost
 ```
 
 This detects the remote architecture (`ssh myhost uname -sm`), downloads the matching release
-binary, copies it to `~/.local/bin/rowser` on the host, and creates the `xdg-open`,
+binary, checks it against the release's `SHA256SUMS` (and refuses to install on a mismatch or
+a missing entry), copies it to `~/.local/bin/rowser` on the host, and creates the `xdg-open`,
 `sensible-browser` and `www-browser` symlinks next to it. Use `--local-build <path>` to copy a
-binary you built instead of the download.
+binary you built instead of the download (no checksum check).
 
 Then, on the remote host, add this line to your shell rc:
 

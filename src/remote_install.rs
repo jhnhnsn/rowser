@@ -49,51 +49,71 @@ impl BinarySource for LocalBuild {
     }
 }
 
-/// The release asset `<base>/rowser-<asset>.tar.gz`: `curl` piped into
-/// `tar -xzO`, read into memory. No temporary files.
+/// The release asset `<base>/rowser-<asset>.tar.gz`, checked against
+/// `<base>/SHA256SUMS`, then unpacked with `tar -xzO`. All in memory; no
+/// temporary files.
 pub struct ReleaseDownload {
     pub base_url: String,
 }
 
+/// `curl` one URL into memory.
+fn download(url: &str) -> Result<Vec<u8>, String> {
+    let out = Command::new("curl")
+        .args(["-fsSL", "--"])
+        .arg(url)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run curl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "cannot download {url}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(out.stdout)
+}
+
+/// Refuses `body` unless `sums` (`sha256sum` output) has a matching entry for `name`.
+fn check_sha256(sums: &str, name: &str, body: &[u8]) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let want = sums
+        .lines()
+        .filter_map(|line| line.split_once(char::is_whitespace))
+        .find(|(_, file)| file.trim_start().trim_start_matches('*') == name)
+        .map(|(hash, _)| hash.to_ascii_lowercase())
+        .ok_or_else(|| format!("SHA256SUMS has no entry for {name}"))?;
+    let got: String = Sha256::digest(body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if got != want {
+        return Err(format!(
+            "{name} does not match SHA256SUMS (expected {want}, got {got})"
+        ));
+    }
+    Ok(())
+}
+
 impl BinarySource for ReleaseDownload {
     fn binary(&self, asset: &str) -> Result<Vec<u8>, String> {
+        let base = self.base_url.trim_end_matches('/');
         let name = format!("rowser-{asset}.tar.gz");
-        let url = format!("{}/{name}", self.base_url.trim_end_matches('/'));
-        let mut curl = Command::new("curl")
-            .args(["-fsSL", "--"])
-            .arg(&url)
-            .stdin(Stdio::null())
+        let body = download(&format!("{base}/{name}"))?;
+        let sums = download(&format!("{base}/SHA256SUMS"))?;
+        check_sha256(&String::from_utf8_lossy(&sums), &name, &body)?;
+        let mut tar = Command::new("tar")
+            .args(["-xzO", "-f", "-", "rowser"])
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("cannot run curl: {e}"))?;
-        let body = curl.stdout.take().expect("piped stdout");
-        let tar = Command::new("tar")
-            .args(["-xzO", "-f", "-", "rowser"])
-            .stdin(body)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
-        let tar = match tar {
-            Ok(tar) => tar,
-            Err(e) => {
-                let _ = curl.kill();
-                let _ = curl.wait();
-                return Err(format!("cannot run tar: {e}"));
-            }
-        };
+            .map_err(|e| format!("cannot run tar: {e}"))?;
+        let mut stdin = tar.stdin.take().expect("piped stdin");
+        let writer = std::thread::spawn(move || stdin.write_all(&body));
         let tar_out = tar
             .wait_with_output()
             .map_err(|e| format!("cannot run tar: {e}"))?;
-        let curl_out = curl
-            .wait_with_output()
-            .map_err(|e| format!("cannot run curl: {e}"))?;
-        if !curl_out.status.success() {
-            return Err(format!(
-                "cannot download {url}: {}",
-                String::from_utf8_lossy(&curl_out.stderr).trim()
-            ));
-        }
+        let _ = writer.join();
         if !tar_out.status.success() || tar_out.stdout.is_empty() {
             return Err(format!(
                 "{name} does not hold a rowser binary: {}",

@@ -104,7 +104,9 @@ is invoked through a symlink named `xdg-open`, `sensible-browser` or `www-browse
 ### Helpers
 
 - `rowser remote install <host>` (run locally): detects the remote arch with `ssh host uname -sm`,
-  downloads the matching release binary (or uses a local build), copies it to
+  downloads the matching release binary (or uses a local build), checks the download against
+  the release's `SHA256SUMS` (refusing a missing `SHA256SUMS`, a missing entry or a mismatch;
+  a local build skips the check), copies it to
   `~/.local/bin/rowser`, creates the symlinks, and prints the shell line for `BROWSER`.
 - `rowser doctor` (remote): warns when `~/.local/bin` is not before `/usr/bin` on `PATH`, when
   `BROWSER` is not set, and does a live round trip through the tunnel (ping → daemon version).

@@ -48,7 +48,8 @@ rowser is a CLI; test it from the terminal.
 - `rowser remote install <host>` runs the `ssh`, `curl` and `tar` on `PATH`: put a fake `ssh`
   first on `PATH` that answers `uname -sm` and runs the copy command locally with `sh -c`, and set
   `HOME` to a temp dir. `--local-build <path>` skips the download; the hidden `--release-url
-  <base>` points the download at a local HTTP server serving `rowser-<target>.tar.gz`.
+  <base>` points the download at a local HTTP server serving `rowser-<target>.tar.gz` and
+  `SHA256SUMS` (`sha256sum` output; the download is refused without a matching entry).
 - Unix socket paths are limited to about 104–108 bytes: put test sockets in a short temp dir
   (e.g. `/tmp/rw.XXXX`), never under a long scratchpad or worktree path; remove it afterwards.
 - Never open the real browser or show real desktop notifications in a test.

@@ -16,6 +16,11 @@ fn temp_dir(tag: &str) -> PathBuf {
 
 /// Serves `body` for `GET <path>` and 404 for any other path, once per request.
 fn serve(path: &'static str, body: Vec<u8>) -> String {
+    serve_all(vec![(path, body)])
+}
+
+/// Serves each `(path, body)` for `GET <path>` and 404 for any other path.
+fn serve_all(routes: Vec<(&'static str, Vec<u8>)>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -24,11 +29,12 @@ fn serve(path: &'static str, body: Vec<u8>) -> String {
             let mut buf = [0u8; 4096];
             let n = stream.read(&mut buf).unwrap();
             let req = String::from_utf8_lossy(&buf[..n]);
-            let hit = req.starts_with(&format!("GET {path} "));
-            let (status, body) = if hit {
-                ("200 OK", body.clone())
-            } else {
-                ("404 Not Found", Vec::new())
+            let hit = routes
+                .iter()
+                .find(|(path, _)| req.starts_with(&format!("GET {path} ")));
+            let (status, body) = match hit {
+                Some((_, body)) => ("200 OK", body.clone()),
+                None => ("404 Not Found", Vec::new()),
             };
             let head = format!(
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -59,15 +65,83 @@ fn tarball(dir: &Path, content: &str) -> Vec<u8> {
     std::fs::read(out).unwrap()
 }
 
+/// The `sha256sum` line for `body` named `name`, as the release workflow writes it.
+fn sums_line(dir: &Path, name: &str, body: &[u8]) -> String {
+    let file = dir.join(name);
+    std::fs::write(&file, body).unwrap();
+    let out = Command::new("sha256sum")
+        .arg(name)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout).unwrap()
+}
+
+const X86_TGZ: &str = "/v0.1.0/rowser-x86_64-unknown-linux-musl.tar.gz";
+const SUMS: &str = "/v0.1.0/SHA256SUMS";
+
 #[test]
-fn release_download_fetches_and_unpacks_the_asset() {
+fn release_download_fetches_checks_and_unpacks_the_asset() {
     let dir = temp_dir("dl");
     let body = tarball(&dir, "BINARY-x86");
-    let base = serve("/v0.1.0/rowser-x86_64-unknown-linux-musl.tar.gz", body);
+    let other = sums_line(&dir, "rowser-aarch64-unknown-linux-musl.tar.gz", b"other");
+    let mine = sums_line(&dir, "rowser-x86_64-unknown-linux-musl.tar.gz", &body);
+    let sums = format!("{other}{mine}").into_bytes();
+    let base = serve_all(vec![(X86_TGZ, body), (SUMS, sums)]);
     let bin = ReleaseDownload { base_url: base }
         .binary("x86_64-unknown-linux-musl")
         .unwrap();
     assert_eq!(bin, b"BINARY-x86");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn release_download_refuses_a_hash_mismatch() {
+    let dir = temp_dir("dlbad");
+    let body = tarball(&dir, "BINARY-x86");
+    let sums = sums_line(&dir, "rowser-x86_64-unknown-linux-musl.tar.gz", b"tampered");
+    let base = serve_all(vec![(X86_TGZ, body), (SUMS, sums.into_bytes())]);
+    let err = ReleaseDownload { base_url: base }
+        .binary("x86_64-unknown-linux-musl")
+        .unwrap_err();
+    assert!(
+        err.contains("rowser-x86_64-unknown-linux-musl.tar.gz does not match SHA256SUMS"),
+        "{err}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn release_download_refuses_an_asset_without_an_entry() {
+    let dir = temp_dir("dlnoent");
+    let body = tarball(&dir, "BINARY-x86");
+    let sums = sums_line(&dir, "rowser-aarch64-unknown-linux-musl.tar.gz", &body);
+    let base = serve_all(vec![(X86_TGZ, body), (SUMS, sums.into_bytes())]);
+    let err = ReleaseDownload { base_url: base }
+        .binary("x86_64-unknown-linux-musl")
+        .unwrap_err();
+    assert!(
+        err.contains("SHA256SUMS has no entry for rowser-x86_64-unknown-linux-musl.tar.gz"),
+        "{err}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn release_download_refuses_a_missing_sha256sums() {
+    let dir = temp_dir("dlnosums");
+    let body = tarball(&dir, "BINARY-x86");
+    let base = serve(X86_TGZ, body);
+    let err = ReleaseDownload {
+        base_url: base.clone(),
+    }
+    .binary("x86_64-unknown-linux-musl")
+    .unwrap_err();
+    assert!(
+        err.contains(&format!("cannot download {base}/SHA256SUMS")),
+        "{err}"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
