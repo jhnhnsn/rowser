@@ -89,6 +89,13 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- On Linux, the daemon installed by `rowser daemon install` now starts with your graphical
+  session and stops when it ends, so it always has `DISPLAY` or `WAYLAND_DISPLAY` to open the
+  browser. The systemd user unit binds to `graphical-session.target`. Run outside a graphical
+  session (for example over SSH), install does not start the daemon and says that it starts with
+  the next graphical session. A desktop that never reaches `graphical-session.target` does not
+  start the daemon. Run `rowser daemon install` again to move an older install to the new target.
+  ([#22](https://github.com/jhnhnsn/rowser/issues/22))
 - `cargo test` no longer fails at random in `a_failed_open_closes_the_forward`: the test now
   waits up to 5 seconds for a failed open's forward to free its local port.
   ([#23](https://github.com/jhnhnsn/rowser/issues/23))
