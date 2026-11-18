@@ -8,6 +8,14 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- An OAuth callback forward on Linux now ends a few seconds after the remote program stops
+  listening, also when the program closed the callback connection first: the keeper reads the
+  listening ports in `/proc/net/tcp` and `/proc/net/tcp6` (macOS keeps the bind check). Before,
+  such a forward could keep `rowser ssh` waiting for about 60 seconds. An end-to-end test with a
+  throwaway `sshd` now checks `xdg-open`, an OAuth callback, a reattached session, `ProxyJump`
+  and `rowser remote install` on every Linux CI run.
+  ([#14](https://github.com/jhnhnsn/rowser/issues/14),
+  [#27](https://github.com/jhnhnsn/rowser/issues/27))
 - `rowser remote install <host>` installs rowser on a Linux x86_64 or aarch64 remote host: it
   copies the matching release binary (or `--local-build <path>`) to `~/.local/bin/rowser`,
   links `xdg-open`, `sensible-browser` and `www-browser` to it, and prints the
