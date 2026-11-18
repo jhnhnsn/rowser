@@ -3,15 +3,17 @@
 //!
 //! The Remote host is this machine: the Shim finds the Session socket in
 //! `/tmp`, as on a real Remote host. Runs only with `ROWSER_E2E=1` (Linux
-//! CI and local runs); needs `/usr/bin/sshd`, `ssh`, `ssh-keygen` and
-//! `python3`. The tests hold one lock, so only one session set uses `/tmp`
-//! at a time and "the newest socket" is well defined.
+//! CI and local runs); without it each test returns at once. Needs `sshd`
+//! (in `/usr/sbin`, `/usr/bin` or on `PATH`), `ssh`, `ssh-keygen` and
+//! `python3`. The tests hold one lock, so only one session set of this test
+//! uses `/tmp` at a time and "the newest socket" is well defined. A real
+//! `rowser ssh` that the user starts during the run can still make a newer
+//! socket and break the reattach test.
 
 #![cfg(target_os = "linux")]
 
 mod common;
 
-use std::collections::HashSet;
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv6Addr, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
@@ -50,17 +52,22 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
-/// The `rowser-*.sock` files in `/tmp` now.
-fn tmp_sockets() -> HashSet<PathBuf> {
-    std::fs::read_dir("/tmp")
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().unwrap().to_string_lossy();
-            name.starts_with("rowser-") && name.ends_with(".sock")
-        })
-        .collect()
+/// Joins a session thread, or fails the test after `TIMEOUT`.
+fn join(what: &str, session: std::thread::JoinHandle<ExitCode>) -> ExitCode {
+    wait_until(&format!("{what} to end"), || session.is_finished());
+    session.join().unwrap()
+}
+
+/// The `sshd` binary: `/usr/sbin` (Debian, Ubuntu), `/usr/bin` (Arch), or
+/// the first on `PATH`.
+fn sshd_path() -> PathBuf {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    ["/usr/sbin".into(), "/usr/bin".into()]
+        .into_iter()
+        .chain(std::env::split_paths(&path))
+        .map(|d: PathBuf| d.join("sshd"))
+        .find(|p| p.is_file())
+        .expect("no sshd in /usr/sbin, /usr/bin or PATH")
 }
 
 /// A throwaway sshd, a Daemon and an ssh config for the Host aliases
@@ -71,16 +78,21 @@ struct World {
     opener: RecordingOpener,
     notifier: RecordingNotifier,
     env: WrapperEnv,
-    before: HashSet<PathBuf>,
 }
 
 impl Drop for World {
     fn drop(&mut self) {
         let _ = self.sshd.kill();
         let _ = self.sshd.wait();
-        // sshd leaves the remote Session sockets behind.
-        for p in tmp_sockets().difference(&self.before) {
-            let _ = std::fs::remove_file(p);
+        // sshd leaves the remote Session sockets behind. Remove only those
+        // of this test's sessions: the `-R` specs that the ssh shim logged.
+        let log = std::fs::read_to_string(self.dir.0.join("forwards")).unwrap_or_default();
+        for spec in log.lines() {
+            if let Some((remote, _)) = spec.split_once(':') {
+                if remote.starts_with("/tmp/rowser-") {
+                    let _ = std::fs::remove_file(remote);
+                }
+            }
         }
     }
 }
@@ -89,7 +101,6 @@ impl World {
     async fn start() -> World {
         let dir = TmpDir::new("e");
         let d = dir.0.display().to_string();
-        let before = tmp_sockets();
         for key in ["host_key", "id"] {
             run(Command::new("ssh-keygen")
                 .args(["-q", "-t", "ed25519", "-N", ""])
@@ -135,7 +146,7 @@ impl World {
         )
         .unwrap();
         let log = std::fs::File::create(dir.0.join("sshd.log")).unwrap();
-        let sshd = Command::new("/usr/bin/sshd")
+        let sshd = Command::new(sshd_path())
             .arg("-D")
             .arg("-e")
             .arg("-f")
@@ -152,6 +163,15 @@ impl World {
         let bin = dir.0.join("bin");
         std::fs::create_dir(&bin).unwrap();
         std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rowser"), bin.join("xdg-open")).unwrap();
+        // The ssh that `rowser ssh` runs: it logs the `-R` spec (the first
+        // two arguments), so Drop knows this test's Session sockets.
+        let ssh_shim = dir.0.join("ssh-shim");
+        std::fs::write(
+            &ssh_shim,
+            format!("#!/bin/sh\n[ \"$1\" = -R ] && echo \"$2\" >> {d}/forwards\nexec ssh \"$@\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh_shim, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let run_dir = dir.0.join("run");
         let (direct, relay) = bind_sockets(&run_dir).unwrap();
@@ -166,7 +186,7 @@ impl World {
         let daemon = Daemon::new(config, opener.clone(), notifier.clone());
         tokio::spawn(daemon.serve(direct, relay));
         let env = WrapperEnv {
-            ssh: "ssh".into(),
+            ssh: ssh_shim,
             relay_socket: run_dir.join(RELAY_SOCKET),
             session_dir: run_dir,
         };
@@ -176,7 +196,6 @@ impl World {
             opener,
             notifier,
             env,
-            before,
         }
     }
 
@@ -234,7 +253,7 @@ async fn xdg_open_on_the_remote_host_opens_the_url_with_the_host_alias() {
     let _lock = LOCK.lock().await;
     let w = World::start().await;
     let session = w.ssh("e2e-a", &format!("{} https://example.test/", w.xdg_open()));
-    assert_eq!(session.join().unwrap(), ExitCode::SUCCESS);
+    assert_eq!(join("the session", session), ExitCode::SUCCESS);
     assert_eq!(w.urls(), ["https://example.test/"]);
     assert_eq!(w.hosts(), [NoticeHost::Alias("e2e-a".into())]);
 }
@@ -318,7 +337,11 @@ async fn an_oauth_callback_reaches_the_remote_program() {
         std::fs::read_to_string(&request_file).unwrap(),
         "GET /cb?code=e2e HTTP/1.1"
     );
-    assert_eq!(session.join().unwrap(), ExitCode::SUCCESS);
+    // A browser closes the connection after a `Connection: close` reply.
+    // While it stays open, the keeper's splice holds the remote program's
+    // side of the connection, and the forward (and so ssh) stays alive.
+    drop(browser);
+    assert_eq!(join("the session", session), ExitCode::SUCCESS);
     assert_eq!(w.hosts(), [NoticeHost::Alias("e2e-a".into())]);
 }
 
@@ -352,8 +375,8 @@ async fn after_a_reattach_the_shim_uses_the_newest_session_socket() {
     assert_eq!(w.hosts(), [NoticeHost::Alias("e2e-b".into())]);
 
     std::fs::write(w.path("done"), "").unwrap();
-    assert_eq!(first.join().unwrap(), ExitCode::SUCCESS);
-    assert_eq!(second.join().unwrap(), ExitCode::SUCCESS);
+    assert_eq!(join("the first session", first), ExitCode::SUCCESS);
+    assert_eq!(join("the second session", second), ExitCode::SUCCESS);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -367,7 +390,10 @@ async fn a_proxyjump_session_opens_the_url_with_the_target_alias() {
         "e2e-jump",
         &format!("{} https://example.test/jump", w.xdg_open()),
     );
-    assert_eq!(session.join().unwrap(), ExitCode::SUCCESS);
+    assert_eq!(join("the session", session), ExitCode::SUCCESS);
+    // The hop: one login to e2e-a (the jump host), one to the target.
+    let log = std::fs::read_to_string(w.path("sshd.log")).unwrap();
+    assert_eq!(log.matches("Accepted publickey").count(), 2, "{log}");
     assert_eq!(w.urls(), ["https://example.test/jump"]);
     assert_eq!(w.hosts(), [NoticeHost::Alias("e2e-jump".into())]);
 }

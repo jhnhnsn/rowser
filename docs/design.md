@@ -144,6 +144,6 @@ discovery ─► protocol
    `service` rendering, `remote_install` asset choice, `doctor` checks.
 2. Integration (`tests/`, Linux + macOS): shim ↔ daemon over real sockets, wrapper ↔ daemon with a
    fake `ssh`, Callback forward with a fake remote HTTP listener, all with the test adapters.
-3. E2E (`tests/e2e_sshd.rs`, Linux CI only, `#[ignore]` locally unless `ROWSER_E2E=1`): throwaway
+3. E2E (`tests/e2e_sshd.rs`, Linux only; each test returns at once unless `ROWSER_E2E=1`): throwaway
    `sshd`, `rowser ssh`, OAuth-style callback, tmux-style reattach (second session, shim picks
    newest socket), and a `ProxyJump` hop through the same `sshd`.
