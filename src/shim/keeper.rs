@@ -190,7 +190,7 @@ async fn connect_loopback(port: u16) -> io::Result<TcpStream> {
 /// Linux: a LISTEN entry in `/proc/net/tcp` or `/proc/net/tcp6`. A bind
 /// probe would see a TIME-WAIT entry (the program closed a connection
 /// first) as "in use" for about 60 s. Elsewhere, or if `/proc/net/tcp` is not
-/// readable: the bind probe.
+/// readable, or `/proc/net/tcp6` exists but is not readable: the bind probe.
 fn in_use(ip: IpAddr, port: u16) -> bool {
     #[cfg(target_os = "linux")]
     if let Some(listens) = proc_in_use(|p| std::fs::read_to_string(p), ip, port) {
@@ -200,12 +200,17 @@ fn in_use(ip: IpAddr, port: u16) -> bool {
 }
 
 /// The `/proc` answer for `in_use`, with `read` to read a file. `None` if
-/// `/proc/net/tcp` is not readable. If `/proc/net/tcp6` is not readable
-/// (IPv6 off), there are no IPv6 entries.
+/// `/proc/net/tcp` is not readable. If `/proc/net/tcp6` does not exist
+/// (IPv6 off), there are no IPv6 entries; any other error on it gives
+/// `None`, as the IPv6 entries are then unknown.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn proc_in_use(read: impl Fn(&str) -> io::Result<String>, ip: IpAddr, port: u16) -> Option<bool> {
     let v4 = read("/proc/net/tcp").ok()?;
-    let v6 = read("/proc/net/tcp6").unwrap_or_default();
+    let v6 = match read("/proc/net/tcp6") {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(_) => return None,
+    };
     Some(proc_listens(&v4, &v6, ip, port))
 }
 
@@ -330,6 +335,17 @@ mod tests {
         assert_eq!(proc_in_use(read, V4, 8080), Some(true));
         assert_eq!(proc_in_use(read, V4, 8081), Some(false));
         assert_eq!(proc_in_use(read, V6, 8080), Some(false));
+    }
+
+    #[test]
+    fn an_unreadable_proc_net_tcp6_that_exists_does_not_decide() {
+        let t = v4("0100007F:1F90", "0A");
+        let read = |path: &str| match path {
+            "/proc/net/tcp" => Ok(t.clone()),
+            _ => Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        };
+        assert_eq!(proc_in_use(read, V4, 8080), None);
+        assert_eq!(proc_in_use(read, V6, 8080), None);
     }
 
     #[test]
