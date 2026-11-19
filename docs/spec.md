@@ -113,7 +113,8 @@ is invoked through a symlink named `xdg-open`, `sensible-browser` or `www-browse
   `~/.local/bin/rowser`, creates the symlinks, and prints the shell line for `BROWSER`.
 - `rowser doctor` (remote): warns when `~/.local/bin` is not before `/usr/bin` on `PATH`, when
   `BROWSER` is not set, and does a live round trip through the tunnel (ping → daemon version).
-- rowser never changes files outside the user's home directory (and its own sockets in `/tmp` and in its runtime directory).
+- rowser never changes files outside the user's home directory (and its own sockets in `/tmp` and in its
+  runtime directory).
 
 ## Protocol
 
