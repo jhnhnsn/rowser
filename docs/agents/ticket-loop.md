@@ -44,7 +44,9 @@ rowser is a CLI; test it from the terminal.
 - `rowser daemon install|uninstall` writes the unit under `$XDG_CONFIG_HOME/systemd/user/` and
   runs the `systemctl` on `PATH`: set `XDG_CONFIG_HOME` to a temp dir and put a fake `systemctl`
   script first on `PATH` that records its arguments. Never touch the real user units. Check that
-  daemon flags given before `install` appear in the unit's `ExecStart`.
+  daemon flags given before `install` appear in the unit's `ExecStart`. The macOS (launchd) path
+  is `cfg`-gated; on Linux test it through `service::launchd_install` / `launchd_uninstall`, which
+  take the `launchctl` program path: `cargo test --lib launchd` runs them with a fake script.
 - `rowser remote install <host>` runs the `ssh`, `curl` and `tar` on `PATH`: put a fake `ssh`
   first on `PATH` that answers `uname -sm` and runs the copy command locally with `sh -c`, and set
   `HOME` to a temp dir. `--local-build <path>` skips the download; the hidden `--release-url
