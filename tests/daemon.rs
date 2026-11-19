@@ -431,7 +431,12 @@ fn command_opener_returns_without_waiting_for_the_command_to_exit() {
     let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     let dir = TmpDir::new("d");
     let script = dir.0.join("slow.sh");
-    std::fs::write(&script, "#!/bin/sh\nsleep 5\n").unwrap();
+    let done = dir.0.join("done");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\nsleep 3\ntouch '{}'\n", done.display()),
+    )
+    .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let opener = CommandOpener::new(&format!("{} {{url}}", script.display())).unwrap();
     let start = std::time::Instant::now();
@@ -439,6 +444,12 @@ fn command_opener_returns_without_waiting_for_the_command_to_exit() {
         .open(&Url::parse("https://example.com/").unwrap())
         .unwrap();
     assert!(start.elapsed() < Duration::from_secs(2));
+    // Keep the dir until the command ends, so it never runs a deleted script.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !done.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(done.exists(), "the slow command did not finish");
 }
 
 #[test]
