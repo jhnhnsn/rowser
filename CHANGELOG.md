@@ -97,6 +97,10 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- On macOS, a first `rowser daemon install` no longer prints launchctl's
+  `Boot-out failed: 3: No such process`. A real bootstrap failure still shows launchctl's message,
+  and `rowser daemon uninstall` of an agent that is not loaded is quiet too.
+  ([#34](https://github.com/jhnhnsn/rowser/issues/34))
 - `docs/spec.md` now says that rowser also keeps its own sockets in its runtime directory (for
   example `$XDG_RUNTIME_DIR/rowser/`), outside the home directory, as the README does.
   ([#33](https://github.com/jhnhnsn/rowser/issues/33))
