@@ -97,6 +97,9 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- `docs/spec.md` now says that rowser also keeps its own sockets in its runtime directory (for
+  example `$XDG_RUNTIME_DIR/rowser/`), outside the home directory, as the README does.
+  ([#33](https://github.com/jhnhnsn/rowser/issues/33))
 - `cargo test` no longer prints `/bin/sh: /tmp/rw.<id>/slow.sh: No such file or directory`: the
   test of a slow open command now keeps its temp directory until the command ends.
   ([#32](https://github.com/jhnhnsn/rowser/issues/32))
