@@ -431,10 +431,17 @@ fn command_opener_returns_without_waiting_for_the_command_to_exit() {
     let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     let dir = TmpDir::new("d");
     let script = dir.0.join("slow.sh");
+    let go = dir.0.join("go");
     let done = dir.0.join("done");
+    // Wait (at most about 10 s) for `go`, then touch `done`.
     std::fs::write(
         &script,
-        format!("#!/bin/sh\nsleep 3\ntouch '{}'\n", done.display()),
+        format!(
+            "#!/bin/sh\ni=0\nwhile [ ! -e '{go}' ] && [ $i -lt 500 ]; do sleep 0.02; i=$((i+1)); done\n\
+             touch '{done}'\n",
+            go = go.display(),
+            done = done.display()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -444,6 +451,7 @@ fn command_opener_returns_without_waiting_for_the_command_to_exit() {
         .open(&Url::parse("https://example.com/").unwrap())
         .unwrap();
     assert!(start.elapsed() < Duration::from_secs(2));
+    std::fs::write(&go, "").unwrap();
     // Keep the dir until the command ends, so it never runs a deleted script.
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     while !done.exists() && std::time::Instant::now() < deadline {
