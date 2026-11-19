@@ -219,6 +219,7 @@ fn install_with(exe: &Path, args: &[String]) -> Result<Installed, String> {
         &gui_domain(),
         exe,
         args,
+        std::time::Duration::from_millis(300),
     )
 }
 
@@ -238,7 +239,10 @@ fn run_launchctl(launchctl: &str, args: &[&str]) -> Result<(), (Option<i32>, Str
     match Command::new(launchctl).args(args).output() {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => {
-            let text = String::from_utf8_lossy(&o.stderr).trim().to_owned();
+            let mut text = String::from_utf8_lossy(&o.stderr).trim().to_owned();
+            if text.is_empty() {
+                text = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+            }
             let msg = if text.is_empty() {
                 format!("`{shown}` failed ({})", o.status)
             } else {
@@ -258,14 +262,18 @@ fn launchd_install(
     domain: &str,
     exe: &Path,
     args: &[String],
+    retry_delay: std::time::Duration,
 ) -> Result<Installed, String> {
     write_file(path, &render_launchd_plist(exe, args))?;
-    // Not loaded yet ("3: No such process") is fine: bootout only clears an
-    // earlier install, so its errors are not shown.
-    let _ = run_launchctl(
+    // bootout only clears an earlier install. Not loaded is fine; another
+    // error is shown only if bootstrap then fails, as a likely cause.
+    let bootout_err = match run_launchctl(
         launchctl,
         &["bootout", &format!("{domain}/{LAUNCHD_LABEL}")],
-    );
+    ) {
+        Err((code, e)) if !is_not_loaded(code) => Some(e),
+        _ => None,
+    };
     // bootstrap fails with "5: Input/output error" while the old job stops.
     let plist = path.to_string_lossy().into_owned();
     let mut tries = 0;
@@ -279,15 +287,26 @@ fn launchd_install(
             }
             Err(_) if tries < 5 => {
                 tries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                std::thread::sleep(retry_delay);
             }
-            Err((_, e)) => return Err(e),
+            Err((_, e)) => {
+                return Err(match bootout_err {
+                    Some(b) => format!("{e} (after an earlier error: {b})"),
+                    None => e,
+                })
+            }
         }
     }
 }
 
-/// launchctl bootout exit codes for a job that is not loaded.
+/// launchctl bootout exit codes for a job that is not loaded: 3 is ESRCH
+/// ("No such process"); 113 is launchd's "Could not find specified service".
 const NOT_LOADED: [i32; 2] = [3, 113];
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_not_loaded(code: Option<i32>) -> bool {
+    code.is_some_and(|c| NOT_LOADED.contains(&c))
+}
 
 /// The launchd uninstall; returns the result and the warnings to show.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -305,7 +324,7 @@ fn launchd_uninstall(
         );
     }
     let warnings = match stopped {
-        Err((code, e)) if !code.is_some_and(|c| NOT_LOADED.contains(&c)) => vec![e],
+        Err((code, e)) if !is_not_loaded(code) => vec![e],
         _ => Vec::new(),
     };
     let removed = std::fs::remove_file(path)
@@ -372,42 +391,66 @@ fn uninstall_inner() -> Result<Uninstalled, String> {
 mod tests {
     use super::*;
 
+    /// A temp dir that is removed on drop, so a failed test cleans up too.
+    struct TmpDir(PathBuf);
+
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// A fake `launchctl` in a fresh temp dir. It logs each call to `log`,
-    /// and for the subcommand named `fail_cmd` it prints `stderr` to stderr
-    /// and exits with `code`.
-    fn fake_launchctl(tag: &str, fail_cmd: &str, stderr: &str, code: i32) -> (PathBuf, PathBuf) {
+    /// and for each `(subcommand, text, code)` in `fails` it prints `text`
+    /// (to stdout when it starts with `stdout:`, else to stderr) and exits
+    /// with `code`.
+    fn fake_launchctl(tag: &str, fails: &[(&str, &str, i32)]) -> (PathBuf, TmpDir) {
+        use std::os::unix::fs::PermissionsExt;
         let dir =
             std::env::temp_dir().join(format!("rowser-launchctl-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let guard = TmpDir(dir.clone());
         let log = dir.join("log");
         let exe = dir.join("launchctl");
-        std::fs::write(
-            &exe,
-            format!(
-                "#!/bin/sh\necho \"$*\" >> '{}'\n\
-                 if [ \"$1\" = '{fail_cmd}' ]; then echo '{stderr}' >&2; exit {code}; fi\nexit 0\n",
-                log.display()
-            ),
+        let mut script = format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display());
+        for (cmd, text, code) in fails {
+            let (text, redirect) = match text.strip_prefix("stdout:") {
+                Some(t) => (t, ""),
+                None => (*text, " >&2"),
+            };
+            script.push_str(&format!(
+                "if [ \"$1\" = '{cmd}' ]; then echo '{text}'{redirect}; exit {code}; fi\n"
+            ));
+        }
+        script.push_str("exit 0\n");
+        // fs::write closes its handle before it returns, so the script is
+        // not busy when it runs.
+        std::fs::write(&exe, script).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (exe, guard)
+    }
+
+    fn install(exe: &Path, plist: &Path) -> Result<Installed, String> {
+        launchd_install(
+            exe.to_str().unwrap(),
+            plist,
+            "gui/501",
+            Path::new("/bin/rowser"),
+            &[],
+            std::time::Duration::ZERO,
         )
-        .unwrap();
-        let ok = Command::new("chmod").arg("755").arg(&exe).status().unwrap();
-        assert!(ok.success());
-        (exe, dir)
     }
 
     #[test]
     fn launchd_install_ignores_a_bootout_of_a_job_that_is_not_loaded() {
-        let (exe, dir) =
-            fake_launchctl("first", "bootout", "Boot-out failed: 3: No such process", 3);
-        let plist = dir.join("agents/rowser.plist");
-        let got = launchd_install(
-            exe.to_str().unwrap(),
-            &plist,
-            "gui/501",
-            Path::new("/bin/rowser"),
-            &[],
+        let (exe, tmp) = fake_launchctl(
+            "first",
+            &[("bootout", "Boot-out failed: 3: No such process", 3)],
         );
+        let dir = &tmp.0;
+        let plist = dir.join("agents/rowser.plist");
+        let got = install(&exe, &plist);
         assert!(got.is_ok(), "{:?}", got.err());
         assert!(plist.exists());
         let calls = std::fs::read_to_string(dir.join("log")).unwrap();
@@ -420,22 +463,14 @@ mod tests {
 
     #[test]
     fn launchd_install_reports_the_bootstrap_error_text() {
-        let (exe, dir) = fake_launchctl(
+        let (exe, tmp) = fake_launchctl(
             "boot",
-            "bootstrap",
-            "Bootstrap failed: 5: Input/output error",
-            5,
+            &[("bootstrap", "Bootstrap failed: 5: Input/output error", 5)],
         );
-        let plist = dir.join("rowser.plist");
-        let err = launchd_install(
-            exe.to_str().unwrap(),
-            &plist,
-            "gui/501",
-            Path::new("/bin/rowser"),
-            &[],
-        )
-        .err()
-        .expect("bootstrap failure is an error");
+        let plist = tmp.0.join("rowser.plist");
+        let err = install(&exe, &plist)
+            .err()
+            .expect("bootstrap failure is an error");
         assert!(
             err.contains("Bootstrap failed: 5: Input/output error"),
             "{err}"
@@ -443,25 +478,83 @@ mod tests {
     }
 
     #[test]
+    fn launchd_install_error_uses_stdout_when_stderr_is_empty() {
+        let (exe, tmp) = fake_launchctl("out", &[("bootstrap", "stdout:Load failed: 5", 5)]);
+        let plist = tmp.0.join("rowser.plist");
+        let err = install(&exe, &plist).err().expect("an error");
+        assert!(err.contains("Load failed: 5"), "{err}");
+    }
+
+    #[test]
+    fn launchd_install_failure_carries_an_earlier_bootout_error() {
+        let (exe, tmp) = fake_launchctl(
+            "both",
+            &[
+                ("bootout", "Boot-out failed: 1: Operation not permitted", 1),
+                ("bootstrap", "Bootstrap failed: 5: Input/output error", 5),
+            ],
+        );
+        let plist = tmp.0.join("rowser.plist");
+        let err = install(&exe, &plist).err().expect("an error");
+        assert!(err.contains("Input/output error"), "{err}");
+        assert!(err.contains("Operation not permitted"), "{err}");
+    }
+
+    #[test]
+    fn launchd_install_failure_omits_a_not_loaded_bootout() {
+        let (exe, tmp) = fake_launchctl(
+            "nl",
+            &[
+                ("bootout", "Boot-out failed: 3: No such process", 3),
+                ("bootstrap", "Bootstrap failed: 5: Input/output error", 5),
+            ],
+        );
+        let plist = tmp.0.join("rowser.plist");
+        let err = install(&exe, &plist).err().expect("an error");
+        assert!(!err.contains("No such process"), "{err}");
+    }
+
+    #[test]
     fn launchd_uninstall_of_a_job_that_is_not_loaded_removes_the_file_quietly() {
-        let (exe, dir) = fake_launchctl("unl", "bootout", "Boot-out failed: 3: No such process", 3);
-        let plist = dir.join("rowser.plist");
-        std::fs::write(&plist, "x").unwrap();
+        for (tag, text, code) in [
+            ("unl3", "Boot-out failed: 3: No such process", 3),
+            (
+                "unl113",
+                "Boot-out failed: 113: Could not find specified service",
+                113,
+            ),
+        ] {
+            let (exe, tmp) = fake_launchctl(tag, &[("bootout", text, code)]);
+            let plist = tmp.0.join("rowser.plist");
+            std::fs::write(&plist, "x").unwrap();
+            let (got, warnings) = launchd_uninstall(exe.to_str().unwrap(), &plist, "gui/501/x");
+            assert!(matches!(got, Ok(Uninstalled::Removed(_))), "{tag}");
+            assert!(warnings.is_empty(), "{tag}: {warnings:?}");
+            assert!(!plist.exists(), "{tag}");
+        }
+    }
+
+    #[test]
+    fn launchd_uninstall_without_the_file_stops_the_job_and_reports_not_installed() {
+        let (exe, tmp) = fake_launchctl(
+            "none",
+            &[("bootout", "Boot-out failed: 1: Operation not permitted", 1)],
+        );
+        let plist = tmp.0.join("rowser.plist");
         let (got, warnings) = launchd_uninstall(exe.to_str().unwrap(), &plist, "gui/501/x");
-        assert!(matches!(got, Ok(Uninstalled::Removed(_))));
+        assert!(matches!(got, Ok(Uninstalled::NotInstalled(_))));
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert!(!plist.exists());
+        let calls = std::fs::read_to_string(tmp.0.join("log")).unwrap();
+        assert_eq!(calls, "bootout gui/501/x\n");
     }
 
     #[test]
     fn launchd_uninstall_warns_on_another_bootout_error() {
-        let (exe, dir) = fake_launchctl(
+        let (exe, tmp) = fake_launchctl(
             "unw",
-            "bootout",
-            "Boot-out failed: 1: Operation not permitted",
-            1,
+            &[("bootout", "Boot-out failed: 1: Operation not permitted", 1)],
         );
-        let plist = dir.join("rowser.plist");
+        let plist = tmp.0.join("rowser.plist");
         std::fs::write(&plist, "x").unwrap();
         let (got, warnings) = launchd_uninstall(exe.to_str().unwrap(), &plist, "gui/501/x");
         assert!(matches!(got, Ok(Uninstalled::Removed(_))));
