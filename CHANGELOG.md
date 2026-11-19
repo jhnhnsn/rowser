@@ -97,6 +97,9 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- `cargo test` no longer prints `/bin/sh: /tmp/rw.<id>/slow.sh: No such file or directory`: the
+  test of a slow open command now keeps its temp directory until the command ends.
+  ([#32](https://github.com/jhnhnsn/rowser/issues/32))
 - On a Linux Remote host with IPv6 turned off, an OAuth callback forward now ends a few seconds
   after the remote program stops listening, as it does with IPv6 on. Before, the forward stayed
   open for about a minute more. ([#30](https://github.com/jhnhnsn/rowser/issues/30))
