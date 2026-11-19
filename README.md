@@ -7,12 +7,61 @@ A program on the remote host runs `xdg-open <url>` (or uses `$BROWSER`). rowser 
 over your SSH connection to a daemon on your local machine, which opens it in your browser and
 shows a notification naming the host. When the URL starts an OAuth flow with a `localhost`
 callback, rowser sets up a callback forward for that callback port to the remote host, so CLI logins
-(`gh auth login`, `gcloud auth login`, …) just work.
+that use a `localhost` redirect (`gcloud auth login`, `az login`, …) just work.
 
 | Role | Platforms |
 | --- | --- |
 | Local (daemon, `rowser ssh`) | Linux, macOS (aarch64 and x86_64) |
 | Remote (shim) | Linux x86_64 and aarch64 (static musl) |
+
+## Why rowser
+
+Several tools already open a remote host's URLs in a local browser. Each one covers part of
+the job, but none of them covers all of it. We wanted something that works over the SSH session
+you already have, without a relay service or an open TCP port. It also had to finish OAuth logins
+that call back to `localhost` on the remote host, work across many SSH sessions without root
+changes to `sshd_config`, and give the local machine some control over what gets opened.
+
+| Need | rowser | [opener] | [lemonade] | [rht] | [nssh] | [local-open] |
+| --- | --- | --- | --- | --- | --- | --- |
+| URL travels inside the SSH session (no extra open port, no third party) | ✅ Unix socket forward | ✅ Unix socket forward | ❌ TCP port, no auth or encryption | ⚠️ TCP port via `ssh -R` | ❌ ntfy relay | ❌ SSHes back into the local machine |
+| OAuth `localhost` callbacks reach the remote host | ✅ | ❌ | ❌ rewrites the URL host only | ❌ | ✅ via `ssh -W` | ❌ rewrites the URL host only |
+| Local machine: macOS and Linux | ✅ | ✅ | ⚠️ documented for Windows | ❓ not stated | ⚠️ macOS (Linux unofficial) | ✅ |
+| Drop-in `xdg-open` / `$BROWSER` on the remote host | ✅ both, installed by `rowser remote install` | ✅ shell shims (need `nc`) | ✅ symlink | ⚠️ `$BROWSER` only | ✅ `nssh infect` | ⚠️ `$BROWSER` only |
+| Many concurrent SSH sessions, no root `sshd_config` change | ✅ per-session sockets | ❌ needs `StreamLocalBindUnlink` in `sshd_config` | ⚠️ one fixed port | ⚠️ one fixed port | ✅ | ⚠️ one fixed reverse port |
+| Local control: trusted host name, scheme allowlist, rate limit, per-host confirmation | ✅ | ❌ | ❌ | ⚠️ http/https only | ⚠️ http(s) only; topic secrecy is the only auth | ❌ |
+| Last commit | active | Oct 2026 | Apr 2022 ("maintainers wanted") | Nov 2022 | Sep 2026 | Jun 2021 |
+
+✅ yes · ⚠️ partly · ❌ no · ❓ not documented. From each project's README and source, November
+2026. Corrections are welcome.
+
+[opener]: https://github.com/superbrothers/opener
+[lemonade]: https://github.com/lemonade-command/lemonade
+[rht]: https://github.com/misterjoshua/rht
+[nssh]: https://github.com/abizer/nssh
+[local-open]: https://github.com/suan/local-open
+
+## Status
+
+> [!WARNING]
+> rowser is under active development and has no release yet. Expect rough edges and breaking
+> changes until `v0.1.0`.
+
+- **Proof of concept: done.** From a Mac as the local machine to a Linux remote host over
+  `rowser ssh`, a URL opened on the remote host opens in the Mac's browser, and a `localhost`
+  OAuth callback on the remote host is reached from the Mac's browser through the tunnel.
+- **v0.1.0: nearly feature-complete.** The daemon, shim, `rowser ssh` wrapper, callback forwards,
+  `rowser daemon install` (systemd and launchd), `rowser remote install` (with checksum
+  verification) and `rowser doctor` are built and tested, including an end-to-end test against a
+  real `sshd`. Before the release: a few small fixes and manual checks of macOS notifications and
+  confirmation dialogs.
+- **No release binaries yet.** Until `v0.1.0` is tagged, install with `cargo install --git` on both
+  machines; `rowser remote install` needs a release to download from.
+- **Planned, not started:** a menu bar / tray admin UI (macOS first, Windows later) and browser
+  selection ([#35](https://github.com/jhnhnsn/rowser/issues/35)).
+
+Progress is tracked in [#1](https://github.com/jhnhnsn/rowser/issues/1) and in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Install
 
