@@ -97,6 +97,9 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- On a Linux Remote host with IPv6 turned off, an OAuth callback forward now ends a few seconds
+  after the remote program stops listening, as it does with IPv6 on. Before, the forward stayed
+  open for about a minute more. ([#30](https://github.com/jhnhnsn/rowser/issues/30))
 - `docs/spec.md` now says that an empty `ROWSER_RUNTIME_DIR` is ignored and that a set value
   must be an absolute path when rowser reads it, as the code does. Its Stack list now names
   `tracing-subscriber`. ([#31](https://github.com/jhnhnsn/rowser/issues/31))
