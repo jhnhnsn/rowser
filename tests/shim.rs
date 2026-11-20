@@ -179,6 +179,7 @@ fn env(tunnel_dir: &Path, over: Option<PathBuf>) -> ShimEnv<Vec<u8>> {
         graphical: false,
         search_path: None,
         self_exe: None,
+        in_fallback: false,
         stderr: Vec::new(),
     }
 }
@@ -274,6 +275,99 @@ async fn the_first_xdg_open_that_is_not_rowser_runs() {
     assert_eq!(
         std::fs::read_to_string(bin.join("arg")).unwrap(),
         "https://example.com/"
+    );
+}
+
+/// Runs `rowser open <url>` with a clean environment: `PATH` is only `path`,
+/// HOME is `t`, an empty Tunnel directory and a missing `ROWSER_SOCKET`.
+/// The child runs in its own process group, killed after 20 s.
+fn run_bin(t: &TmpDir, path: &Path, display: &str, extra: &[(&str, &str)]) -> (i32, String) {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let tunnels = t.path("tunnels");
+    std::fs::create_dir_all(&tunnels).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rowser"));
+    cmd.args(["open", "https://example.com/a?b=c"])
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &t.0)
+        .env("XDG_CONFIG_HOME", t.path("config"))
+        .env("DISPLAY", display)
+        .env("ROWSER_TEST_TUNNEL_DIR", &tunnels)
+        .env("ROWSER_SOCKET", t.path("missing.sock"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().unwrap();
+    let pgid = child.id() as i32;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if std::time::Instant::now() > deadline {
+            // SAFETY: kill has no memory preconditions.
+            unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            let _ = child.wait();
+            panic!("rowser open did not end in 20 s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let mut err = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err).unwrap();
+    (status.code().unwrap_or(-1), err)
+}
+
+#[test]
+fn the_binary_reads_display_and_runs_the_real_xdg_open() {
+    let t = TmpDir::new();
+    let bin = t.path("bin");
+    fake_xdg_open(&bin);
+    let (code, err) = run_bin(&t, &bin, ":99", &[]);
+    assert_eq!(code, 3, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(bin.join("arg")).unwrap(),
+        "https://example.com/a?b=c"
+    );
+}
+
+#[test]
+fn the_binary_with_an_empty_display_prints_the_no_tunnel_message() {
+    let t = TmpDir::new();
+    let bin = t.path("bin");
+    fake_xdg_open(&bin);
+    let (code, err) = run_bin(&t, &bin, "", &[]);
+    assert_eq!(code, 1);
+    assert_eq!(
+        err,
+        "rowser: no tunnel; open this URL manually: https://example.com/a?b=c\n"
+    );
+    assert!(!bin.join("arg").exists());
+}
+
+#[test]
+fn a_real_xdg_open_that_runs_browser_rowser_does_not_loop() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = TmpDir::new();
+    let bin = t.path("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("xdg-open");
+    std::fs::write(&script, "#!/bin/sh\nexec \"$BROWSER\" \"$1\"\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (code, err) = run_bin(
+        &t,
+        &bin,
+        ":99",
+        &[("BROWSER", env!("CARGO_BIN_EXE_rowser"))],
+    );
+    assert_eq!(code, 1, "{err}");
+    assert_eq!(
+        err,
+        "rowser: no tunnel; open this URL manually: https://example.com/a?b=c\n"
     );
 }
 

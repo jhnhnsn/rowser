@@ -296,6 +296,7 @@ fn shim_env(h: &Harness) -> ShimEnv<Vec<u8>> {
         graphical: false,
         search_path: None,
         self_exe: None,
+        in_fallback: false,
         stderr: Vec::new(),
     }
 }

@@ -38,8 +38,12 @@ pub struct ShimEnv<W: Write> {
     /// `PATH`, searched for the real `xdg-open`.
     pub search_path: Option<OsString>,
     /// The running rowser executable; an `xdg-open` that resolves to it is
-    /// skipped.
+    /// skipped. It holds the same path as `keeper_exe`, but a test sets each
+    /// alone: `None` here does not stop the keeper.
     pub self_exe: Option<PathBuf>,
+    /// `ROWSER_SHIM_FALLBACK` is set: this Shim runs under a real `xdg-open`
+    /// that an earlier Shim started, so it must not run `xdg-open` again.
+    pub in_fallback: bool,
     pub stderr: W,
 }
 
@@ -65,6 +69,7 @@ impl ShimEnv<std::io::Stderr> {
                 .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty())),
             search_path: std::env::var_os("PATH"),
             self_exe: std::env::current_exe().ok(),
+            in_fallback: std::env::var_os(FALLBACK_GUARD).is_some(),
             stderr: std::io::stderr(),
         }
     }
@@ -85,7 +90,7 @@ pub async fn run_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> ExitCode {
     match request_forward(request, &ports, env).await {
         Outcome::Failed => ExitCode::FAILURE,
         Outcome::NoTunnel => {
-            if env.graphical {
+            if env.graphical && !env.in_fallback {
                 if let Some(code) = run_real_xdg_open(url, env) {
                     return code;
                 }
@@ -107,6 +112,7 @@ fn run_real_xdg_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> Option<ExitCo
     let program = real_xdg_open(env.search_path.as_deref()?, env.self_exe.as_deref())?;
     let status = std::process::Command::new(&program)
         .arg(url.as_str())
+        .env(FALLBACK_GUARD, "1")
         .status();
     match status {
         Ok(s) => Some(match s.code() {
@@ -119,6 +125,12 @@ fn run_real_xdg_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> Option<ExitCo
         }
     }
 }
+
+/// Hidden variable set on the real `xdg-open`. The real `xdg-open` can start
+/// rowser again (`$BROWSER`, `www-browser`), and a hard link or copy of
+/// rowser on `PATH` passes the canonical-path check below. A Shim that sees
+/// this variable does not run `xdg-open`, so neither case loops.
+const FALLBACK_GUARD: &str = "ROWSER_SHIM_FALLBACK";
 
 /// The first executable `xdg-open` in `search_path` whose canonical path is
 /// not the canonical path of `self_exe`.

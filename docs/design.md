@@ -116,8 +116,12 @@ Interface: `run_open(url, ShimEnv) -> ExitCode`, `run_forward(port, ShimEnv) -> 
 `run_keeper(KeeperArgs) -> ExitCode`.
 
 `ShimEnv`: tunnel directory, `ROWSER_SOCKET`, procfs root, caller pid, reported host name, path
-to the own executable (for the keeper re-exec), stderr writer. Hidden: discovery, detection,
-message flow, keeper spawn (`setsid`, re-exec), reverse-dial handling, remote-port liveness
+to the own executable (for the keeper re-exec), `graphical` (`WAYLAND_DISPLAY` or `DISPLAY` set),
+`search_path` (`PATH`, for the real `xdg-open`), `self_exe` (skipped as an `xdg-open`),
+`in_fallback` (the hidden `ROWSER_SHIM_FALLBACK` guard), stderr writer. Hidden: discovery,
+detection, message flow, the real `xdg-open` lookup (it runs with `ROWSER_SHIM_FALLBACK=1`, and a
+Shim that sees it does not run `xdg-open` again, so `BROWSER=rowser` or a copy of rowser on `PATH`
+cannot loop), keeper spawn (`setsid`, re-exec), reverse-dial handling, remote-port liveness
 (LISTEN entries in `/proc/net/tcp{,6}` on Linux, a bind probe elsewhere; ADR 0005).
 
 ### `wrapper` — deep
