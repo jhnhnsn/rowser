@@ -141,7 +141,62 @@ pub fn remote_script() -> String {
         s.push_str(&format!(" ln -sfn rowser \"$d/{name}\";"));
     }
     s.push_str(&environment_d_script());
+    s.push_str(&desktop_script());
     s
+}
+
+/// What the remote script prints on stdout when it wrote `rowser.desktop`.
+const DESKTOP_WRITTEN: &str = "rowser-desktop: written";
+/// What the remote script prints on stdout when `xdg-mime` made rowser the default.
+const DEFAULT_BY_XDG_MIME: &str = "rowser-default: xdg-mime";
+/// What the remote script prints on stdout when it wrote the default to `mimeapps.list`.
+const DEFAULT_BY_MIMEAPPS: &str = "rowser-default: mimeapps.list";
+
+/// The `awk` program that sets `$h1` and `$h2` under `$sec` (`[Default
+/// Applications]`) in a `mimeapps.list`: it drops the old `http` and `https`
+/// entries of that section, adds rowser's at the section end (or adds the
+/// section at the end of the file), and keeps every other line. No quotes and
+/// `$` escaped for `sh` double quotes.
+const MIMEAPPS_AWK: &str = "/^\\[/ {if(s&&!d){print h1;print h2;d=1} s=(\\$0==sec); print; next} \
+     s&&/^x-scheme-handler\\/https?[ \\t]*=/ {next} {print} \
+     END{if(!d){if(!s){if(NR>0)print nl; print sec} print h1; print h2}}";
+
+/// The `sh` part that writes `~/.local/share/applications/rowser.desktop` and
+/// makes it the default for `http` and `https`: with `xdg-mime` when the
+/// Remote host has it, else in `~/.config/mimeapps.list` (a symlink there is
+/// kept, with a warning). Each failure is a warning, as in [`environment_d_script`].
+fn desktop_script() -> String {
+    format!(
+        " a=\"$HOME/.local/share/applications\"; t=\"$a/rowser.desktop\"; x=\"$HOME/.local/bin/rowser\"; \
+         case \"$x\" in *[[:space:]]*) x=\"\\\"$x\\\"\";; esac; \
+         if mkdir -p \"$a\" && rm -f \"$t.tmp\" && printf \"%s\\n\" \"[Desktop Entry]\" \"Type=Application\" \
+         \"Name=rowser\" \"Comment=Open URLs in the browser on your local machine\" \"Exec=$x open %u\" \
+         \"NoDisplay=true\" \"MimeType=x-scheme-handler/http;x-scheme-handler/https;\" >\"$t.tmp\" \
+         && mv -f \"$t.tmp\" \"$t\"; then echo \"{DESKTOP_WRITTEN}\"; \
+         if command -v xdg-mime >/dev/null 2>&1; then \
+         if xdg-mime default rowser.desktop x-scheme-handler/http x-scheme-handler/https; then \
+         echo \"{DEFAULT_BY_XDG_MIME}\"; \
+         else echo \"rowser: warning: xdg-mime failed: rowser is not the default browser.\" >&2; fi; \
+         else m=\"$HOME/.config/mimeapps.list\"; \
+         if [ -L \"$m\" ]; then echo \"rowser: warning: kept ~/.config/mimeapps.list: it is a symlink. \
+         Add x-scheme-handler/http=rowser.desktop and x-scheme-handler/https=rowser.desktop \
+         under [Default Applications] in it.\" >&2; \
+         else src=\"$m\"; [ -e \"$m\" ] || src=/dev/null; \
+         if mkdir -p \"$HOME/.config\" && rm -f \"$m.tmp\" && awk -v sec=\"[Default Applications]\" -v nl= \
+         -v h1=x-scheme-handler/http=rowser.desktop -v h2=x-scheme-handler/https=rowser.desktop \
+         \"{MIMEAPPS_AWK}\" \"$src\" >\"$m.tmp\" && mv -f \"$m.tmp\" \"$m\"; then echo \"{DEFAULT_BY_MIMEAPPS}\"; \
+         else rm -f \"$m.tmp\" 2>/dev/null || true; \
+         echo \"rowser: warning: cannot write ~/.config/mimeapps.list: rowser is not the default browser.\" >&2; fi; fi; fi; \
+         else rm -f \"$t.tmp\" 2>/dev/null || true; \
+         echo \"rowser: warning: cannot write ~/.local/share/applications/rowser.desktop: rowser is not the default browser.\" >&2; fi;"
+    )
+}
+
+/// How rowser became the default for `http` and `https` links.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DefaultBy {
+    XdgMime,
+    MimeappsList,
 }
 
 /// The first line of the `environment.d` file rowser writes. A file without
@@ -189,6 +244,10 @@ fn environment_d_script() -> String {
 pub struct Installed {
     /// rowser wrote `~/.config/environment.d/rowser.conf` (false: the user's own file was kept).
     pub environment_d: bool,
+    /// rowser wrote `~/.local/share/applications/rowser.desktop`.
+    pub desktop: bool,
+    /// How rowser became the default for `http` and `https` (none: it did not).
+    pub default_by: Option<DefaultBy>,
 }
 
 /// Runs the install against `host` with the `ssh` on `PATH`.
@@ -222,8 +281,18 @@ pub fn install(host: &str, source: &dyn BinarySource) -> Result<Installed, Strin
     }
     written.map_err(|e| format!("copy to {host} failed: {e}"))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let has = |mark: &str| stdout.lines().any(|l| l.trim() == mark);
+    let default_by = if has(DEFAULT_BY_XDG_MIME) {
+        Some(DefaultBy::XdgMime)
+    } else if has(DEFAULT_BY_MIMEAPPS) {
+        Some(DefaultBy::MimeappsList)
+    } else {
+        None
+    };
     Ok(Installed {
-        environment_d: stdout.lines().any(|l| l.trim() == ENVIRONMENT_D_WRITTEN),
+        environment_d: has(ENVIRONMENT_D_WRITTEN),
+        desktop: has(DESKTOP_WRITTEN),
+        default_by,
     })
 }
 
@@ -250,6 +319,19 @@ pub fn install_main(
                     "Wrote ~/.config/environment.d/rowser.conf on {host} (BROWSER and PATH for \
                      systemd user services); it applies from the next login."
                 );
+            }
+            if installed.desktop {
+                println!("Wrote ~/.local/share/applications/rowser.desktop on {host}.");
+            }
+            match installed.default_by {
+                Some(DefaultBy::XdgMime) => println!(
+                    "Made rowser.desktop the default for http and https links on {host} (with xdg-mime)."
+                ),
+                Some(DefaultBy::MimeappsList) => println!(
+                    "Made rowser.desktop the default for http and https links on {host} \
+                     (in ~/.config/mimeapps.list)."
+                ),
+                None => {}
             }
             println!("Add this line to your shell rc on {host}:\n\n    export BROWSER=rowser");
             ExitCode::SUCCESS

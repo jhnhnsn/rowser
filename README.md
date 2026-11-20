@@ -145,6 +145,12 @@ It also writes `~/.config/environment.d/rowser.conf` on the host, so systemd use
 file's first line marks it as rowser's: a later install overwrites only that file. If you
 already have your own `rowser.conf` there, the install keeps it and prints a warning.
 
+It also writes `~/.local/share/applications/rowser.desktop` and makes it the default handler
+for `http` and `https` links, so desktop apps on the host open links through rowser. It uses
+`xdg-mime` when the host has it; else it sets the two entries under `[Default Applications]` in
+`~/.config/mimeapps.list` and keeps your other lines. If `mimeapps.list` is a symlink, the
+install keeps it and prints a warning.
+
 Then, on the remote host, add this line to your shell rc:
 
 ```sh

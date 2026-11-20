@@ -170,19 +170,60 @@ fn local_build_gives_its_path_and_refuses_a_missing_file() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// A fake `ssh` that runs the remote command locally with `sh`, and
-/// answers `uname -sm` with `$FAKE_UNAME`.
+fn chmod_755(path: &Path) {
+    let ok = Command::new("chmod").arg("755").arg(path).status().unwrap();
+    assert!(ok.success());
+}
+
+/// A fake `ssh` that runs the remote command locally with `/bin/sh`, with
+/// `PATH` set to `$FAKE_REMOTE_PATH`, and answers `uname -sm` with `$FAKE_UNAME`.
 fn fake_ssh(dir: &Path) -> PathBuf {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let ssh = bin.join("ssh");
     std::fs::write(
         &ssh,
-        "#!/bin/sh\nshift 2\nif [ \"$1\" = \"uname -sm\" ]; then echo \"$FAKE_UNAME\"; exit 0; fi\nexec sh -c \"$1\"\n",
+        "#!/bin/sh\nshift 2\nif [ \"$1\" = \"uname -sm\" ]; then echo \"$FAKE_UNAME\"; exit 0; fi\n\
+         export PATH=\"$FAKE_REMOTE_PATH\"\nexec /bin/sh -c \"$1\"\n",
     )
     .unwrap();
-    let ok = Command::new("chmod").arg("755").arg(&ssh).status().unwrap();
-    assert!(ok.success());
+    chmod_755(&ssh);
+    bin
+}
+
+/// The remote `PATH` for the fake `ssh`: only the tools the remote script
+/// needs, linked from the real `PATH`. It never holds the real `xdg-mime`.
+fn remote_toolbox(dir: &Path) -> PathBuf {
+    let tools = dir.join("toolbox");
+    std::fs::create_dir_all(&tools).unwrap();
+    let path = std::env::var("PATH").unwrap();
+    for tool in [
+        "sh", "mkdir", "rm", "cat", "chmod", "mv", "ln", "head", "awk",
+    ] {
+        let found = std::env::split_paths(&path)
+            .map(|d| d.join(tool))
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| panic!("no {tool} on PATH"));
+        let link = tools.join(tool);
+        if std::fs::symlink_metadata(&link).is_err() {
+            std::os::unix::fs::symlink(found, link).unwrap();
+        }
+    }
+    tools
+}
+
+/// A fake `xdg-mime` in `<dir>/xdg` that writes its arguments to `<dir>/xdg-mime.args`.
+fn fake_xdg_mime(dir: &Path) -> PathBuf {
+    let bin = dir.join("xdg");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("xdg-mime");
+    let args = dir.join("xdg-mime.args");
+    std::fs::write(
+        &tool,
+        format!("#!/bin/sh\necho \"$@\" >>\"{}\"\n", args.display()),
+    )
+    .unwrap();
+    chmod_755(&tool);
     bin
 }
 
@@ -193,16 +234,39 @@ fn run_install(dir: &Path, home: &Path, uname: &str, local: &Path) -> std::proce
 
 /// `rowser remote install myhost <extra>` over the fake `ssh`, with `HOME` at `home`.
 fn run_install_with(dir: &Path, home: &Path, uname: &str, extra: &[&str]) -> std::process::Output {
+    run_install_remote(dir, home, uname, extra, None)
+}
+
+/// As [`run_install_with`], with `remote_bin` (if any) first on the remote `PATH`.
+fn run_install_remote(
+    dir: &Path,
+    home: &Path,
+    uname: &str,
+    extra: &[&str],
+    remote_bin: Option<&Path>,
+) -> std::process::Output {
     let path = format!(
         "{}:{}",
         fake_ssh(dir).display(),
         std::env::var("PATH").unwrap()
     );
+    let toolbox = remote_toolbox(dir);
+    let remote_path = match remote_bin {
+        Some(bin) => format!("{}:{}", bin.display(), toolbox.display()),
+        None => toolbox.display().to_string(),
+    };
     Command::new(env!("CARGO_BIN_EXE_rowser"))
         .args(["remote", "install", "myhost"])
         .args(extra)
         .env("PATH", path)
+        .env("FAKE_REMOTE_PATH", remote_path)
         .env("HOME", home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/nonexistent/rowser-test",
+        )
         .env("FAKE_UNAME", uname)
         .output()
         .unwrap()
@@ -423,6 +487,165 @@ fn install_warns_and_succeeds_when_environment_d_cannot_be_written() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("next login"), "{stdout}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+const DESKTOP: &str = ".local/share/applications/rowser.desktop";
+const MIMEAPPS: &str = ".config/mimeapps.list";
+
+fn desktop_content(exec: &str) -> String {
+    format!(
+        "[Desktop Entry]\nType=Application\nName=rowser\n\
+         Comment=Open URLs in the browser on your local machine\n\
+         Exec={exec} open %u\nNoDisplay=true\n\
+         MimeType=x-scheme-handler/http;x-scheme-handler/https;\n"
+    )
+}
+
+#[test]
+fn install_writes_the_desktop_file_and_mimeapps_list_without_xdg_mime() {
+    let dir = temp_dir("desk");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    let exec = format!("{}/.local/bin/rowser", home.display());
+    assert_eq!(
+        std::fs::read_to_string(home.join(DESKTOP)).unwrap(),
+        desktop_content(&exec)
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join(MIMEAPPS)).unwrap(),
+        "[Default Applications]\nx-scheme-handler/http=rowser.desktop\n\
+         x-scheme-handler/https=rowser.desktop\n"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("~/.local/share/applications/rowser.desktop")
+            && stdout.contains("~/.config/mimeapps.list"),
+        "{stdout}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_edits_mimeapps_list_keeping_other_lines_and_a_rerun_is_idempotent() {
+    let dir = temp_dir("mimeedit");
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let before = "[Added Associations]\nx-scheme-handler/http=firefox.desktop;\n\n\
+                  [Default Applications]\ntext/html=firefox.desktop\n\
+                  x-scheme-handler/http=firefox.desktop\nx-scheme-handler/https = firefox.desktop\n\
+                  x-scheme-handler/mailto=thunderbird.desktop\n\n\
+                  [Removed Associations]\nimage/png=gimp.desktop\n";
+    std::fs::write(home.join(MIMEAPPS), before).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let want = "[Added Associations]\nx-scheme-handler/http=firefox.desktop;\n\n\
+                [Default Applications]\ntext/html=firefox.desktop\n\
+                x-scheme-handler/mailto=thunderbird.desktop\n\n\
+                x-scheme-handler/http=rowser.desktop\nx-scheme-handler/https=rowser.desktop\n\
+                [Removed Associations]\nimage/png=gimp.desktop\n";
+    for _ in 0..2 {
+        let out = run_install(&dir, &home, "Linux x86_64", &local);
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(std::fs::read_to_string(home.join(MIMEAPPS)).unwrap(), want);
+    }
+    assert!(!home.join(".config/mimeapps.list.tmp").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_adds_a_default_applications_section_to_a_mimeapps_list_without_one() {
+    let dir = temp_dir("mimeadd");
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    std::fs::write(
+        home.join(MIMEAPPS),
+        "[Added Associations]\ntext/plain=gedit.desktop;\n",
+    )
+    .unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(home.join(MIMEAPPS)).unwrap(),
+        "[Added Associations]\ntext/plain=gedit.desktop;\n\n[Default Applications]\n\
+         x-scheme-handler/http=rowser.desktop\nx-scheme-handler/https=rowser.desktop\n"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_keeps_a_mimeapps_list_symlink_and_warns() {
+    let dir = temp_dir("mimesym");
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    let target = dir.join("dotfiles-mimeapps.list");
+    std::fs::write(&target, "[Default Applications]\n").unwrap();
+    std::os::unix::fs::symlink(&target, home.join(MIMEAPPS)).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(std::fs::read_link(home.join(MIMEAPPS)).unwrap(), target);
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "[Default Applications]\n"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning") && stderr.contains("~/.config/mimeapps.list"),
+        "{stderr}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_calls_xdg_mime_when_the_remote_has_it_and_leaves_mimeapps_list() {
+    let dir = temp_dir("xdgmime");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+    let xdg = fake_xdg_mime(&dir);
+
+    let args = ["--local-build", local.to_str().unwrap()];
+    let out = run_install_remote(&dir, &home, "Linux x86_64", &args, Some(&xdg));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("xdg-mime.args")).unwrap(),
+        "default rowser.desktop x-scheme-handler/http x-scheme-handler/https\n"
+    );
+    assert!(home.join(DESKTOP).is_file());
+    assert!(!home.join(MIMEAPPS).exists());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("xdg-mime"), "{stdout}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_quotes_the_desktop_exec_path_with_a_space_in_home() {
+    let dir = temp_dir("deskspace");
+    let home = dir.join("my home");
+    std::fs::create_dir_all(&home).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    let exec = format!("\"{}/.local/bin/rowser\"", home.display());
+    assert_eq!(
+        std::fs::read_to_string(home.join(DESKTOP)).unwrap(),
+        desktop_content(&exec)
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 

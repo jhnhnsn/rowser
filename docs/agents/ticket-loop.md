@@ -58,6 +58,9 @@ rowser is a CLI; test it from the terminal.
   `HOME` to a temp dir. `--local-build <path>` skips the download; the hidden `--release-url
   <base>` points the download at a local HTTP server serving `rowser-<target>.tar.gz` and
   `SHA256SUMS` (`sha256sum` output; the download is refused without a matching entry).
+  The install runs `xdg-mime` when the remote `PATH` has it: the fake `ssh` must set the remote
+  `PATH` to a dir of linked tools only (`sh mkdir rm cat chmod mv ln head awk`), plus a fake
+  `xdg-mime` that logs its arguments when wanted. Never let the real `xdg-mime` run.
 - `rowser browsers [--json]` reads `HOME`, `XDG_DATA_HOME`, `XDG_DATA_DIRS` and
   `XDG_CONFIG_HOME` on Linux: set all four to a temp tree with fake `.desktop` files,
   `Local State` and `~/.mozilla/firefox/profiles.ini` files. It only reads; it opens nothing.

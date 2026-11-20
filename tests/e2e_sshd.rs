@@ -433,7 +433,8 @@ async fn remote_install_puts_the_binary_and_links_in_the_remote_home() {
     let w = World::start().await;
     // sshd sets HOME from the passwd entry, so the `ssh` wrapper puts a temp
     // HOME in front of the remote command (`ssh -- <host> <command>`). The
-    // install never touches the real home of the test user.
+    // install never touches the real home of the test user. A real `xdg-mime`
+    // on the remote PATH also gets temp XDG dirs and a dead session bus.
     let home = w.dir.0.join("remote-home");
     std::fs::create_dir(&home).unwrap();
     let wrap = w.dir.0.join("wrap");
@@ -443,9 +444,10 @@ async fn remote_install_puts_the_binary_and_links_in_the_remote_home() {
         &ssh,
         format!(
             "#!/bin/sh\n[ \"$1\" = -- ] && [ $# -eq 3 ] || exit 99\n\
-             exec /usr/bin/ssh -F {} -- \"$2\" \"HOME={} $3\"\n",
+             exec /usr/bin/ssh -F {} -- \"$2\" \"HOME={h} XDG_CONFIG_HOME={h}/.config \
+             XDG_DATA_HOME={h}/.local/share DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/rowser-test $3\"\n",
             w.path("ssh_config"),
-            home.display()
+            h = home.display()
         ),
     )
     .unwrap();
@@ -478,4 +480,7 @@ async fn remote_install_puts_the_binary_and_links_in_the_remote_home() {
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("export BROWSER=rowser"), "{stdout}");
+    assert!(home
+        .join(".local/share/applications/rowser.desktop")
+        .is_file());
 }
