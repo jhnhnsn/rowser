@@ -1,6 +1,8 @@
-//! The Daemon: serves Open requests on the direct and relay sockets.
+//! The Daemon: serves Open requests on the direct and relay sockets, and
+//! control commands on the control socket.
 
 mod confirm;
+mod control;
 mod forward;
 mod limit;
 mod notifier;
@@ -29,8 +31,7 @@ pub use opener::{CommandOpener, Opener};
 pub const DIRECT_SOCKET: &str = "rowserd.sock";
 /// File name of the relay socket in the runtime directory.
 pub const RELAY_SOCKET: &str = "rowserd-relay.sock";
-/// File name of the control socket in the runtime directory (ADR 0006).
-pub const CONTROL_SOCKET: &str = "rowserd-control.sock";
+pub use crate::protocol::CONTROL_SOCKET;
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -53,12 +54,16 @@ pub struct DaemonConfig {
     pub loopback: Vec<IpAddr>,
     /// The Routes from the config file (the spec's defaults without one).
     pub routes: Routes,
+    /// The config file path the Daemon resolved, for `rowser status`.
+    /// `None` when no path resolved.
+    pub config_file: Option<PathBuf>,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         DaemonConfig {
             routes: Routes::default(),
+            config_file: None,
             rate_max: 5,
             rate_window: Duration::from_secs(10),
             confirm_hosts: vec![],
@@ -74,6 +79,8 @@ impl Default for DaemonConfig {
 enum Socket {
     Direct,
     Relay,
+    /// Local control commands only (ADR 0006).
+    Control,
 }
 
 pub struct Daemon {
@@ -85,14 +92,18 @@ struct Inner {
     opener: Arc<dyn Opener>,
     notifier: Arc<dyn Notifier>,
     forwards: Arc<forward::Forwards>,
+    /// True when a file was at `config.config_file` at start.
+    config_file_exists: bool,
 }
 
 impl Daemon {
     pub fn new(mut config: DaemonConfig, opener: impl Opener, notifier: impl Notifier) -> Daemon {
         // The spec binds the local side on loopback only.
         config.loopback.retain(IpAddr::is_loopback);
+        let config_file_exists = config.config_file.as_deref().is_some_and(Path::is_file);
         Daemon {
             inner: Arc::new(Inner {
+                config_file_exists,
                 config,
                 opener: Arc::new(opener),
                 notifier: Arc::new(notifier),
@@ -110,15 +121,15 @@ impl Daemon {
     ) -> io::Result<()> {
         loop {
             let (stream, socket) = tokio::select! {
-                r = direct.accept() => (r?.0, Some(Socket::Direct)),
-                r = relay.accept() => (r?.0, Some(Socket::Relay)),
-                r = control.accept() => (r?.0, None),
+                r = direct.accept() => (r?.0, Socket::Direct),
+                r = relay.accept() => (r?.0, Socket::Relay),
+                r = control.accept() => (r?.0, Socket::Control),
             };
             let inner = self.inner.clone();
             tokio::spawn(async move {
                 let result = match socket {
-                    Some(socket) => inner.handle(stream, socket).await,
-                    None => inner.handle_control(stream).await,
+                    Socket::Control => inner.handle_control(stream).await,
+                    socket => inner.handle(stream, socket).await,
                 };
                 if let Err(e) = result {
                     tracing::debug!("connection ended: {e}");
@@ -139,6 +150,13 @@ pub const FORWARD_NOT_APPROVED: &str =
 /// The error for a control message on the direct or relay socket.
 pub const CONTROL_ONLY: &str = "control messages are accepted only on the control socket";
 
+/// The answer to `Ping` on every socket.
+fn pong() -> Msg {
+    Msg::Pong {
+        version: Hello::current().version(),
+    }
+}
+
 /// A failed `OpenResult` carrying `text`.
 fn open_error(text: impl Into<String>) -> Msg {
     Msg::OpenResult {
@@ -152,7 +170,7 @@ impl Inner {
     async fn handle(&self, stream: UnixStream, socket: Socket) -> crate::protocol::Result<()> {
         let (mut conn, _) = Conn::accept(stream).await?;
         let stamp = match socket {
-            Socket::Direct => None,
+            Socket::Direct | Socket::Control => None,
             Socket::Relay => match conn.recv().await? {
                 Some(Msg::HostStamp { alias }) => Some(alias),
                 Some(_) => {
@@ -170,13 +188,11 @@ impl Inner {
                 return conn.send(&open_error(CONTROL_ONLY)).await;
             }
             let reply = match msg {
-                Msg::Ping => Msg::Pong {
-                    version: Hello::current().version(),
-                },
+                Msg::Ping => pong(),
                 Msg::HostStamp { .. } => {
                     let text = match socket {
-                        Socket::Direct => "host stamps are not accepted on the direct socket",
                         Socket::Relay => "only one host stamp is allowed per connection",
+                        _ => "host stamps are not accepted on the direct socket",
                     };
                     return conn.send(&open_error(text)).await;
                 }
@@ -234,44 +250,12 @@ impl Inner {
     }
 
     fn forward(&self, ports: &[u16], host: &NoticeHost) -> forward::Created {
-        let host = match host {
-            NoticeHost::Alias(a) => (a.as_str(), false),
-            NoticeHost::Reported(r) => (r.as_str(), true),
-        };
         self.forwards.create(
             ports,
             host,
             &self.config.loopback,
             self.config.forward_timeout,
         )
-    }
-
-    /// The control socket: `rowser status` and later control commands.
-    async fn handle_control(&self, stream: UnixStream) -> crate::protocol::Result<()> {
-        let (mut conn, _) = Conn::accept(stream).await?;
-        while let Some(msg) = conn.recv().await? {
-            let reply = match msg {
-                Msg::Ping => Msg::Pong {
-                    version: Hello::current().version(),
-                },
-                Msg::Status => Msg::StatusReply {
-                    daemon_version: env!("CARGO_PKG_VERSION").into(),
-                    protocol_version: Hello::current().version(),
-                    config_file: None,
-                    paused: false,
-                    forwards: self.forwards.list(),
-                },
-                _ => {
-                    return conn
-                        .send(&open_error(
-                            "the control socket accepts only control messages",
-                        ))
-                        .await
-                }
-            };
-            conn.send(&reply).await?;
-        }
-        Ok(())
     }
 
     /// `rowser forward`: the same `--confirm-hosts` rules as an Open
@@ -505,9 +489,11 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
         .open_command
         .unwrap_or_else(|| crate::platform::default_open_command().into());
     let opener = CommandOpener::new(&template)?;
-    let file = crate::config::load(&crate::config::path()?)?;
+    let config_path = crate::config::path()?;
+    let file = crate::config::load(&config_path)?;
     let mut config = DaemonConfig {
         routes: Routes::from_config(&file),
+        config_file: Some(config_path),
         confirm_hosts: args.confirm_hosts,
         confirm_unverified: args.confirm_unverified,
         ..DaemonConfig::default()

@@ -52,10 +52,13 @@ accepts a `DataConn` only when its `forward_id` is the forward that sent that `D
 
 Control messages (protocol 1.1, control socket only; `Msg::is_control` names them, and the direct
 and relay sockets answer them with an `OpenResult` error and close the connection): `Status`,
-`StatusReply{daemon_version, protocol_version, config_file?, paused, forwards: [ForwardInfo{port,
-host, unverified, age_secs}]}`. The control socket also answers `Ping`.
+`StatusReply{daemon_version, protocol_version, config_file?, config_file_exists, paused,
+forwards: [ForwardInfo{port, host, unverified, age_secs}]}`. The control socket also answers
+`Ping`. `CONTROL_SOCKET` (the socket's file name) lives in `protocol`, so the client side does
+not depend on `daemon`.
 
-The version stays 1.0 until v0.1.0 ships, so these additions do not bump it. A Daemon built
+The version is 1.1: 1.1 adds the control messages. Peers with the same major interoperate, so a
+1.0 Shim or Wrapper still works with a 1.1 Daemon. A Daemon built
 before `Forward` cannot parse it and closes the connection, so `rowser forward` prints "daemon closed the
 connection" and exits 1.
 
@@ -84,7 +87,9 @@ Interface:
 
 ```rust
 Daemon::new(DaemonConfig, opener: impl Opener, notifier: impl Notifier) -> Daemon
-Daemon::serve(self, direct: UnixListener, relay: UnixListener) -> impl Future<Output = Result<()>>
+Daemon::serve(self, direct: UnixListener, relay: UnixListener, control: UnixListener)
+    -> impl Future<Output = Result<()>>
+bind_sockets(dir: &Path) -> Result<(UnixListener, UnixListener, UnixListener)>
 ```
 
 `DaemonConfig`: `open_command`, `confirm_hosts`, rate-limit values, forward timeout, loopback
@@ -194,5 +199,8 @@ src/
   `rowser status`; the runtime directory comes from `platform::runtime_dir`, as for `rowser ssh`.
 - The Wrapper registers its Session with the Daemon (protocol 1.1) and keeps that connection
   open until `ssh` exits, so `rowser status` lists Sessions.
-- Dependency direction: `cli ─► config, routes, browsers`; `daemon ─► routes, browsers,
-  protocol`; `routes ─► config` types only; `doctor ─► config, routes, browsers`.
+- Dependency direction: `cli ─► config, routes, browsers, control`; `control ─► protocol,
+  platform`; `daemon ─► config, routes, browsers, protocol`; `routes ─► config` types only;
+  `doctor ─► config, routes, browsers`.
+- `DaemonConfig.config_file` is the config file path the Daemon resolved (`config::path`);
+  `rowser status` shows it, with `(no file)` when no file was there at start.

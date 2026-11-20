@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use serde::Serialize;
 use tokio::net::UnixStream;
 
-use crate::daemon::CONTROL_SOCKET;
-use crate::protocol::{Conn, ForwardInfo, Hello, Msg};
+use crate::protocol::{Conn, ForwardInfo, Hello, Msg, CONTROL_SOCKET};
 
 /// The line every control command prints when the Daemon does not answer.
 pub const NOT_RUNNING: &str = "rowser: the daemon is not running";
@@ -95,6 +95,7 @@ pub fn run_status(args: StatusArgs, out: &mut impl Write, err: &mut impl Write) 
         daemon_version,
         protocol_version,
         config_file,
+        config_file_exists,
         paused,
         forwards,
     } = reply
@@ -106,26 +107,21 @@ pub fn run_status(args: StatusArgs, out: &mut impl Write, err: &mut impl Write) 
         let _ = writeln!(err, "rowser status: {text}");
         return ExitCode::FAILURE;
     };
+    let view = StatusView {
+        daemon_version,
+        protocol_version: protocol_version.to_string(),
+        runtime_dir: dir,
+        config_file,
+        config_file_exists,
+        paused,
+        forwards,
+    };
     let written = if args.json {
-        let value = serde_json::json!({
-            "daemon_version": daemon_version,
-            "protocol_version": protocol_version.to_string(),
-            "runtime_dir": dir,
-            "config_file": config_file,
-            "paused": paused,
-            "forwards": forwards,
-        });
-        writeln!(out, "{value}")
+        serde_json::to_string(&view)
+            .map_err(std::io::Error::other)
+            .and_then(|json| writeln!(out, "{json}"))
     } else {
-        write_text(
-            out,
-            &daemon_version,
-            &protocol_version.to_string(),
-            &dir,
-            config_file.as_deref(),
-            paused,
-            &forwards,
-        )
+        write_text(out, &view)
     };
     match written {
         Ok(()) => ExitCode::SUCCESS,
@@ -133,29 +129,38 @@ pub fn run_status(args: StatusArgs, out: &mut impl Write, err: &mut impl Write) 
     }
 }
 
-fn write_text(
-    out: &mut impl Write,
-    daemon_version: &str,
-    protocol_version: &str,
-    dir: &Path,
-    config_file: Option<&str>,
+/// What `rowser status` prints, as text or as one JSON object.
+#[derive(Serialize)]
+struct StatusView {
+    daemon_version: String,
+    protocol_version: String,
+    runtime_dir: PathBuf,
+    config_file: Option<String>,
+    config_file_exists: bool,
     paused: bool,
-    forwards: &[ForwardInfo],
-) -> std::io::Result<()> {
-    writeln!(out, "daemon version:    {daemon_version}")?;
-    writeln!(out, "protocol version:  {protocol_version}")?;
-    writeln!(out, "runtime directory: {}", dir.display())?;
-    writeln!(out, "config file:       {}", config_file.unwrap_or("none"))?;
+    forwards: Vec<ForwardInfo>,
+}
+
+fn write_text(out: &mut impl Write, s: &StatusView) -> std::io::Result<()> {
+    let config_file = match (&s.config_file, s.config_file_exists) {
+        (None, _) => "none".to_string(),
+        (Some(p), true) => p.clone(),
+        (Some(p), false) => format!("{p} (no file)"),
+    };
+    writeln!(out, "daemon version:    {}", s.daemon_version)?;
+    writeln!(out, "protocol version:  {}", s.protocol_version)?;
+    writeln!(out, "runtime directory: {}", s.runtime_dir.display())?;
+    writeln!(out, "config file:       {config_file}")?;
     writeln!(
         out,
         "paused:            {}",
-        if paused { "yes" } else { "no" }
+        if s.paused { "yes" } else { "no" }
     )?;
-    if forwards.is_empty() {
+    if s.forwards.is_empty() {
         return writeln!(out, "callback forwards: none");
     }
     writeln!(out, "callback forwards:")?;
-    for f in forwards {
+    for f in &s.forwards {
         let host = if f.unverified {
             format!("{} (unverified)", f.host)
         } else {

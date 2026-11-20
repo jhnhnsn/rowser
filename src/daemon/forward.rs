@@ -10,6 +10,7 @@ use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
+use super::NoticeHost;
 use crate::protocol::{Conn, ForwardInfo, Msg};
 
 /// Lowest port that may be a Callback port.
@@ -55,7 +56,7 @@ impl Forwards {
     pub fn create(
         self: &Arc<Self>,
         ports: &[u16],
-        host: (&str, bool),
+        host: &NoticeHost,
         loopback: &[IpAddr],
         timeout: Duration,
     ) -> Created {
@@ -100,13 +101,19 @@ impl Forwards {
         let (tx, rx) = oneshot::channel();
         self.waiting.lock().unwrap().insert(id.clone(), tx);
         let mut bound: Vec<u16> = listeners.iter().map(|(port, _)| *port).collect();
+        // One listener per loopback address: list each port once.
+        bound.sort_unstable();
         bound.dedup();
+        let (host, unverified) = match host {
+            NoticeHost::Alias(a) => (a.clone(), false),
+            NoticeHost::Reported(r) => (r.clone(), true),
+        };
         self.active.lock().unwrap().insert(
             id.clone(),
             Active {
                 ports: bound,
-                host: host.0.into(),
-                unverified: host.1,
+                host,
+                unverified,
                 started: tokio::time::Instant::now(),
             },
         );

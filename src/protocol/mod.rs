@@ -8,6 +8,10 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 /// Longest accepted line, in bytes, without the trailing newline.
 const MAX_LINE: usize = 64 * 1024;
 
+/// File name of the control socket in the runtime directory (ADR 0006).
+/// It is here, not in `daemon`, so that the client side needs only `protocol`.
+pub const CONTROL_SOCKET: &str = "rowserd-control.sock";
+
 /// The protocol version this build speaks.
 const VERSION: Version = Version { major: 1, minor: 1 };
 
@@ -113,9 +117,13 @@ pub enum Msg {
     StatusReply {
         daemon_version: String,
         protocol_version: Version,
-        /// `None` until the Daemon reads a config file.
+        /// The config file path the Daemon resolved; `None` when no path
+        /// resolved.
         #[serde(default)]
         config_file: Option<String>,
+        /// True when a file was at `config_file` when the Daemon started.
+        #[serde(default)]
+        config_file_exists: bool,
         paused: bool,
         #[serde(default)]
         forwards: Vec<ForwardInfo>,
