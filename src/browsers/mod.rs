@@ -24,7 +24,7 @@ pub struct Roots {
     pub app_dirs: Vec<PathBuf>,
     /// Linux: `$XDG_DATA_HOME` then each `$XDG_DATA_DIRS` entry (not yet `applications`).
     pub data_dirs: Vec<PathBuf>,
-    /// The user's home (Firefox's `~/.mozilla/firefox` on Linux).
+    /// The user's home (Linux: `~/.mozilla/firefox`, Flatpak `~/.var/app`, Snap `~/snap`).
     pub home: PathBuf,
     /// Where Chromium-family profile dirs live: `~/Library/Application Support` on macOS,
     /// `$XDG_CONFIG_HOME` on Linux.
@@ -93,24 +93,40 @@ pub struct Browser {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Browsers {
-    pub list: Vec<Browser>,
+    pub all: Vec<Browser>,
 }
 
 #[derive(Clone, Copy)]
 enum Family {
     Chromium,
     Firefox,
-    None,
+}
+
+/// Where a known browser keeps its Profiles.
+struct ProfileDirs {
+    family: Family,
+    /// Under `~/Library/Application Support`.
+    mac: &'static str,
+    /// Chromium: under `$XDG_CONFIG_HOME`. Firefox: unused (see [`linux_profile_dirs`]).
+    linux: &'static str,
 }
 
 struct Known {
     name: &'static str,
     app: &'static str,
     bundle_id: &'static str,
+    /// Native, Flatpak (reverse-DNS) and Snap (`<snap>_<app>`) desktop ids.
     desktop_ids: &'static [&'static str],
-    family: Family,
-    mac_profiles: &'static str,
-    linux_profiles: &'static str,
+    /// `None`: no Profiles in rowser (Safari, Arc).
+    profiles: Option<ProfileDirs>,
+}
+
+const fn chromium(mac: &'static str, linux: &'static str) -> Option<ProfileDirs> {
+    Some(ProfileDirs {
+        family: Family::Chromium,
+        mac,
+        linux,
+    })
 }
 
 const KNOWN: &[Known] = &[
@@ -119,27 +135,30 @@ const KNOWN: &[Known] = &[
         app: "Safari",
         bundle_id: "com.apple.Safari",
         desktop_ids: &[],
-        family: Family::None,
-        mac_profiles: "",
-        linux_profiles: "",
+        profiles: None,
     },
     Known {
         name: "chrome",
         app: "Google Chrome",
         bundle_id: "com.google.Chrome",
         desktop_ids: &["google-chrome", "google-chrome-stable", "com.google.Chrome"],
-        family: Family::Chromium,
-        mac_profiles: "Google/Chrome",
-        linux_profiles: "google-chrome",
+        profiles: chromium("Google/Chrome", "google-chrome"),
     },
     Known {
         name: "firefox",
         app: "Firefox",
         bundle_id: "org.mozilla.firefox",
-        desktop_ids: &["firefox", "org.mozilla.firefox", "firefox-esr"],
-        family: Family::Firefox,
-        mac_profiles: "Firefox",
-        linux_profiles: ".mozilla/firefox",
+        desktop_ids: &[
+            "firefox",
+            "org.mozilla.firefox",
+            "firefox-esr",
+            "firefox_firefox",
+        ],
+        profiles: Some(ProfileDirs {
+            family: Family::Firefox,
+            mac: "Firefox",
+            linux: "",
+        }),
     },
     Known {
         name: "edge",
@@ -150,45 +169,40 @@ const KNOWN: &[Known] = &[
             "microsoft-edge-stable",
             "com.microsoft.Edge",
         ],
-        family: Family::Chromium,
-        mac_profiles: "Microsoft Edge",
-        linux_profiles: "microsoft-edge",
+        profiles: chromium("Microsoft Edge", "microsoft-edge"),
     },
     Known {
         name: "brave",
         app: "Brave Browser",
         bundle_id: "com.brave.Browser",
-        desktop_ids: &["brave-browser", "com.brave.Browser"],
-        family: Family::Chromium,
-        mac_profiles: "BraveSoftware/Brave-Browser",
-        linux_profiles: "BraveSoftware/Brave-Browser",
+        desktop_ids: &["brave-browser", "com.brave.Browser", "brave_brave"],
+        profiles: chromium("BraveSoftware/Brave-Browser", "BraveSoftware/Brave-Browser"),
     },
     Known {
         name: "vivaldi",
         app: "Vivaldi",
         bundle_id: "com.vivaldi.Vivaldi",
         desktop_ids: &["vivaldi-stable", "vivaldi", "com.vivaldi.Vivaldi"],
-        family: Family::Chromium,
-        mac_profiles: "Vivaldi",
-        linux_profiles: "vivaldi",
+        profiles: chromium("Vivaldi", "vivaldi"),
     },
     Known {
         name: "chromium",
         app: "Chromium",
         bundle_id: "org.chromium.Chromium",
-        desktop_ids: &["chromium", "chromium-browser", "org.chromium.Chromium"],
-        family: Family::Chromium,
-        mac_profiles: "Chromium",
-        linux_profiles: "chromium",
+        desktop_ids: &[
+            "chromium",
+            "chromium-browser",
+            "org.chromium.Chromium",
+            "chromium_chromium",
+        ],
+        profiles: chromium("Chromium", "chromium"),
     },
     Known {
         name: "arc",
         app: "Arc",
         bundle_id: "company.thebrowser.Browser",
         desktop_ids: &[],
-        family: Family::None,
-        mac_profiles: "",
-        linux_profiles: "",
+        profiles: None,
     },
 ];
 
@@ -196,17 +210,17 @@ impl Browsers {
     /// Finds the browsers and their Profiles under `roots`. Unreadable or malformed files
     /// give no Profiles; they never fail the scan.
     pub fn scan(roots: &Roots) -> Browsers {
-        let list = match roots.os {
+        let all = match roots.os {
             Os::MacOs => scan_mac(roots),
             Os::Linux => scan_linux(roots),
         };
-        Browsers { list }
+        Browsers { all }
     }
 
-    /// One line per browser: `chrome  Google Chrome  profiles: Work (Profile 2)`.
+    /// One line per browser: `chrome  Google Chrome  profiles: Personal (Default)`.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
-        for b in &self.list {
+        for b in &self.all {
             out.push_str(&b.name);
             out.push_str("  ");
             out.push_str(&b.display_name);
@@ -239,7 +253,9 @@ fn scan_mac(roots: &Roots) -> Vec<Browser> {
             display_name: k.app.into(),
             bundle_id: Some(k.bundle_id.into()),
             desktop_id: None,
-            profiles: profiles(k.family, &roots.config_dir.join(k.mac_profiles)),
+            profiles: k.profiles.as_ref().map_or_else(Vec::new, |p| {
+                read_profiles(p.family, &roots.config_dir.join(p.mac))
+            }),
         })
         .collect()
 }
@@ -252,7 +268,8 @@ fn scan_linux(roots: &Roots) -> Vec<Browser> {
             continue;
         };
         let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-        paths.sort();
+        // By desktop id, so `firefox` comes before `firefox-esr` and gets the short name.
+        paths.sort_by(|a, b| a.file_stem().cmp(&b.file_stem()));
         for path in paths {
             let Some(id) = path
                 .file_name()
@@ -261,6 +278,7 @@ fn scan_linux(roots: &Roots) -> Vec<Browser> {
             else {
                 continue;
             };
+            // The first file for a desktop id wins, also when it is hidden (XDG: deleted).
             if id == "rowser" || seen.iter().any(|s| s == id) {
                 continue;
             }
@@ -268,20 +286,28 @@ fn scan_linux(roots: &Roots) -> Vec<Browser> {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let Some(entry) = desktop_entry(&text) else {
+            let entry = DesktopEntry::parse(&text);
+            if !entry.https || entry.hidden {
                 continue;
-            };
-            let known = KNOWN.iter().find(|k| k.desktop_ids.contains(&id));
-            let profiles = match known {
-                Some(k) if matches!(k.family, Family::Firefox) => {
-                    profiles(k.family, &roots.home.join(k.linux_profiles))
-                }
-                Some(k) => profiles(k.family, &roots.config_dir.join(k.linux_profiles)),
-                None => Vec::new(),
-            };
+            }
+            // A short name belongs to the first desktop id that claims it; a later one
+            // (`google-chrome-stable` after `google-chrome`) keeps its desktop id.
+            let known = KNOWN
+                .iter()
+                .find(|k| k.desktop_ids.contains(&id))
+                .filter(|k| list.iter().all(|b: &Browser| b.name != k.name));
+            let profiles = known
+                .and_then(|k| k.profiles.as_ref())
+                .map_or_else(Vec::new, |p| {
+                    linux_profile_dirs(roots, id, p)
+                        .iter()
+                        .map(|dir| read_profiles(p.family, dir))
+                        .find(|found| !found.is_empty())
+                        .unwrap_or_default()
+                });
             list.push(Browser {
                 name: known.map_or(id, |k| k.name).to_string(),
-                display_name: entry.unwrap_or_else(|| id.to_string()),
+                display_name: entry.name.unwrap_or_else(|| id.to_string()),
                 bundle_id: None,
                 desktop_id: Some(format!("{id}.desktop")),
                 profiles,
@@ -291,33 +317,64 @@ fn scan_linux(roots: &Roots) -> Vec<Browser> {
     list
 }
 
-/// `Some(Name)` when the `[Desktop Entry]` group's `MimeType` has `x-scheme-handler/https`.
-fn desktop_entry(text: &str) -> Option<Option<String>> {
-    let mut in_entry = false;
-    let mut https = false;
-    let mut name = None;
-    for line in text.lines().map(str::trim) {
-        if line.starts_with('[') {
-            in_entry = line == "[Desktop Entry]";
-            continue;
-        }
-        if !in_entry {
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("MimeType=") {
-            https = v.split(';').any(|m| m.trim() == "x-scheme-handler/https");
-        } else if let Some(v) = line.strip_prefix("Name=") {
-            name = Some(v.trim().to_string());
-        }
+/// The dirs that can hold a Linux browser's Profiles, first match wins. Flatpak (`a.b.C`)
+/// and Snap (`snap_app`) browsers keep them in their sandbox under the home.
+fn linux_profile_dirs(roots: &Roots, desktop_id: &str, dirs: &ProfileDirs) -> Vec<PathBuf> {
+    let (home, config) = if let Some((snap, _)) = desktop_id.split_once('_') {
+        let base = roots.home.join("snap").join(snap).join("common");
+        (base.clone(), base)
+    } else if desktop_id.contains('.') {
+        let base = roots.home.join(".var/app").join(desktop_id);
+        (base.clone(), base.join("config"))
+    } else {
+        (roots.home.clone(), roots.config_dir.clone())
+    };
+    match dirs.family {
+        Family::Chromium => vec![config.join(dirs.linux)],
+        // Legacy first: Firefox 147+ keeps `~/.mozilla/firefox` when it exists and uses
+        // `$XDG_CONFIG_HOME/mozilla/firefox` only when it does not.
+        Family::Firefox => vec![
+            home.join(".mozilla/firefox"),
+            config.join("mozilla/firefox"),
+        ],
     }
-    https.then_some(name)
 }
 
-fn profiles(family: Family, dir: &Path) -> Vec<Profile> {
+/// The `[Desktop Entry]` group keys discovery reads.
+#[derive(Default)]
+struct DesktopEntry {
+    /// `MimeType` has `x-scheme-handler/https`.
+    https: bool,
+    /// `Hidden=true`: XDG treats the file as deleted.
+    hidden: bool,
+    name: Option<String>,
+}
+
+impl DesktopEntry {
+    fn parse(text: &str) -> DesktopEntry {
+        let mut entry = DesktopEntry::default();
+        let mut in_entry = false;
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('[') {
+                in_entry = line == "[Desktop Entry]";
+            } else if !in_entry {
+            } else if let Some(v) = line.strip_prefix("MimeType=") {
+                entry.https = v.split(';').any(|m| m.trim() == "x-scheme-handler/https");
+            } else if let Some(v) = line.strip_prefix("Hidden=") {
+                entry.hidden = v.trim() == "true";
+            } else if let Some(v) = line.strip_prefix("Name=") {
+                entry.name = Some(v.trim().to_string());
+            }
+        }
+        entry
+    }
+}
+
+/// The Profiles in one browser's Profile dir, sorted by display name.
+fn read_profiles(family: Family, dir: &Path) -> Vec<Profile> {
     let mut list = match family {
         Family::Chromium => chromium_profiles(dir),
         Family::Firefox => firefox_profiles(dir),
-        Family::None => Vec::new(),
     };
     list.sort_by(|a, b| a.name.cmp(&b.name).then(a.dir.cmp(&b.dir)));
     list
@@ -354,29 +411,37 @@ fn firefox_profiles(dir: &Path) -> Vec<Profile> {
     let Ok(text) = std::fs::read_to_string(dir.join("profiles.ini")) else {
         return Vec::new();
     };
-    let mut list = Vec::new();
-    let mut current: Option<(Option<String>, Option<String>)> = None;
-    let mut flush = |c: &mut Option<(Option<String>, Option<String>)>| {
-        if let Some((Some(name), Some(path))) = c.take() {
-            list.push(Profile { name, dir: path });
-        }
-    };
+    /// One `[Profile<n>]` section; it gives a Profile when it has both keys.
+    #[derive(Default)]
+    struct Section {
+        name: Option<String>,
+        path: Option<String>,
+    }
+    let mut sections: Vec<Section> = Vec::new();
+    let mut in_profile = false;
     for line in text.lines().map(str::trim) {
         if line.starts_with('[') {
-            flush(&mut current);
-            if line.starts_with("[Profile") {
-                current = Some((None, None));
+            in_profile = line.starts_with("[Profile");
+            if in_profile {
+                sections.push(Section::default());
             }
-        } else if let Some((name, path)) = current.as_mut() {
+        } else if let (true, Some(s)) = (in_profile, sections.last_mut()) {
             if let Some(v) = line.strip_prefix("Name=") {
-                *name = Some(v.to_string());
+                s.name = Some(v.to_string());
             } else if let Some(v) = line.strip_prefix("Path=") {
-                *path = Some(v.to_string());
+                s.path = Some(v.to_string());
             }
         }
     }
-    flush(&mut current);
-    list
+    sections
+        .into_iter()
+        .filter_map(|s| {
+            Some(Profile {
+                name: s.name?,
+                dir: s.path?,
+            })
+        })
+        .collect()
 }
 
 /// `rowser browsers [--json]`.
@@ -390,7 +455,7 @@ pub fn browsers_main(json: bool) -> std::process::ExitCode {
                 return std::process::ExitCode::FAILURE;
             }
         }
-    } else if found.list.is_empty() {
+    } else if found.all.is_empty() {
         eprintln!("rowser: no browsers found");
     } else {
         print!("{}", found.to_text());

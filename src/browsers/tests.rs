@@ -48,7 +48,7 @@ fn desktop(name: &str, mime: &str) -> String {
 }
 
 fn names(b: &Browsers) -> Vec<&str> {
-    b.list.iter().map(|b| b.name.as_str()).collect()
+    b.all.iter().map(|b| b.name.as_str()).collect()
 }
 
 #[test]
@@ -59,12 +59,12 @@ fn macos_finds_known_app_bundles_in_both_application_dirs() {
     std::fs::create_dir_all(t.0.join("Applications/Unknown.app")).unwrap();
     let found = Browsers::scan(&mac_roots(&t.0));
     assert_eq!(names(&found), ["safari", "arc"]);
-    assert_eq!(found.list[0].bundle_id.as_deref(), Some("com.apple.Safari"));
+    assert_eq!(found.all[0].bundle_id.as_deref(), Some("com.apple.Safari"));
     assert_eq!(
-        found.list[1].bundle_id.as_deref(),
+        found.all[1].bundle_id.as_deref(),
         Some("company.thebrowser.Browser")
     );
-    assert!(found.list.iter().all(|b| b.profiles.is_empty()));
+    assert!(found.all.iter().all(|b| b.profiles.is_empty()));
 }
 
 #[test]
@@ -117,10 +117,10 @@ fn linux_lists_https_handlers_and_skips_others_and_rowser() {
     let found = Browsers::scan(&linux_roots(&t.0));
     assert_eq!(names(&found), ["chrome", "org.example.Odd"]);
     assert_eq!(
-        found.list[0].desktop_id.as_deref(),
+        found.all[0].desktop_id.as_deref(),
         Some("google-chrome.desktop")
     );
-    assert_eq!(found.list[1].display_name, "Odd Browser");
+    assert_eq!(found.all[1].display_name, "Odd Browser");
 }
 
 #[test]
@@ -135,8 +135,8 @@ fn linux_data_home_wins_over_data_dirs_for_one_desktop_id() {
         &desktop("Firefox", "x-scheme-handler/https;"),
     );
     let found = Browsers::scan(&linux_roots(&t.0));
-    assert_eq!(found.list.len(), 1);
-    assert_eq!(found.list[0].display_name, "My Firefox");
+    assert_eq!(found.all.len(), 1);
+    assert_eq!(found.all[0].display_name, "My Firefox");
 }
 
 #[test]
@@ -158,6 +158,110 @@ fn linux_firefox_lists_two_profiles_from_profiles_ini() {
         found.to_text(),
         "firefox  Firefox  profiles: default-release (abc.default-release), work (xyz.work)\n"
     );
+}
+
+const ONE_FIREFOX_PROFILE: &str = "[Profile0]\nName=default\nIsRelative=1\nPath=abc.default\n";
+
+fn firefox_desktop(t: &Path, id: &str) {
+    write(
+        &t.join(format!("usr/share/applications/{id}.desktop")),
+        &desktop("Firefox", "x-scheme-handler/https;"),
+    );
+}
+
+#[test]
+fn linux_firefox_reads_profiles_ini_under_xdg_config_home() {
+    let t = tmp_dir("fx");
+    firefox_desktop(&t.0, "firefox");
+    write(
+        &t.0.join("home/.config/mozilla/firefox/profiles.ini"),
+        ONE_FIREFOX_PROFILE,
+    );
+    let found = Browsers::scan(&linux_roots(&t.0));
+    assert_eq!(
+        found.to_text(),
+        "firefox  Firefox  profiles: default (abc.default)\n"
+    );
+}
+
+#[test]
+fn linux_firefox_prefers_the_legacy_dir_when_both_exist() {
+    let t = tmp_dir("fl");
+    firefox_desktop(&t.0, "firefox");
+    write(
+        &t.0.join("home/.config/mozilla/firefox/profiles.ini"),
+        "[Profile0]\nName=new\nPath=n.new\n",
+    );
+    write(
+        &t.0.join("home/.mozilla/firefox/profiles.ini"),
+        ONE_FIREFOX_PROFILE,
+    );
+    let found = Browsers::scan(&linux_roots(&t.0));
+    assert_eq!(
+        found.to_text(),
+        "firefox  Firefox  profiles: default (abc.default)\n"
+    );
+}
+
+#[test]
+fn linux_snap_and_flatpak_ids_map_to_known_names_and_sandbox_profiles() {
+    let t = tmp_dir("sf");
+    firefox_desktop(&t.0, "firefox_firefox");
+    write(
+        &t.0.join("home/snap/firefox/common/.mozilla/firefox/profiles.ini"),
+        ONE_FIREFOX_PROFILE,
+    );
+    write(
+        &t.0.join("usr/share/applications/com.google.Chrome.desktop"),
+        &desktop("Google Chrome", "x-scheme-handler/https;"),
+    );
+    write(
+        &t.0.join("home/.var/app/com.google.Chrome/config/google-chrome/Local State"),
+        TWO_PROFILES,
+    );
+    write(
+        &t.0.join("usr/share/applications/chromium_chromium.desktop"),
+        &desktop("Chromium", "x-scheme-handler/https;"),
+    );
+    let found = Browsers::scan(&linux_roots(&t.0));
+    assert_eq!(
+        found.to_text(),
+        "chromium  Chromium\n\
+         chrome  Google Chrome  profiles: Personal (Default), Work (Profile 2)\n\
+         firefox  Firefox  profiles: default (abc.default)\n"
+    );
+}
+
+#[test]
+fn linux_second_desktop_id_for_one_short_name_keeps_its_desktop_id() {
+    let t = tmp_dir("du");
+    firefox_desktop(&t.0, "firefox-esr");
+    firefox_desktop(&t.0, "firefox");
+    write(
+        &t.0.join("usr/share/applications/google-chrome-stable.desktop"),
+        &desktop("Google Chrome", "x-scheme-handler/https;"),
+    );
+    write(
+        &t.0.join("data-home/applications/google-chrome.desktop"),
+        &desktop("Google Chrome", "x-scheme-handler/https;"),
+    );
+    let found = Browsers::scan(&linux_roots(&t.0));
+    assert_eq!(
+        names(&found),
+        ["chrome", "firefox", "firefox-esr", "google-chrome-stable"]
+    );
+}
+
+#[test]
+fn linux_skips_hidden_desktop_files_and_their_lower_copies() {
+    let t = tmp_dir("hd");
+    write(
+        &t.0.join("data-home/applications/firefox.desktop"),
+        "[Desktop Entry]\nName=Firefox\nMimeType=x-scheme-handler/https;\nHidden=true\n",
+    );
+    firefox_desktop(&t.0, "firefox");
+    let found = Browsers::scan(&linux_roots(&t.0));
+    assert!(found.all.is_empty());
 }
 
 #[test]
