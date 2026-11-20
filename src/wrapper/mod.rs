@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
 
-use crate::protocol::{Conn, Hello, Msg};
+use crate::protocol::{Conn, Hello, Msg, CONTROL_SOCKET};
 pub use args::destination;
 
 /// How long the Daemon's relay socket has to answer the handshake.
@@ -119,7 +119,8 @@ async fn run_async(args: Vec<OsString>, env: WrapperEnv) -> ExitCode {
     });
     // Hold the Session connection open until ssh exits; dropping it ends
     // the Session on the Daemon.
-    let session = register_session(&env.relay_socket, alias_for_session).await;
+    let control = env.session_dir.join(CONTROL_SOCKET);
+    let session = register_session(&control, alias_for_session).await;
     let code = supervise(&env.ssh, &full).await;
     drop(session);
     // This ends the accept loop only. Relay tasks already started keep
@@ -140,18 +141,17 @@ async fn daemon_answers(relay: &Path) -> bool {
     )
 }
 
-/// Registers the Session on the relay socket (protocol 1.1). `None` when
-/// the Daemon speaks 1.0 or does not accept it: URLs still open then, and
-/// only `rowser status` misses the Session.
-async fn register_session(relay: &Path, alias: String) -> Option<Conn<UnixStream>> {
+/// Registers the Session on the control socket (protocol 1.1). `None` when
+/// the Daemon speaks 1.0 (no control socket) or does not accept it: URLs
+/// still open then, and only `rowser status` misses the Session.
+async fn register_session(control: &Path, alias: String) -> Option<Conn<UnixStream>> {
     let attempt = async {
-        let stream = UnixStream::connect(relay).await.ok()?;
+        let stream = UnixStream::connect(control).await.ok()?;
         let mut conn = Conn::connect(stream, Hello::current()).await.ok()?;
         if !conn.peer_version().has_sessions() {
             return None;
         }
-        conn.send(&Msg::HostStamp { alias }).await.ok()?;
-        conn.send(&Msg::Session).await.ok()?;
+        conn.send(&Msg::Session { host: alias }).await.ok()?;
         match conn.recv().await.ok()? {
             Some(Msg::OpenResult { error: None, .. }) => Some(conn),
             other => {

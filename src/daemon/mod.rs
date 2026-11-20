@@ -222,26 +222,6 @@ impl Inner {
                         self.rate_error()
                     }
                 }
-                Msg::Session => {
-                    let Some(alias) = &stamp else {
-                        return conn
-                            .send(&open_error(
-                                "sessions are accepted only on the relay socket",
-                            ))
-                            .await;
-                    };
-                    let _session = self.sessions.register(alias);
-                    conn.send(&Msg::OpenResult {
-                        forward_id: None,
-                        warnings: vec![],
-                        error: None,
-                    })
-                    .await?;
-                    // The Session lasts until the Wrapper closes the
-                    // connection; the guard drops it then.
-                    while let Ok(Some(_)) = conn.recv().await {}
-                    return Ok(());
-                }
                 Msg::AttachForward { forward_id } => {
                     return match self.forwards.attach(&forward_id, conn) {
                         Ok(()) => Ok(()),

@@ -112,10 +112,13 @@ pub enum Msg {
         forward_id: String,
         conn_id: u64,
     },
-    /// Relay socket only (1.1), right after the Host stamp: the Wrapper
-    /// registers its Session. The reply is an `OpenResult`. The Session
-    /// lasts until the connection closes; no other message follows.
-    Session,
+    /// Control socket only (1.1): the Wrapper registers its Session for the
+    /// Host alias `host` it got from `ssh -G`. The reply is an `OpenResult`.
+    /// The Session lasts until the connection closes; no other message
+    /// follows. The relay socket refuses it, so a Remote host cannot add one.
+    Session {
+        host: String,
+    },
     Ping,
     Pong {
         version: Version,
@@ -144,7 +147,7 @@ pub enum Msg {
 /// One connected Wrapper, as `rowser status` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
-    /// The Host alias of the Host stamp.
+    /// The Host alias the Wrapper got from `ssh -G`.
     pub host: String,
     /// Seconds since the Session registered.
     pub age_secs: u64,
@@ -156,7 +159,10 @@ pub struct SessionInfo {
 impl Msg {
     /// True for the messages that only the control socket accepts.
     pub fn is_control(&self) -> bool {
-        matches!(self, Msg::Status | Msg::StatusReply { .. })
+        matches!(
+            self,
+            Msg::Status | Msg::StatusReply { .. } | Msg::Session { .. }
+        )
     }
 }
 

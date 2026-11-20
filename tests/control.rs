@@ -255,21 +255,18 @@ async fn a_protocol_1_0_shim_still_opens_on_the_1_1_daemon() {
     ));
 }
 
-/// A relay connection that registered a Session for `alias`.
+/// A control connection that registered a Session for `alias`.
 async fn session(run: &Path, alias: &str) -> Conn<UnixStream> {
-    let mut relay = connect(run.join(RELAY_SOCKET)).await;
-    relay
-        .send(&Msg::HostStamp {
-            alias: alias.into(),
-        })
+    let mut control = connect(run.join(CONTROL_SOCKET)).await;
+    control
+        .send(&Msg::Session { host: alias.into() })
         .await
         .unwrap();
-    relay.send(&Msg::Session).await.unwrap();
     assert!(matches!(
-        relay.recv().await.unwrap(),
+        control.recv().await.unwrap(),
         Some(Msg::OpenResult { error: None, .. })
     ));
-    relay
+    control
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -324,9 +321,41 @@ async fn a_session_is_refused_on_the_direct_socket() {
     let dir = TmpDir::new("ctl");
     let run = start(&dir).await;
     let mut direct = connect(run.join(DIRECT_SOCKET)).await;
-    direct.send(&Msg::Session).await.unwrap();
+    direct
+        .send(&Msg::Session { host: "g14".into() })
+        .await
+        .unwrap();
     match direct.recv().await.unwrap() {
-        Some(Msg::OpenResult { error: Some(e), .. }) => assert!(e.contains("relay socket"), "{e}"),
+        Some(Msg::OpenResult { error: Some(e), .. }) => {
+            assert!(e.contains("control socket"), "{e}")
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    let v = json_status(run).await;
+    assert_eq!(v["sessions"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn a_session_on_the_relay_socket_after_a_host_stamp_is_refused() {
+    let dir = TmpDir::new("ctl");
+    let run = start(&dir).await;
+    let mut relay = connect(run.join(RELAY_SOCKET)).await;
+    relay
+        .send(&Msg::HostStamp {
+            alias: "g14".into(),
+        })
+        .await
+        .unwrap();
+    relay
+        .send(&Msg::Session {
+            host: "evil".into(),
+        })
+        .await
+        .unwrap();
+    match relay.recv().await.unwrap() {
+        Some(Msg::OpenResult { error: Some(e), .. }) => {
+            assert!(e.contains("control socket"), "{e}")
+        }
         other => panic!("unexpected {other:?}"),
     }
     let v = json_status(run).await;

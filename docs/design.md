@@ -53,11 +53,13 @@ accepts a `DataConn` only when its `forward_id` is the forward that sent that `D
 Control messages (protocol 1.1, control socket only; `Msg::is_control` names them, and the direct
 and relay sockets answer them with an `OpenResult` error and close the connection): `Status`,
 `StatusReply{daemon_version, protocol_version, config_file?, config_file_exists, paused,
-forwards: [ForwardInfo{port, host, unverified, age_secs}]}`. The control socket also answers
-`Ping`. `CONTROL_SOCKET` (the socket's file name) lives in `protocol`, so the client side does
+forwards: [ForwardInfo{port, host, unverified, age_secs}],
+sessions: [SessionInfo{host, age_secs, target}]}`, and `Session{host}` (the Wrapper registers
+its Session; the reply is an `OpenResult`, and the Session lasts until that connection closes).
+The control socket also answers `Ping`. `CONTROL_SOCKET` (the socket's file name) lives in `protocol`, so the client side does
 not depend on `daemon`.
 
-The version is 1.1: 1.1 adds the control messages. Peers with the same major interoperate, so a
+The version is 1.1: 1.1 adds the control messages, `Session` among them. Peers with the same major interoperate, so a
 1.0 Shim or Wrapper still works with a 1.1 Daemon. A Daemon built
 before `Forward` cannot parse it and closes the connection, so `rowser forward` prints "daemon closed the
 connection" and exits 1.
@@ -178,6 +180,7 @@ src/
   browsers/          browser + Profile discovery per OS; resolves a Target to an argv
   daemon/control.rs  internal: control socket handlers (status, activity, pause, pending, reload)
   daemon/activity.rs internal: in-memory ring of the last 200 requests
+  daemon/session.rs  internal: Sessions, one per Wrapper control connection
 ```
 
 - `routes` is pure and has no ports: `Routes::from_config(&Config)`, `Routes::pick(&RequestHost,
@@ -204,10 +207,12 @@ src/
   `rowser: the daemon is not running`. `control::run_status(StatusArgs, out, err)` is
   `rowser status`; the runtime directory comes from `platform::runtime_dir`, as for `rowser ssh`.
 - The Wrapper registers its Session with the Daemon (protocol 1.1) and keeps that connection
-  open until `ssh` exits, so `rowser status` lists Sessions. On the relay socket, after the
-  Host stamp, it sends `Msg::Session`; the Daemon answers `OpenResult` and keeps the Session in
-  `daemon/session.rs` until the connection closes. The Wrapper skips this when the Daemon's
-  hello is 1.0 (`Conn::peer_version`). The shown Target is `Routes::session_target(alias)`:
+  open until `ssh` exits, so `rowser status` lists Sessions. On the control socket (local only,
+  mode 0600) it sends `Msg::Session{host}` with the `ssh -G` Host alias; the Daemon answers
+  `OpenResult` and keeps the Session in `daemon/session.rs` until the connection closes (also
+  when the kernel closes it for a killed Wrapper). The relay socket refuses `Session`, as the
+  Wrapper copies raw Tunnel bytes there after the Host stamp. The Wrapper skips this when no
+  control socket answers or the Daemon's hello is 1.0 (`Conn::peer_version`). The shown Target is `Routes::session_target(alias)`:
   the alias's first Route without `match`, else `[default]`.
 - Dependency direction: `cli ─► config, routes, browsers, control`; `control ─► protocol,
   platform`; `daemon ─► config, routes, browsers, protocol`; `routes ─► config` types only;

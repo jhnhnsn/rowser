@@ -185,6 +185,13 @@ mod tests {
                        [[route]]\nhost = \"g1?\"\nopen = \"safari\"\n";
 
     #[test]
+    fn session_target_is_the_first_route_without_match_else_default() {
+        let r = routes(TWO);
+        assert_eq!(r.session_target("g14").to_string(), "safari");
+        assert_eq!(r.session_target("db1").to_string(), "system");
+    }
+
+    #[test]
     fn first_matching_route_wins() {
         let p = routes(TWO).pick(&alias("g14"), &url("https://mail.google.com/x"));
         assert_eq!(p.route, Some(0));

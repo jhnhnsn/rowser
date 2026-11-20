@@ -12,6 +12,20 @@ impl Inner {
             let reply = match msg {
                 Msg::Ping => pong(),
                 Msg::Status => self.status(),
+                Msg::Session { host } => {
+                    let _session = self.sessions.register(&host);
+                    conn.send(&Msg::OpenResult {
+                        forward_id: None,
+                        warnings: vec![],
+                        error: None,
+                    })
+                    .await?;
+                    // The Session lasts until the Wrapper closes the
+                    // connection (or the kernel does, for a killed
+                    // Wrapper); the guard drops it then.
+                    while let Ok(Some(_)) = conn.recv().await {}
+                    return Ok(());
+                }
                 _ => {
                     return conn
                         .send(&open_error(
