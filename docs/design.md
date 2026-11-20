@@ -150,3 +150,32 @@ discovery ─► protocol
 3. E2E (`tests/e2e_sshd.rs`, Linux only; each test returns at once unless `ROWSER_E2E=1`): throwaway
    `sshd`, `rowser ssh`, OAuth-style callback, tmux-style reattach (second session, shim picks
    newest socket), and a `ProxyJump` hop through the same `sshd`.
+
+## v1.0 additions (#38)
+
+New modules, in the same style (deep modules, few ports):
+
+```
+src/
+  config/            config file: path rules, load + validate (toml), edit in place (toml_edit)
+  routes/            Route matching: (Host alias or unverified, URL) -> (Route index, Target); pure
+  browsers/          browser + Profile discovery per OS; resolves a Target to an argv
+  daemon/control.rs  internal: control socket handlers (status, activity, pause, pending, reload)
+  daemon/activity.rs internal: in-memory ring of the last 200 requests
+```
+
+- `routes` is pure and has no ports: `Routes::from_config(&Config)`, `Routes::pick(&RequestHost,
+  &Url) -> Pick { route: Option<usize>, target: Target, ask: bool }`. `rowser route test`, the
+  Daemon and `rowser doctor` all call it.
+- `browsers` takes its roots as plain values (`/Applications`, `~/Applications`, XDG data dirs,
+  the browsers' profile directories) so tests point it at temp dirs. `Browsers::scan(roots)`
+  and `Browsers::command(&Target, &Url) -> Result<Command>`. No port: there is one adapter.
+- The Opener port changes to `Opener::open(&Url, &Target) -> Result<()>`. `CommandOpener`
+  runs `browsers::command` for a browser Target and the `--open-command` template for
+  `system`. The test adapter records (URL, Target).
+- `daemon::serve` takes the control listener as a third socket. Control messages are refused on
+  the direct and relay sockets.
+- The Wrapper registers its Session with the Daemon (protocol 1.1) and keeps that connection
+  open until `ssh` exits, so `rowser status` lists Sessions.
+- Dependency direction: `cli ─► config, routes, browsers`; `daemon ─► routes, browsers,
+  protocol`; `routes ─► config` types only; `doctor ─► config, routes, browsers`.

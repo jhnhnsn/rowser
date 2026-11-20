@@ -90,3 +90,32 @@ _Avoid_: helper, background shim, daemon (reserved for Daemon)
 **Confirmed host**:
 A Remote host whose Open requests wait for the user to approve them before the browser opens.
 _Avoid_: untrusted host, prompt host
+
+**Pending request**:
+An Open request (or `rowser forward` request) that waits for the user to approve or deny it.
+_Avoid_: prompt, question, approval
+
+## Browser selection
+
+**Route**:
+A rule that sends the Open requests of matching Host aliases, and optionally only matching URLs,
+to one Target.
+_Avoid_: rule, mapping, binding
+
+**Target**:
+Where a Route sends a URL: a browser with an optional Profile, the system opener, or "ask".
+_Avoid_: destination, handler
+
+**Profile**:
+One of a browser's separate user profiles, each with its own sign-ins.
+_Avoid_: account, persona, space
+
+## Local control
+
+**Control socket**:
+The Daemon's socket for rowser commands run by the same user on the Local machine.
+_Avoid_: admin socket, API socket
+
+**Session**:
+One SSH session started by a Wrapper, from its start until `ssh` exits.
+_Avoid_: connection, tunnel (reserved for Tunnel)

@@ -2,15 +2,16 @@
 
 ## Tickets
 
-GitHub issues in `jhnhnsn/rowser`. A parent holds its tickets as sub-issues (also in the `v1`
-milestone). Blockers are listed in each ticket body's `## Blocked by` section. Labels:
+GitHub issues in `jhnhnsn/rowser`. A parent holds its tickets as sub-issues (also in the GitHub
+milestone of the same version: #1 in `v0.1.0`, #38 in `v1.0`). Blockers are listed in each ticket body's `## Blocked by` section. Labels:
 `ready-for-agent`, `ready-for-human`.
 
 Read a ticket: `gh issue view <n> --repo jhnhnsn/rowser --json title,body,labels,comments`.
 
 ## Order
 
-Parent #1. Inside it: the lowest-numbered ready ticket with no open blockers.
+The run's parent: #1 (v0.1.0) or #38 (v1.0). Inside it: the lowest-numbered ready ticket with no
+open blockers.
 
 ## Checks
 
@@ -69,15 +70,15 @@ trust, scheme allowlist, rate limit); any change to user-facing command or flag 
 
 ## Ship
 
-Each ticket: `git push origin main`, no publish step. The milestone ships at once: after the last
-ticket the user tags `v0.1.0` and the release workflow (#12) builds binaries. Reserving the
+Each ticket: `git push origin main`, no publish step. A milestone ships at once: after its last
+ticket the user tags it (`v0.1.0`, then `v1.0.0`) and the release workflow (#12) builds binaries. Reserving the
 crates.io name needs the user's token: `ready-for-human`.
 
 ## Changelog
 
 `CHANGELOG.md`, Keep a Changelog format. Each shipped ticket adds an entry under
 `## [Unreleased]`, newest first, for rowser users: what a user can now do, with the issue link.
-The milestone summary goes in `## [0.1.0]` at tagging. Milestones still to come are not listed.
+The milestone summary goes in `## [<version>]` at tagging. Milestones still to come are not listed.
 
 ## Stops
 
@@ -99,7 +100,7 @@ plus its fix commit.
 
 ## Concurrency
 
-Parallel worktrees: at most 2 at once.
+Parallel worktrees: at most 3 at once.
 
 ## Daily cap
 
@@ -107,7 +108,7 @@ Rolling: 14.3% of the plan's weekly usage per day.
 
 ## Ticket budget
 
-4
+6
 
 ## Writing
 
