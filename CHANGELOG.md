@@ -107,6 +107,14 @@ All notable changes to rowser are listed here. The format follows
   `remote install`) as stubs. Invoked as `xdg-open`, `sensible-browser` or `www-browser`, it
   acts as `rowser open`. ([#2](https://github.com/jhnhnsn/rowser/issues/2))
 
+### Changed
+
+- For v0.1.0 users: a URL that comes through the direct socket (no Host alias, only a Reported
+  host name) now waits for the user to approve it, also when there is no config file, because
+  `[unverified]` defaults to `ask`. To open these URLs at once as before, put
+  `[unverified]` with `open = "system"` in the config file.
+  ([#39](https://github.com/jhnhnsn/rowser/issues/39))
+
 ### Fixed
 
 - On macOS, a first `rowser daemon install` no longer prints launchctl's

@@ -166,7 +166,15 @@ src/
 
 - `routes` is pure and has no ports: `Routes::from_config(&Config)`, `Routes::pick(&RequestHost,
   &Url) -> Pick { route: Option<usize>, target: Target, ask: bool }`. `rowser route test`, the
-  Daemon and `rowser doctor` all call it.
+  Daemon and `rowser doctor` all call it. `Target` (`system`, `ask`, `<browser>[:<profile>]`)
+  lives in `config`, which parses it.
+- `Routes::resolve(&RequestHost, &Url) -> Resolved { target, ask, warnings }` applies the
+  fallback rules on top of `pick`: an `ask` Target waits, then opens in `[default]`; a browser
+  Target that is not available falls back to `[default]` with a warning; and a `[default]` of
+  `ask` makes that fallback wait too (ADR 0008). The Daemon calls `resolve`, not `pick`.
+- `routes::glob_match` is the one glob matcher, for Routes and `--confirm-hosts`.
+- `Notice.target: Option<Target>` carries the Target of an Open request (`None` for a `rowser
+  forward` request); the notice body names it when it is not `system`.
 - `browsers` takes its roots as plain values (`/Applications`, `~/Applications`, XDG data dirs,
   the browsers' profile directories) so tests point it at temp dirs. `Browsers::scan(roots)`
   and `Browsers::command(&Target, &Url) -> Result<Command>`. No port: there is one adapter.

@@ -201,6 +201,23 @@ mod tests {
     }
 
     #[test]
+    fn system_and_ask_are_keywords_and_other_names_are_browsers() {
+        let target = |s: &str| {
+            let c = parse(&format!("[[route]]\nhost = \"g14\"\nopen = \"{s}\"\n")).unwrap();
+            c.routes[0].target.clone()
+        };
+        assert_eq!(target("system"), Target::System);
+        assert_eq!(target("ask"), Target::Ask);
+        assert_eq!(
+            target("firefox"),
+            Target::Browser {
+                browser: "firefox".into(),
+                profile: None
+            }
+        );
+    }
+
+    #[test]
     fn a_bad_target_names_its_line() {
         let e = parse("[[route]]\nhost = \"g14\"\nopen = \":x\"\n").unwrap_err();
         assert!(e.starts_with("line 3: invalid target"), "{e}");

@@ -2,6 +2,8 @@
 
 use url::Url;
 
+use crate::config::Target;
+
 /// Where the host name in a notice comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoticeHost {
@@ -26,8 +28,9 @@ pub enum Subject {
 pub struct Notice {
     pub subject: Subject,
     pub host: NoticeHost,
-    /// The Target the URL opens in, when it is not `system`.
-    pub target: Option<String>,
+    /// The Target an Open request opens in; `None` for a `rowser forward`
+    /// request. The body names it when it is not `system`.
+    pub target: Option<Target>,
     /// Problems with the request that did not stop it, such as a busy
     /// Callback port.
     pub warnings: Vec<String>,
@@ -78,9 +81,9 @@ impl Notice {
             }
         };
         let mut body = format!("From {host}: {what}");
-        if let Some(target) = &self.target {
+        if let Some(target) = self.target.as_ref().filter(|t| **t != Target::System) {
             body.push_str("\nOpens in: ");
-            body.push_str(&clean(target, escape));
+            body.push_str(&clean(&target.to_string(), escape));
         }
         for w in &self.warnings {
             body.push_str("\nWarning: ");

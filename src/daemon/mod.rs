@@ -19,9 +19,8 @@ use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 use url::Url;
 
-use crate::config::Target;
 use crate::protocol::{Conn, Hello, Msg};
-use crate::routes::{RequestHost, Routes};
+use crate::routes::{RequestHost, Resolved, Routes};
 use limit::Limit;
 pub use notifier::{DesktopNotifier, Notice, NoticeHost, Notifier, Subject};
 pub use opener::{CommandOpener, Opener};
@@ -259,15 +258,22 @@ impl Inner {
                 url.scheme()
             ));
         }
-        let (target, ask, mut warnings) = self.route(&host, &url);
+        let request_host = match &host {
+            NoticeHost::Alias(a) => RequestHost::Alias(a.clone()),
+            NoticeHost::Reported(n) => RequestHost::Unverified(n.clone()),
+        };
+        let Resolved {
+            target,
+            ask,
+            mut warnings,
+        } = self.config.routes.resolve(&request_host, &url);
         let confirm = ask || self.config.needs_confirm(&host);
-        let shown_target = (target != Target::System).then(|| target.to_string());
         if confirm {
             if let Err(error) = self
                 .confirm(Notice {
                     subject: Subject::Url(url.clone()),
                     host: host.clone(),
-                    target: shown_target.clone(),
+                    target: Some(target.clone()),
                     warnings: warnings.clone(),
                 })
                 .await
@@ -290,7 +296,7 @@ impl Inner {
                 notifier.notify(Notice {
                     subject: Subject::Url(url),
                     host,
-                    target: shown_target,
+                    target: Some(target),
                     warnings,
                 });
             }
@@ -312,43 +318,6 @@ impl Inner {
                 open_error(format!("could not open the URL: {e}"))
             }
         }
-    }
-
-    /// The Target an Open request uses, whether it waits for the user, and
-    /// notice warnings. `ask` opens in the `[default]` Target after "Open". A
-    /// browser Target is not available yet (#47) and falls back to `[default]`.
-    fn route(&self, host: &NoticeHost, url: &Url) -> (Target, bool, Vec<String>) {
-        let routes = &self.config.routes;
-        let request_host = match host {
-            NoticeHost::Alias(a) => RequestHost::Alias(a.clone()),
-            NoticeHost::Reported(n) => RequestHost::Unverified(n.clone()),
-        };
-        let pick = routes.pick(&request_host, url);
-        let mut ask = pick.ask;
-        let mut warnings = vec![];
-        let fallback = |from: &Target, warnings: &mut Vec<String>| {
-            let mut from = from.clone();
-            let mut used = routes.fallback();
-            if let Target::Browser { .. } = used {
-                from = used;
-                used = Target::System;
-            }
-            if let Target::Browser { .. } = from {
-                warnings.push(format!(
-                    "target `{from}` is not available yet; opened with `{used}`"
-                ));
-            }
-            used
-        };
-        let target = match pick.target {
-            Target::System => Target::System,
-            Target::Ask => {
-                ask = true;
-                fallback(&Target::Ask, &mut warnings)
-            }
-            t => fallback(&t, &mut warnings),
-        };
-        (target, ask, warnings)
     }
 
     /// Waits for the user's answer. A denial, a timeout or a failed

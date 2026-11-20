@@ -80,14 +80,52 @@ impl Routes {
         }
     }
 
-    /// The `[default]` Target, or `system` when that is `ask`: what "Open"
-    /// uses for an `ask` Target.
-    pub fn fallback(&self) -> Target {
-        match self.default {
-            Target::Ask => Target::System,
-            ref t => t.clone(),
+    /// The Target an Open request opens in, whether it waits for the user
+    /// first, and the notice warnings. An `ask` Target waits, then opens in
+    /// `[default]`. A browser Target is not available yet (#47) and falls back
+    /// to `[default]`; a `[default]` of `ask` then waits too (ADR 0008).
+    pub fn resolve(&self, host: &RequestHost, url: &Url) -> Resolved {
+        let pick = self.pick(host, url);
+        let mut resolved = Resolved {
+            target: Target::System,
+            ask: pick.ask,
+            warnings: vec![],
+        };
+        if pick.target != Target::System {
+            // `ask` or a browser: both open in `[default]`.
+            resolved.take(&pick.target);
+            if pick.target != self.default {
+                resolved.take(&self.default);
+            }
+        }
+        resolved
+    }
+}
+
+impl Resolved {
+    /// Applies one Target on the way to `system`: `ask` makes the request
+    /// wait, and a browser Target adds a warning.
+    fn take(&mut self, target: &Target) {
+        match target {
+            Target::System => {}
+            Target::Ask => self.ask = true,
+            Target::Browser { .. } => self.warnings.push(format!(
+                "target `{target}` is not available yet; opened with `{}`",
+                Target::System
+            )),
         }
     }
+}
+
+/// The result of `Routes::resolve`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    /// The Target the URL opens in.
+    pub target: Target,
+    /// The user approves the URL before it opens.
+    pub ask: bool,
+    /// Notice warnings, such as a browser Target that fell back.
+    pub warnings: Vec<String>,
 }
 
 /// Matches `name` against a glob `pattern` with `*` (any run) and `?` (one
@@ -191,13 +229,51 @@ mod tests {
         assert!(r.pick(&alias("any"), &url("https://e.com/")).ask);
     }
 
+    fn resolve(text: &str, host: RequestHost) -> Resolved {
+        routes(text).resolve(&host, &url("https://e.com/"))
+    }
+
     #[test]
-    fn fallback_is_system_when_default_is_ask() {
+    fn an_ask_target_waits_and_opens_in_system() {
+        let r = resolve("[default]\nopen = \"ask\"\n", alias("x"));
+        assert_eq!(r.target, Target::System);
+        assert!(r.ask);
+        assert!(r.warnings.is_empty());
+        assert!(resolve("", RequestHost::Unverified("x".into())).ask);
+        assert!(!resolve("", alias("x")).ask);
+    }
+
+    #[test]
+    fn a_browser_target_falls_back_to_an_ask_default_and_waits() {
+        let text = "[unverified]\nopen = \"safari\"\n[default]\nopen = \"ask\"\n";
+        let r = resolve(text, RequestHost::Unverified("x".into()));
+        assert_eq!(r.target, Target::System);
+        assert!(r.ask);
         assert_eq!(
-            routes("[default]\nopen = \"ask\"\n").fallback(),
-            Target::System
+            r.warnings,
+            ["target `safari` is not available yet; opened with `system`"]
         );
-        assert_eq!(routes("").fallback(), Target::System);
+        let text = "[[route]]\nhost = \"g14\"\nopen = \"chrome:Work\"\n[default]\nopen = \"ask\"\n";
+        assert!(resolve(text, alias("g14")).ask);
+    }
+
+    #[test]
+    fn a_browser_target_falls_back_to_a_system_default_without_waiting() {
+        let r = resolve("[[route]]\nhost = \"*\"\nopen = \"safari\"\n", alias("g14"));
+        assert_eq!(r.target, Target::System);
+        assert!(!r.ask);
+        assert_eq!(r.warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_browser_default_warns_once() {
+        let r = resolve("[default]\nopen = \"chrome:Work\"\n", alias("db1"));
+        assert_eq!(
+            r.warnings,
+            ["target `chrome:Work` is not available yet; opened with `system`"]
+        );
+        let text = "[[route]]\nhost = \"*\"\nopen = \"safari\"\n[default]\nopen = \"firefox\"\n";
+        assert_eq!(resolve(text, alias("g14")).warnings.len(), 2);
     }
 
     #[test]

@@ -292,7 +292,8 @@ async fn a_host_alias_reaches_the_opener_with_its_routes_target() {
         [(Url::parse("https://example.com/a").unwrap(), Target::System)]
     );
     let notices = h.notifier.notices();
-    assert_eq!(notices[0].target, None);
+    assert_eq!(notices[0].target, Some(Target::System));
+    assert!(!notices[0].body().contains("Opens in"));
     assert!(notices[0].warnings.is_empty());
     assert!(h.notifier.confirms().is_empty());
 }
@@ -336,7 +337,7 @@ async fn ask_true_on_a_route_waits_for_the_user() {
 }
 
 #[tokio::test]
-async fn an_ask_target_opens_in_system_after_open_and_the_notice_names_the_target() {
+async fn an_ask_target_opens_in_system_after_open() {
     let text = "[[route]]\nhost = \"g14\"\nopen = \"ask\"\n[default]\nopen = \"ask\"\n";
     let h = routed_harness(text, Answer::Approve).await;
     let mut conn = h.connect_relay("g14").await;
@@ -346,6 +347,35 @@ async fn an_ask_target_opens_in_system_after_open_and_the_notice_names_the_targe
     );
     assert_eq!(h.opener.opens()[0].1, Target::System);
     assert_eq!(h.notifier.confirms().len(), 1);
+}
+
+#[tokio::test]
+async fn a_browser_target_on_unverified_falls_back_to_an_ask_default_and_waits() {
+    let text = "[unverified]\nopen = \"safari\"\n[default]\nopen = \"ask\"\n";
+    let h = routed_harness(text, Answer::Deny).await;
+    let mut conn = h.connect(DIRECT_SOCKET).await;
+    let msg = Msg::Open {
+        url: "https://example.com/".into(),
+        reported_host: "devbox".into(),
+        callback_ports: vec![],
+    };
+    assert_eq!(error_of(&request(&mut conn, msg).await), Some(NOT_APPROVED));
+    assert!(h.opened().is_empty());
+    assert_eq!(h.notifier.confirms().len(), 1);
+}
+
+#[tokio::test]
+async fn a_browser_target_on_a_route_falls_back_to_an_ask_default_and_waits() {
+    let text = "[[route]]\nhost = \"g14\"\nopen = \"chrome:Work\"\n[default]\nopen = \"ask\"\n";
+    let h = routed_harness(text, Answer::Deny).await;
+    let mut conn = h.connect_relay("g14").await;
+    let reply = request(&mut conn, open("https://example.com/")).await;
+    assert_eq!(error_of(&reply), Some(NOT_APPROVED));
+    assert!(h.opened().is_empty());
+}
+
+#[tokio::test]
+async fn a_browser_target_falls_back_with_a_warning_in_the_notice() {
     let h = routed_harness(
         "[[route]]\nhost = \"g14\"\nopen = \"safari\"\n",
         Answer::Approve,
