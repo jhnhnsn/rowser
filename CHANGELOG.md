@@ -8,6 +8,10 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser remote install <host>` also writes `~/.config/environment.d/rowser.conf`, so systemd
+  user services on the remote host get `BROWSER=rowser` and `~/.local/bin` first on `PATH`
+  (from the next login). Your own `rowser.conf` there is kept, with a warning.
+  ([#42](https://github.com/jhnhnsn/rowser/issues/42))
 - `rowser status` shows the running Daemon: its version and protocol version, the runtime
   directory, the config file, whether it is paused, and the open Callback forwards (local port,
   host, age). `--json` prints the same as one JSON object. With no Daemon it prints

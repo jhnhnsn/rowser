@@ -139,11 +139,43 @@ pub fn remote_script() -> String {
     for name in BROWSER_NAMES {
         s.push_str(&format!(" ln -sfn rowser \"$d/{name}\";"));
     }
+    s.push_str(&environment_d_script());
     s
 }
 
+/// The first line of the `environment.d` file rowser writes. A file without
+/// it is the user's own: rowser keeps it.
+pub const ENVIRONMENT_D_MARK: &str =
+    "# Written by rowser remote install; rowser overwrites this file.";
+
+/// What the remote script prints on stdout when it wrote the `environment.d` file.
+const ENVIRONMENT_D_WRITTEN: &str = "rowser-environment.d: written";
+
+/// The `sh` part that writes `~/.config/environment.d/rowser.conf` (for
+/// systemd user services), unless a file without [`ENVIRONMENT_D_MARK`] is
+/// there: then it keeps it and warns. `$HOME` and `$PATH` stay literal for
+/// environment.d to expand.
+fn environment_d_script() -> String {
+    format!(
+        " e=\"$HOME/.config/environment.d\"; f=\"$e/rowser.conf\"; \
+         if {{ [ ! -e \"$f\" ] && [ ! -L \"$f\" ]; }} || [ \"$(head -n 1 \"$f\" 2>/dev/null)\" = \"{ENVIRONMENT_D_MARK}\" ]; then \
+         mkdir -p \"$e\"; rm -f \"$f.tmp\"; \
+         printf \"%s\\n\" \"{ENVIRONMENT_D_MARK}\" \"BROWSER=rowser\" \"PATH=\\$HOME/.local/bin:\\$PATH\" >\"$f.tmp\"; \
+         mv -f \"$f.tmp\" \"$f\"; echo \"{ENVIRONMENT_D_WRITTEN}\"; \
+         else echo \"rowser: warning: kept ~/.config/environment.d/rowser.conf: not written by rowser. \
+         Add BROWSER=rowser and PATH=\\$HOME/.local/bin:\\$PATH to it for systemd user services.\" >&2; fi;"
+    )
+}
+
+/// What an install changed on the Remote host.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Installed {
+    /// rowser wrote `~/.config/environment.d/rowser.conf` (false: the user's own file was kept).
+    pub environment_d: bool,
+}
+
 /// Runs the install against `host` with the `ssh` on `PATH`.
-pub fn install(host: &str, source: &dyn BinarySource) -> Result<(), String> {
+pub fn install(host: &str, source: &dyn BinarySource) -> Result<Installed, String> {
     let out = Command::new("ssh")
         .args(["--", host, "uname -sm"])
         .stdin(Stdio::null())
@@ -159,17 +191,23 @@ pub fn install(host: &str, source: &dyn BinarySource) -> Result<(), String> {
     let mut ssh = Command::new("ssh")
         .args(["--", host, &format!("sh -c '{}'", remote_script())])
         .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot run ssh: {e}"))?;
     let mut stdin = ssh.stdin.take().expect("piped stdin");
     let written = stdin.write_all(&bin);
     drop(stdin);
-    let status = ssh.wait().map_err(|e| format!("cannot run ssh: {e}"))?;
-    if !status.success() {
-        return Err(format!("copy to {host} failed ({status})"));
+    let out = ssh
+        .wait_with_output()
+        .map_err(|e| format!("cannot run ssh: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("copy to {host} failed ({})", out.status));
     }
     written.map_err(|e| format!("copy to {host} failed: {e}"))?;
-    Ok(())
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(Installed {
+        environment_d: stdout.lines().any(|l| l.trim() == ENVIRONMENT_D_WRITTEN),
+    })
 }
 
 /// `rowser remote install <host>`.
@@ -185,12 +223,18 @@ pub fn install_main(
         }),
     };
     match install(host, source.as_ref()) {
-        Ok(()) => {
+        Ok(installed) => {
             println!(
-                "rowser installed on {host} in ~/.local/bin (with {}).\n\
-                 Add this line to your shell rc on {host}:\n\n    export BROWSER=rowser",
+                "rowser installed on {host} in ~/.local/bin (with {}).",
                 BROWSER_NAMES.join(", ")
             );
+            if installed.environment_d {
+                println!(
+                    "Wrote ~/.config/environment.d/rowser.conf on {host} (BROWSER and PATH for \
+                     systemd user services); it applies from the next login."
+                );
+            }
+            println!("Add this line to your shell rc on {host}:\n\n    export BROWSER=rowser");
             ExitCode::SUCCESS
         }
         Err(e) => {

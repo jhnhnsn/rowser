@@ -243,6 +243,68 @@ fn install_copies_the_binary_links_the_names_and_prints_the_browser_line() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+const ENV_D: &str = ".config/environment.d/rowser.conf";
+const ENV_D_CONTENT: &str = "# Written by rowser remote install; rowser overwrites this file.\n\
+                             BROWSER=rowser\n\
+                             PATH=$HOME/.local/bin:$PATH\n";
+
+#[test]
+fn install_writes_environment_d_for_user_services_and_a_rerun_is_idempotent() {
+    let dir = temp_dir("envd");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(home.join(ENV_D)).unwrap(),
+        ENV_D_CONTENT
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("~/.config/environment.d/rowser.conf") && stdout.contains("next login"),
+        "{stdout}"
+    );
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(home.join(ENV_D)).unwrap(),
+        ENV_D_CONTENT
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("environment.d"), "{stderr}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_keeps_a_users_own_environment_d_file_and_warns() {
+    let dir = temp_dir("envdown");
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join(".config/environment.d")).unwrap();
+    std::fs::write(home.join(ENV_D), "BROWSER=firefox\n").unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(home.join(ENV_D)).unwrap(),
+        "BROWSER=firefox\n"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("~/.config/environment.d/rowser.conf")
+            && stderr.contains("not written by rowser"),
+        "{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("next login"), "{stdout}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn install_does_not_write_through_a_planted_temp_symlink() {
     let dir = temp_dir("link");

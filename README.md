@@ -140,6 +140,11 @@ a missing entry), copies it to `~/.local/bin/rowser` on the host, and creates th
 `sensible-browser` and `www-browser` symlinks next to it. Use `--local-build <path>` to copy a
 binary you built instead of the download (no checksum check).
 
+It also writes `~/.config/environment.d/rowser.conf` on the host, so systemd user services get
+`BROWSER=rowser` and `~/.local/bin` first on `PATH`. This applies from the next login. The
+file's first line marks it as rowser's: a later install overwrites only that file. If you
+already have your own `rowser.conf` there, the install keeps it and prints a warning.
+
 Then, on the remote host, add this line to your shell rc:
 
 ```sh
