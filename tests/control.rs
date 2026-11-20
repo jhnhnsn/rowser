@@ -9,7 +9,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use common::TmpDir;
-use rowser::control::{run_status, StatusArgs};
+use rowser::control::{run_reload, run_status, StatusArgs};
 use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
 use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET, RELAY_SOCKET};
 use rowser::protocol::{Conn, Hello, Msg, Version, CONTROL_SOCKET};
@@ -407,6 +407,111 @@ async fn control_messages_are_refused_on_the_direct_and_relay_sockets() {
         again.recv().await.unwrap(),
         Some(Msg::Pong { .. })
     ));
+}
+
+/// Runs `rowser reload` on a blocking thread; gives (exit, stdout, stderr).
+async fn reload(run: PathBuf) -> (ExitCode, String, String) {
+    tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run_reload(Ok(run), &mut out, &mut err);
+        (
+            code,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    })
+    .await
+    .unwrap()
+}
+
+/// Sends an Open request for `alias` on the relay socket and gives the
+/// warnings of its notice. A browser Target falls back to `system` (#47)
+/// with a warning that names it, so the warnings show which Route applied.
+async fn open_warnings(run: &Path, notifier: &RecordingNotifier, alias: &str) -> Vec<String> {
+    let before = notifier.notices().len();
+    let mut relay = connect(run.join(RELAY_SOCKET)).await;
+    relay
+        .send(&Msg::HostStamp {
+            alias: alias.into(),
+        })
+        .await
+        .unwrap();
+    relay
+        .send(&Msg::Open {
+            url: "https://example.com/".into(),
+            reported_host: "devbox".into(),
+            callback_ports: vec![],
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        relay.recv().await.unwrap(),
+        Some(Msg::OpenResult { error: None, .. })
+    ));
+    // The notice is sent from a blocking task after the reply.
+    for _ in 0..50 {
+        let notices = notifier.notices();
+        if notices.len() > before {
+            return notices[before].warnings.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("no notice");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reload_applies_new_routes_and_refuses_an_invalid_file() {
+    let dir = TmpDir::new("ctl");
+    let file = dir.0.join("config.toml");
+    std::fs::write(&file, "[[route]]\nhost = \"g14\"\nopen = \"system\"\n").unwrap();
+    let run = dir.0.join("run");
+    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let notifier = RecordingNotifier::default();
+    let config = DaemonConfig {
+        loopback: vec![V6],
+        routes: Routes::from_config(&rowser::config::load(&file).unwrap()),
+        config_file: Some(file.clone()),
+        ..DaemonConfig::default()
+    };
+    let daemon = Daemon::new(config, RecordingOpener::default(), notifier.clone());
+    tokio::spawn(daemon.serve(direct, relay, control));
+    assert_eq!(
+        open_warnings(&run, &notifier, "g14").await,
+        Vec::<String>::new()
+    );
+
+    std::fs::write(
+        &file,
+        "[[route]]\nhost = \"g14\"\nopen = \"safari\"\n\
+         [[route]]\nhost = \"db1\"\nopen = \"system\"\n",
+    )
+    .unwrap();
+    let (code, out, err) = reload(run.clone()).await;
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    assert_eq!(out, "rowser: config reloaded (2 routes)\n");
+    let w = open_warnings(&run, &notifier, "g14").await;
+    assert!(w.len() == 1 && w[0].contains("safari"), "{w:?}");
+
+    std::fs::write(&file, "[[route]]\nhost = \"g14\"\nopen = 7\n").unwrap();
+    let (code, out, err) = reload(run.clone()).await;
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(out, "");
+    assert!(err.starts_with("rowser reload: "), "{err}");
+    assert!(err.contains(&file.display().to_string()), "{err}");
+    assert!(err.contains("line 3"), "{err}");
+    // The old Route still applies.
+    let w = open_warnings(&run, &notifier, "g14").await;
+    assert!(w.len() == 1 && w[0].contains("safari"), "{w:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reload_with_no_daemon_says_not_running_and_exits_1() {
+    let dir = TmpDir::new("ctl");
+    let (code, out, err) = reload(dir.0.join("run")).await;
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(out, "");
+    assert_eq!(err, "rowser: the daemon is not running\n");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -75,6 +75,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Make the running Daemon read the config file again.
+    Reload,
     /// Manage rowser on a remote host.
     Remote {
         #[command(subcommand)]
@@ -133,6 +135,7 @@ impl Command {
             Command::Doctor => "doctor",
             Command::Browsers { .. } => "browsers",
             Command::Status { .. } => "status",
+            Command::Reload => "reload",
             Command::Remote { .. } => "remote install",
             Command::Keeper { .. } => "__keeper",
         }
@@ -190,6 +193,7 @@ pub fn run(command: Command) -> ExitCode {
         Command::Doctor => crate::doctor::doctor_main(),
         Command::Browsers { json } => crate::browsers::browsers_main(json),
         Command::Status { json } => crate::control::status_main(json),
+        Command::Reload => crate::control::reload_main(),
         Command::Keeper {
             socket,
             forward_id,

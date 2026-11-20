@@ -16,7 +16,7 @@ use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use tokio::net::{UnixListener, UnixStream};
@@ -96,6 +96,9 @@ struct Inner {
     sessions: Arc<session::Sessions>,
     /// True when a file was at `config.config_file` at start.
     config_file_exists: bool,
+    /// The Routes in use: `config.routes` at start, replaced by a valid
+    /// `rowser reload` (ADR 0007).
+    routes: RwLock<Arc<Routes>>,
 }
 
 impl Daemon {
@@ -106,6 +109,7 @@ impl Daemon {
         Daemon {
             inner: Arc::new(Inner {
                 config_file_exists,
+                routes: RwLock::new(Arc::new(config.routes.clone())),
                 config,
                 opener: Arc::new(opener),
                 notifier: Arc::new(notifier),
@@ -308,7 +312,7 @@ impl Inner {
             target,
             ask,
             mut warnings,
-        } = self.config.routes.resolve(&request_host, &url);
+        } = self.routes().resolve(&request_host, &url);
         let confirm = ask || self.config.needs_confirm(&host);
         if confirm {
             if let Err(error) = self

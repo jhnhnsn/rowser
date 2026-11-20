@@ -1,6 +1,10 @@
 //! The control socket handler: `rowser status` and later control commands.
 
+use std::sync::Arc;
+
 use tokio::net::UnixStream;
+
+use crate::routes::Routes;
 
 use super::{open_error, pong, Inner};
 use crate::protocol::{Conn, Hello, Msg, SessionInfo};
@@ -12,6 +16,7 @@ impl Inner {
             let reply = match msg {
                 Msg::Ping => pong(),
                 Msg::Status => self.status(),
+                Msg::Reload => self.reload(),
                 Msg::Session { host } => {
                     let _session = self.sessions.register(&host);
                     conn.send(&Msg::OpenResult {
@@ -39,6 +44,32 @@ impl Inner {
         Ok(())
     }
 
+    /// The Routes in use now.
+    pub(super) fn routes(&self) -> Arc<Routes> {
+        self.routes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// `rowser reload`: reads the config file again. An invalid file is
+    /// refused with the file, line and reason, and the old Routes stay.
+    fn reload(&self) -> Msg {
+        let Some(path) = &self.config.config_file else {
+            return open_error("the daemon has no config file path");
+        };
+        match crate::config::load(path) {
+            Ok(file) => {
+                let count = file.routes.len();
+                *self.routes.write().unwrap_or_else(|e| e.into_inner()) =
+                    Arc::new(Routes::from_config(&file));
+                tracing::info!("config reloaded from {} ({count} routes)", path.display());
+                Msg::Reloaded { routes: count }
+            }
+            Err(e) => open_error(e),
+        }
+    }
+
     fn status(&self) -> Msg {
         Msg::StatusReply {
             daemon_version: env!("CARGO_PKG_VERSION").into(),
@@ -57,7 +88,7 @@ impl Inner {
                 .list()
                 .into_iter()
                 .map(|(host, start)| SessionInfo {
-                    target: self.config.routes.session_target(&host).to_string(),
+                    target: self.routes().session_target(&host).to_string(),
                     age_secs: start.elapsed().as_secs(),
                     host,
                 })

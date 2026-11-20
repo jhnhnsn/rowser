@@ -55,8 +55,12 @@ and relay sockets answer them with an `OpenResult` error and close the connectio
 `StatusReply{daemon_version, protocol_version, config_file?, config_file_exists, paused,
 forwards: [ForwardInfo{port, host, unverified, age_secs}],
 sessions: [SessionInfo{host, age_secs, target}]}`, and `Session{host}` (the Wrapper registers
-its Session; the reply is an `OpenResult`, and the Session lasts until that connection closes).
-The control socket also answers `Ping`. `CONTROL_SOCKET` (the socket's file name) lives in `protocol`, so the client side does
+its Session; the reply is an `OpenResult`, and the Session lasts until that connection closes),
+`Reload` (the Daemon reads the config file again; the reply is `Reloaded{routes}` with the number
+of Routes, or an `OpenResult` error with the file, line and reason, and the old Routes stay).
+The Daemon keeps its Routes behind a lock, so a reload applies to the next Open request.
+`control::reload(runtime_dir)` is the client call `rowser reload` and the `rowser route`
+commands share. The control socket also answers `Ping`. `CONTROL_SOCKET` (the socket's file name) lives in `protocol`, so the client side does
 not depend on `daemon`.
 
 The version is 1.1: 1.1 adds the control messages, `Session` among them. Peers with the same major interoperate, so a

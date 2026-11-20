@@ -125,6 +125,14 @@ pub enum Msg {
     },
     /// Control socket only (1.1): `rowser status`. The reply is a `StatusReply`.
     Status,
+    /// Control socket only (1.1): `rowser reload`, the Daemon reads the
+    /// config file again. The reply is `Reloaded`, or an `OpenResult` with
+    /// the error when the file is invalid; the Daemon then keeps its Routes.
+    Reload,
+    /// The Daemon's answer to a valid `Reload`: the number of Routes it read.
+    Reloaded {
+        routes: usize,
+    },
     /// The Daemon's answer to `Status`.
     StatusReply {
         daemon_version: String,
@@ -161,7 +169,11 @@ impl Msg {
     pub fn is_control(&self) -> bool {
         matches!(
             self,
-            Msg::Status | Msg::StatusReply { .. } | Msg::Session { .. }
+            Msg::Status
+                | Msg::StatusReply { .. }
+                | Msg::Session { .. }
+                | Msg::Reload
+                | Msg::Reloaded { .. }
         )
     }
 }

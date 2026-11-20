@@ -191,6 +191,52 @@ fn age(secs: u64) -> String {
     }
 }
 
+/// Asks the Daemon in `runtime_dir` to read the config file again, and
+/// gives the number of Routes it read. An invalid file is `Other` with the
+/// file, line and reason; the Daemon then keeps its old Routes. The
+/// `rowser route` commands call this after they change the file.
+pub fn reload(runtime_dir: &Path) -> Result<usize, RequestError> {
+    match request(runtime_dir, &Msg::Reload)? {
+        Msg::Reloaded { routes } => Ok(routes),
+        Msg::OpenResult { error: Some(e), .. } => Err(RequestError::Other(e)),
+        other => Err(RequestError::Other(format!("unexpected reply {other:?}"))),
+    }
+}
+
+/// `rowser reload`: prints `rowser: config reloaded (<n> routes)`.
+pub fn run_reload(
+    runtime_dir: Result<PathBuf, String>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> ExitCode {
+    let result = runtime_dir
+        .map_err(RequestError::Other)
+        .and_then(|dir| reload(&dir));
+    match result {
+        Ok(n) => match writeln!(out, "rowser: config reloaded ({n} routes)") {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        },
+        Err(RequestError::Other(e)) => {
+            let _ = writeln!(err, "rowser reload: {e}");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            let _ = writeln!(err, "{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `rowser reload` from the command line.
+pub fn reload_main() -> ExitCode {
+    run_reload(
+        crate::platform::runtime_dir(),
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+}
+
 /// `rowser status` from the command line.
 pub fn status_main(json: bool) -> ExitCode {
     run_status(
