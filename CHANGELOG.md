@@ -138,6 +138,10 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- On macOS, the notification for an opened URL now shows. It did not show on current macOS. The
+  text now also shows as it is, so a URL with `&` no longer shows `&amp;`.
+  ([#57](https://github.com/jhnhnsn/rowser/issues/57),
+  [#18](https://github.com/jhnhnsn/rowser/issues/18))
 - On macOS, a first `rowser daemon install` no longer prints launchctl's
   `Boot-out failed: 3: No such process`. A real bootstrap failure still shows launchctl's message,
   and `rowser daemon uninstall` of an agent that is not loaded is quiet too.
