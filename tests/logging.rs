@@ -100,6 +100,9 @@ fn without_rowser_log_a_failed_notification_shows_one_warning() {
         .args(["open", "https://example.com/"])
         .env("ROWSER_SOCKET", dir.0.join("rowserd.sock"))
         .env_remove("ROWSER_LOG")
+        // With no tunnel, a graphical session would run the real xdg-open.
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
         .output()
         .unwrap();
     let lines = drain(&rx, Duration::from_millis(1000));

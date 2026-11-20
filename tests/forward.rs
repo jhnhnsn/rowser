@@ -293,6 +293,9 @@ fn shim_env(h: &Harness) -> ShimEnv<Vec<u8>> {
         procfs: Procfs::new("/nonexistent"),
         caller_pid: 1,
         keeper_exe: Some(env!("CARGO_BIN_EXE_rowser").into()),
+        graphical: false,
+        search_path: None,
+        self_exe: None,
         stderr: Vec::new(),
     }
 }

@@ -39,6 +39,11 @@ rowser is a CLI; test it from the terminal.
   so the daemon on `[::1]` does not keep it alive. It ends when a port that listened once stops
   (2 s checks); before that, only the 10-minute timeout ends it. Kill leftover keepers with
   `pkill -f __keeper`.
+- The Shim's no-tunnel fallback (graphical session) runs the first `xdg-open` on `PATH` that is
+  not rowser: put a fake `xdg-open` script that records its argument first on `PATH`, set
+  `DISPLAY`, and set the hidden `ROWSER_TEST_TUNNEL_DIR` to an empty temp dir (it replaces
+  `/tmp` for socket discovery) and `ROWSER_SOCKET` to a missing path, so no real Tunnel answers.
+  Never let it reach the real `xdg-open`.
 - `rowser ssh` uses the `ssh` on `PATH` and the Daemon in `$ROWSER_RUNTIME_DIR` (absolute) or
   else `$XDG_RUNTIME_DIR/rowser/`: put a fake `ssh` script first on `PATH` and set one of them to
   a short temp dir to test it. Unset `ROWSER_RUNTIME_DIR` when a test relies on the default.

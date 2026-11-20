@@ -8,6 +8,11 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- On a Remote host with a desktop, `xdg-open` linked to rowser no longer breaks local browsing:
+  when no Tunnel answers and `WAYLAND_DISPLAY` or `DISPLAY` is set, the Shim hands the URL to
+  the first `xdg-open` on `PATH` that is not rowser itself and exits with its exit code. With no
+  such program, or with no graphical session, it prints the no-tunnel message as before.
+  ([#43](https://github.com/jhnhnsn/rowser/issues/43))
 - `rowser remote install <host>` also writes `~/.config/environment.d/rowser.conf`, so systemd
   user services on the remote host get `BROWSER=rowser` and `~/.local/bin` first on `PATH`
   (from the next login). Your own `rowser.conf` there is kept, with a warning.

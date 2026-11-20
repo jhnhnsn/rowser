@@ -176,8 +176,105 @@ fn env(tunnel_dir: &Path, over: Option<PathBuf>) -> ShimEnv<Vec<u8>> {
         procfs: rowser::detect::Procfs::new("/nonexistent"),
         caller_pid: 1,
         keeper_exe: None,
+        graphical: false,
+        search_path: None,
+        self_exe: None,
         stderr: Vec::new(),
     }
+}
+
+/// Writes an executable fake `xdg-open` into `dir` that records its argument
+/// in `dir/arg` and exits 3.
+fn fake_xdg_open(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).unwrap();
+    let script = dir.join("xdg-open");
+    let rec = dir.join("arg");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$1\" > '{}'\nexit 3\n",
+            rec.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[tokio::test]
+async fn no_tunnel_in_a_graphical_session_runs_the_real_xdg_open() {
+    let t = TmpDir::new();
+    let bin = t.path("bin");
+    fake_xdg_open(&bin);
+    let mut env = env(&t.0, Some(t.path("missing.sock")));
+    env.graphical = true;
+    env.search_path = Some(std::env::join_paths([t.path("empty"), bin.clone()]).unwrap());
+    env.self_exe = Some(env!("CARGO_BIN_EXE_rowser").into());
+    let url = Url::parse("https://example.com/a?b=c").unwrap();
+    assert_eq!(run_open(&url, &mut env).await, ExitCode::from(3));
+    assert_eq!(
+        std::fs::read_to_string(bin.join("arg")).unwrap(),
+        "https://example.com/a?b=c"
+    );
+    assert_eq!(String::from_utf8(env.stderr).unwrap(), "");
+}
+
+#[tokio::test]
+async fn no_tunnel_without_a_graphical_session_does_not_run_xdg_open() {
+    let t = TmpDir::new();
+    let bin = t.path("bin");
+    fake_xdg_open(&bin);
+    let mut env = env(&t.0, Some(t.path("missing.sock")));
+    env.search_path = Some(bin.clone().into_os_string());
+    env.self_exe = Some(env!("CARGO_BIN_EXE_rowser").into());
+    let url = Url::parse("https://example.com/").unwrap();
+    assert_eq!(run_open(&url, &mut env).await, ExitCode::FAILURE);
+    assert!(!bin.join("arg").exists());
+    assert_eq!(
+        String::from_utf8(env.stderr).unwrap(),
+        "rowser: no tunnel; open this URL manually: https://example.com/\n"
+    );
+}
+
+#[tokio::test]
+async fn an_xdg_open_that_links_to_rowser_is_skipped() {
+    let t = TmpDir::new();
+    let bin = t.path("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_rowser"));
+    std::os::unix::fs::symlink(&exe, bin.join("xdg-open")).unwrap();
+    let mut env = env(&t.0, Some(t.path("missing.sock")));
+    env.graphical = true;
+    env.search_path = Some(bin.into_os_string());
+    env.self_exe = Some(exe);
+    let url = Url::parse("https://example.com/").unwrap();
+    assert_eq!(run_open(&url, &mut env).await, ExitCode::FAILURE);
+    assert_eq!(
+        String::from_utf8(env.stderr).unwrap(),
+        "rowser: no tunnel; open this URL manually: https://example.com/\n"
+    );
+}
+
+#[tokio::test]
+async fn the_first_xdg_open_that_is_not_rowser_runs() {
+    let t = TmpDir::new();
+    let link = t.path("link");
+    std::fs::create_dir_all(&link).unwrap();
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_rowser"));
+    std::os::unix::fs::symlink(&exe, link.join("xdg-open")).unwrap();
+    let bin = t.path("bin");
+    fake_xdg_open(&bin);
+    let mut env = env(&t.0, Some(t.path("missing.sock")));
+    env.graphical = true;
+    env.search_path = Some(std::env::join_paths([link, bin.clone()]).unwrap());
+    env.self_exe = Some(exe);
+    let url = Url::parse("https://example.com/").unwrap();
+    assert_eq!(run_open(&url, &mut env).await, ExitCode::from(3));
+    assert_eq!(
+        std::fs::read_to_string(bin.join("arg")).unwrap(),
+        "https://example.com/"
+    );
 }
 
 #[tokio::test]

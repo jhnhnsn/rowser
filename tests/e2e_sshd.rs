@@ -391,6 +391,9 @@ async fn after_a_reattach_the_shim_uses_the_newest_session_socket() {
     let out = Command::new(w.xdg_open())
         .arg("https://example.test/reattach")
         .env_remove("ROWSER_SOCKET")
+        // With no tunnel, a graphical session would run the real xdg-open.
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");

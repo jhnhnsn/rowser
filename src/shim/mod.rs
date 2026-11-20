@@ -3,6 +3,7 @@
 
 mod keeper;
 
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -31,6 +32,14 @@ pub struct ShimEnv<W: Write> {
     /// The rowser executable, re-executed as `rowser __keeper`. `None`
     /// starts no keeper.
     pub keeper_exe: Option<PathBuf>,
+    /// `WAYLAND_DISPLAY` or `DISPLAY` is set: with no Tunnel, the URL goes
+    /// to the real `xdg-open`.
+    pub graphical: bool,
+    /// `PATH`, searched for the real `xdg-open`.
+    pub search_path: Option<OsString>,
+    /// The running rowser executable; an `xdg-open` that resolves to it is
+    /// skipped.
+    pub self_exe: Option<PathBuf>,
     pub stderr: W,
 }
 
@@ -38,7 +47,11 @@ impl ShimEnv<std::io::Stderr> {
     /// The environment of the running process.
     pub fn from_process() -> ShimEnv<std::io::Stderr> {
         ShimEnv {
-            tunnel_dir: PathBuf::from(TUNNEL_DIR),
+            // ROWSER_TEST_TUNNEL_DIR is a hidden test hook: it keeps a test
+            // Shim away from real Session sockets in /tmp.
+            tunnel_dir: std::env::var_os("ROWSER_TEST_TUNNEL_DIR")
+                .filter(|v| !v.is_empty())
+                .map_or_else(|| PathBuf::from(TUNNEL_DIR), PathBuf::from),
             socket_override: std::env::var_os("ROWSER_SOCKET")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
@@ -47,6 +60,11 @@ impl ShimEnv<std::io::Stderr> {
             // SAFETY: getppid has no preconditions and cannot fail.
             caller_pid: unsafe { libc::getppid() } as u32,
             keeper_exe: std::env::current_exe().ok(),
+            graphical: ["WAYLAND_DISPLAY", "DISPLAY"]
+                .iter()
+                .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty())),
+            search_path: std::env::var_os("PATH"),
+            self_exe: std::env::current_exe().ok(),
             stderr: std::io::stderr(),
         }
     }
@@ -64,15 +82,66 @@ pub async fn run_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> ExitCode {
         reported_host: env.reported_host.clone(),
         callback_ports: ports.clone(),
     };
-    let no_tunnel_hint = format!("open this URL manually: {url}");
-    match request_forward(request, &ports, &no_tunnel_hint, env).await {
+    match request_forward(request, &ports, env).await {
         Outcome::Failed => ExitCode::FAILURE,
+        Outcome::NoTunnel => {
+            if env.graphical {
+                if let Some(code) = run_real_xdg_open(url, env) {
+                    return code;
+                }
+            }
+            let _ = writeln!(
+                env.stderr,
+                "rowser: no tunnel; open this URL manually: {url}"
+            );
+            ExitCode::FAILURE
+        }
         Outcome::Accepted | Outcome::KeeperStarted => ExitCode::SUCCESS,
     }
 }
 
+/// Runs the first `xdg-open` on the search path that is not rowser itself
+/// with `url`, and returns its exit code. `None` when there is no such
+/// program or it cannot start.
+fn run_real_xdg_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> Option<ExitCode> {
+    let program = real_xdg_open(env.search_path.as_deref()?, env.self_exe.as_deref())?;
+    let status = std::process::Command::new(&program)
+        .arg(url.as_str())
+        .status();
+    match status {
+        Ok(s) => Some(match s.code() {
+            Some(c) => ExitCode::from(u8::try_from(c).unwrap_or(1)),
+            None => ExitCode::FAILURE,
+        }),
+        Err(e) => {
+            let _ = writeln!(env.stderr, "rowser: {}: {e}", program.display());
+            None
+        }
+    }
+}
+
+/// The first executable `xdg-open` in `search_path` whose canonical path is
+/// not the canonical path of `self_exe`.
+fn real_xdg_open(search_path: &OsStr, self_exe: Option<&Path>) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let own = self_exe.and_then(|p| std::fs::canonicalize(p).ok());
+    std::env::split_paths(search_path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("xdg-open"))
+        .find(|candidate| {
+            let Ok(real) = std::fs::canonicalize(candidate) else {
+                return false;
+            };
+            let executable = std::fs::metadata(&real)
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+            executable && Some(&real) != own.as_ref()
+        })
+}
+
 /// What `request_forward` did.
 enum Outcome {
+    /// No Tunnel answered; the caller prints the no-tunnel message.
+    NoTunnel,
     /// The request failed; the error is on stderr.
     Failed,
     /// The Daemon accepted the request, but no keeper runs.
@@ -88,8 +157,11 @@ pub async fn run_forward<W: Write>(port: u16, env: &mut ShimEnv<W>) -> ExitCode 
         reported_host: env.reported_host.clone(),
         callback_ports: vec![port],
     };
-    let no_tunnel_hint = format!("cannot forward port {port}");
-    match request_forward(request, &[port], &no_tunnel_hint, env).await {
+    match request_forward(request, &[port], env).await {
+        Outcome::NoTunnel => {
+            let _ = writeln!(env.stderr, "rowser: no tunnel; cannot forward port {port}");
+            ExitCode::FAILURE
+        }
         Outcome::KeeperStarted => {
             let _ = writeln!(
                 env.stderr,
@@ -102,14 +174,8 @@ pub async fn run_forward<W: Write>(port: u16, env: &mut ShimEnv<W>) -> ExitCode 
 }
 
 /// Sends `request`, prints warnings and errors, and starts a keeper when the
-/// reply has a forward id. `no_tunnel_hint` follows "no tunnel; " when no
-/// Tunnel answers.
-async fn request_forward<W: Write>(
-    request: Msg,
-    ports: &[u16],
-    no_tunnel_hint: &str,
-    env: &mut ShimEnv<W>,
-) -> Outcome {
+/// reply has a forward id.
+async fn request_forward<W: Write>(request: Msg, ports: &[u16], env: &mut ShimEnv<W>) -> Outcome {
     let (mut conn, socket) =
         match find_tunnel_path(&env.tunnel_dir, env.socket_override.clone()).await {
             Ok(found) => found,
@@ -117,8 +183,7 @@ async fn request_forward<W: Write>(
                 if let Some(mismatch) = e.mismatch {
                     let _ = writeln!(env.stderr, "rowser: {mismatch}");
                 }
-                let _ = writeln!(env.stderr, "rowser: no tunnel; {no_tunnel_hint}");
-                return Outcome::Failed;
+                return Outcome::NoTunnel;
             }
         };
     if let Err(e) = conn.send(&request).await {
