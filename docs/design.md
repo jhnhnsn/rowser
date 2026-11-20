@@ -135,7 +135,9 @@ These are thin orchestration over the OS. Keep the pure parts (rendering the uni
 plist, choosing the release asset from `uname -sm`, PATH-order checks) as functions with unit
 tests; do not add ports around `systemctl`, `launchctl` or `ssh`. `remote_install` gets one
 real seam: `BinarySource` (download release asset vs. use a local build), which has two
-production adapters.
+production adapters. `install` returns `Installed`, which says whether the remote script
+wrote `~/.config/environment.d/rowser.conf` (`ENVIRONMENT_D_CONTENT`); a kept user file or a
+failed write is a warning, not an error.
 
 ## Dependency direction
 

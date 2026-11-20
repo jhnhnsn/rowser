@@ -128,8 +128,9 @@ impl BinarySource for ReleaseDownload {
 }
 
 /// The remote `sh` script: reads the binary on stdin into
-/// `$HOME/.local/bin/rowser` and links the browser names to it. It writes
-/// only under `$HOME`. No single quotes, so it fits in `sh -c '…'`.
+/// `$HOME/.local/bin/rowser`, links the browser names to it, and writes
+/// `~/.config/environment.d/rowser.conf` (see [`environment_d_script`]). It
+/// writes only under `$HOME`. No single quotes, so it fits in `sh -c '…'`.
 pub fn remote_script() -> String {
     let mut s = String::from(
         "set -e; [ -n \"$HOME\" ] || { echo \"HOME is not set\" >&2; exit 1; }; \
@@ -145,23 +146,39 @@ pub fn remote_script() -> String {
 
 /// The first line of the `environment.d` file rowser writes. A file without
 /// it is the user's own: rowser keeps it.
-pub const ENVIRONMENT_D_MARK: &str =
-    "# Written by rowser remote install; rowser overwrites this file.";
+const ENVIRONMENT_D_MARK: &str = "# Written by rowser remote install; rowser overwrites this file.";
+
+/// The whole `~/.config/environment.d/rowser.conf` rowser writes: the mark,
+/// then `BROWSER` and `PATH`. `$HOME` and `$PATH` are literal, for
+/// environment.d to expand.
+pub const ENVIRONMENT_D_CONTENT: &str =
+    "# Written by rowser remote install; rowser overwrites this file.\n\
+     BROWSER=rowser\n\
+     PATH=$HOME/.local/bin:$PATH\n";
 
 /// What the remote script prints on stdout when it wrote the `environment.d` file.
 const ENVIRONMENT_D_WRITTEN: &str = "rowser-environment.d: written";
 
 /// The `sh` part that writes `~/.config/environment.d/rowser.conf` (for
 /// systemd user services), unless a file without [`ENVIRONMENT_D_MARK`] is
-/// there: then it keeps it and warns. `$HOME` and `$PATH` stay literal for
-/// environment.d to expand.
+/// there: then it keeps it and warns. A failed write is a warning too (the
+/// binary is in place by then), so it runs as one `&&` chain that `set -e`
+/// does not abort.
 fn environment_d_script() -> String {
+    let lines: Vec<String> = ENVIRONMENT_D_CONTENT
+        .lines()
+        .map(|l| format!("\"{}\"", l.replace('$', "\\$")))
+        .collect();
+    let lines = lines.join(" ");
+    // On success the script echoes ENVIRONMENT_D_WRITTEN on stdout; `install`
+    // reads it into `Installed::environment_d`.
     format!(
         " e=\"$HOME/.config/environment.d\"; f=\"$e/rowser.conf\"; \
          if {{ [ ! -e \"$f\" ] && [ ! -L \"$f\" ]; }} || [ \"$(head -n 1 \"$f\" 2>/dev/null)\" = \"{ENVIRONMENT_D_MARK}\" ]; then \
-         mkdir -p \"$e\"; rm -f \"$f.tmp\"; \
-         printf \"%s\\n\" \"{ENVIRONMENT_D_MARK}\" \"BROWSER=rowser\" \"PATH=\\$HOME/.local/bin:\\$PATH\" >\"$f.tmp\"; \
-         mv -f \"$f.tmp\" \"$f\"; echo \"{ENVIRONMENT_D_WRITTEN}\"; \
+         if mkdir -p \"$e\" && rm -f \"$f.tmp\" && printf \"%s\\n\" {lines} >\"$f.tmp\" && mv -f \"$f.tmp\" \"$f\"; then \
+         echo \"{ENVIRONMENT_D_WRITTEN}\"; \
+         else rm -f \"$f.tmp\" 2>/dev/null || true; \
+         echo \"rowser: warning: cannot write ~/.config/environment.d/rowser.conf: systemd user services do not get BROWSER=rowser.\" >&2; fi; \
          else echo \"rowser: warning: kept ~/.config/environment.d/rowser.conf: not written by rowser. \
          Add BROWSER=rowser and PATH=\\$HOME/.local/bin:\\$PATH to it for systemd user services.\" >&2; fi;"
     )
@@ -276,6 +293,19 @@ mod tests {
         assert!(!s.contains('\''), "{s}");
         assert!(s.contains("ln -sfn rowser \"$d/xdg-open\""), "{s}");
         assert!(s.contains("ln -sfn rowser \"$d/www-browser\""), "{s}");
+    }
+
+    #[test]
+    fn environment_d_script_writes_the_mark_browser_and_literal_home_and_path() {
+        let s = environment_d_script();
+        assert!(!s.contains('\''), "{s}");
+        assert!(
+            s.contains("\"# Written by rowser remote install; rowser overwrites this file.\""),
+            "{s}"
+        );
+        assert!(s.contains("\"BROWSER=rowser\""), "{s}");
+        assert!(s.contains("\"PATH=\\$HOME/.local/bin:\\$PATH\""), "{s}");
+        assert!(ENVIRONMENT_D_CONTENT.starts_with(&format!("{ENVIRONMENT_D_MARK}\n")));
     }
 
     // SHA-256 of "abc" (FIPS 180-2 example).

@@ -244,9 +244,7 @@ fn install_copies_the_binary_links_the_names_and_prints_the_browser_line() {
 }
 
 const ENV_D: &str = ".config/environment.d/rowser.conf";
-const ENV_D_CONTENT: &str = "# Written by rowser remote install; rowser overwrites this file.\n\
-                             BROWSER=rowser\n\
-                             PATH=$HOME/.local/bin:$PATH\n";
+use rowser::remote_install::ENVIRONMENT_D_CONTENT as ENV_D_CONTENT;
 
 #[test]
 fn install_writes_environment_d_for_user_services_and_a_rerun_is_idempotent() {
@@ -262,6 +260,7 @@ fn install_writes_environment_d_for_user_services_and_a_rerun_is_idempotent() {
         std::fs::read_to_string(home.join(ENV_D)).unwrap(),
         ENV_D_CONTENT
     );
+    assert!(!home.join(".config/environment.d/rowser.conf.tmp").exists());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("~/.config/environment.d/rowser.conf") && stdout.contains("next login"),
@@ -298,6 +297,128 @@ fn install_keeps_a_users_own_environment_d_file_and_warns() {
     assert!(
         stderr.contains("~/.config/environment.d/rowser.conf")
             && stderr.contains("not written by rowser"),
+        "{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("next login"), "{stdout}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_replaces_an_old_environment_d_file_rowser_wrote() {
+    let dir = temp_dir("envdold");
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join(".config/environment.d")).unwrap();
+    let old = "# Written by rowser remote install; rowser overwrites this file.\nBROWSER=old\n";
+    std::fs::write(home.join(ENV_D), old).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(home.join(ENV_D)).unwrap(),
+        ENV_D_CONTENT
+    );
+    assert!(!home.join(".config/environment.d/rowser.conf.tmp").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_does_not_write_through_a_planted_environment_d_temp_symlink() {
+    let dir = temp_dir("envdlink");
+    let home = dir.join("home");
+    let envd = home.join(".config/environment.d");
+    std::fs::create_dir_all(&envd).unwrap();
+    let outside = dir.join("outside");
+    std::fs::write(&outside, "KEEP").unwrap();
+    std::os::unix::fs::symlink(&outside, envd.join("rowser.conf.tmp")).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "KEEP");
+    assert_eq!(
+        std::fs::read_to_string(home.join(ENV_D)).unwrap(),
+        ENV_D_CONTENT
+    );
+    assert!(std::fs::symlink_metadata(envd.join("rowser.conf.tmp")).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_works_with_a_space_in_home() {
+    let dir = temp_dir("envdspace");
+    let home = dir.join("env d");
+    std::fs::create_dir_all(&home).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(home.join(".local/bin/rowser")).unwrap(),
+        "LOCAL"
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join(ENV_D)).unwrap(),
+        ENV_D_CONTENT
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_keeps_a_foreign_or_dangling_environment_d_symlink_and_warns() {
+    let dir = temp_dir("envdsym");
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+    let foreign = dir.join("foreign.conf");
+    std::fs::write(&foreign, "BROWSER=firefox\n").unwrap();
+
+    for (tag, target) in [("foreign", foreign.clone()), ("dangling", dir.join("gone"))] {
+        let home = dir.join(tag);
+        let envd = home.join(".config/environment.d");
+        std::fs::create_dir_all(&envd).unwrap();
+        std::os::unix::fs::symlink(&target, envd.join("rowser.conf")).unwrap();
+
+        let out = run_install(&dir, &home, "Linux x86_64", &local);
+        assert!(out.status.success(), "{tag}: {out:?}");
+        assert_eq!(
+            std::fs::read_link(envd.join("rowser.conf")).unwrap(),
+            target,
+            "{tag}"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("not written by rowser"), "{tag}: {stderr}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&foreign).unwrap(),
+        "BROWSER=firefox\n"
+    );
+    assert!(!dir.join("gone").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_warns_and_succeeds_when_environment_d_cannot_be_written() {
+    let dir = temp_dir("envdfail");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    // `~/.config` is a file, so `mkdir -p ~/.config/environment.d` fails.
+    std::fs::write(home.join(".config"), "").unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(home.join(".local/bin/rowser")).unwrap(),
+        "LOCAL"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning: cannot write ~/.config/environment.d/rowser.conf"),
         "{stderr}"
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
