@@ -121,11 +121,7 @@ pub struct DesktopNotifier;
 
 impl Notifier for DesktopNotifier {
     fn notify(&self, notice: Notice) {
-        let result = notify_rust::Notification::new()
-            .summary(&notice.summary())
-            .body(&notice.body())
-            .show();
-        if let Err(e) = result {
+        if let Err(e) = notify_desktop(&notice) {
             tracing::warn!("desktop notification failed: {e}");
         }
     }
@@ -138,6 +134,52 @@ impl Notifier for DesktopNotifier {
                 false
             }
         }
+    }
+}
+
+/// Linux: a notification through notify-rust. Notification servers render
+/// body markup, so the body is escaped.
+#[cfg(not(target_os = "macos"))]
+fn notify_desktop(notice: &Notice) -> Result<(), String> {
+    notify_rust::Notification::new()
+        .summary(&notice.summary())
+        .body(&notice.body())
+        .show()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// The AppleScript for a macOS notification. The title and body go in as
+/// arguments (`item 1` and `item 2 of argv`), never into the script source.
+const MACOS_NOTIFY_SCRIPT: &str = "on run argv\n\
+     display notification (item 2 of argv) with title (item 1 of argv)\n\
+     end run";
+
+/// The `osascript` arguments for a macOS notification: plain text, since
+/// macOS shows notification text as it is (no markup).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_notify_args(notice: &Notice) -> Vec<String> {
+    vec![
+        "-e".into(),
+        MACOS_NOTIFY_SCRIPT.into(),
+        notice.summary(),
+        notice.plain_body(),
+    ]
+}
+
+/// macOS: notify-rust's notifications do not show on current macOS (seen on
+/// macOS 26 from both a LaunchAgent and a terminal), while
+/// `display notification` does, so use `osascript` as the dialog does.
+#[cfg(target_os = "macos")]
+fn notify_desktop(notice: &Notice) -> Result<(), String> {
+    let out = std::process::Command::new("osascript")
+        .args(macos_notify_args(notice))
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 }
 
@@ -180,4 +222,26 @@ fn confirm_desktop(notice: &Notice) -> Result<bool, String> {
         .output()
         .map_err(|e| e.to_string())?;
     Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "Open")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_notification_text_is_plain_and_passed_as_arguments() {
+        let notice = Notice {
+            subject: Subject::Url(Url::parse("https://example.com/?a=1&b=2").unwrap()),
+            host: NoticeHost::Alias("g14".into()),
+            warnings: vec![],
+        };
+        let args = macos_notify_args(&notice);
+        assert_eq!(args[0], "-e");
+        assert!(
+            !args[1].contains("example.com"),
+            "text must not be in the script"
+        );
+        assert_eq!(args[2], "rowser: opened a URL");
+        assert_eq!(args[3], "From g14: https://example.com/?a=1&b=2");
+    }
 }
