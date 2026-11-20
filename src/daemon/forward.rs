@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
-use crate::protocol::{Conn, Msg};
+use crate::protocol::{Conn, ForwardInfo, Msg};
 
 /// Lowest port that may be a Callback port.
 const MIN_PORT: u16 = 1024;
@@ -31,6 +31,16 @@ pub(super) struct Forwards {
     /// Browser connections a keeper was asked to dial, by `conn_id`. The ids
     /// are random, and a `DataConn` must also name the forward.
     pending: Mutex<HashMap<u64, Pending>>,
+    /// Every running forward, for `rowser status`.
+    active: Mutex<HashMap<String, Active>>,
+}
+
+/// What `rowser status` shows of a running forward.
+struct Active {
+    ports: Vec<u16>,
+    host: String,
+    unverified: bool,
+    started: tokio::time::Instant,
 }
 
 /// What `Forwards::create` did.
@@ -45,6 +55,7 @@ impl Forwards {
     pub fn create(
         self: &Arc<Self>,
         ports: &[u16],
+        host: (&str, bool),
         loopback: &[IpAddr],
         timeout: Duration,
     ) -> Created {
@@ -88,16 +99,45 @@ impl Forwards {
         };
         let (tx, rx) = oneshot::channel();
         self.waiting.lock().unwrap().insert(id.clone(), tx);
+        let mut bound: Vec<u16> = listeners.iter().map(|(port, _)| *port).collect();
+        bound.dedup();
+        self.active.lock().unwrap().insert(
+            id.clone(),
+            Active {
+                ports: bound,
+                host: host.0.into(),
+                unverified: host.1,
+                started: tokio::time::Instant::now(),
+            },
+        );
         let this = self.clone();
         let forward_id = id.clone();
         tokio::spawn(async move {
             this.run(&forward_id, listeners, rx, timeout).await;
             this.waiting.lock().unwrap().remove(&forward_id);
+            this.active.lock().unwrap().remove(&forward_id);
         });
         Created {
             forward_id: Some(id),
             warnings,
         }
+    }
+
+    /// One entry per local port of each running forward, oldest first.
+    pub fn list(&self) -> Vec<ForwardInfo> {
+        let active = self.active.lock().unwrap();
+        let mut all: Vec<&Active> = active.values().collect();
+        all.sort_by_key(|a| a.started);
+        all.into_iter()
+            .flat_map(|a| {
+                a.ports.iter().map(|&port| ForwardInfo {
+                    port,
+                    host: a.host.clone(),
+                    unverified: a.unverified,
+                    age_secs: a.started.elapsed().as_secs(),
+                })
+            })
+            .collect()
     }
 
     /// Ends a forward whose keeper has not attached, and frees its ports.

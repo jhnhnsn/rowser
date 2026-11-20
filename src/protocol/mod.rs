@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 const MAX_LINE: usize = 64 * 1024;
 
 /// The protocol version this build speaks.
-const VERSION: Version = Version { major: 1, minor: 0 };
+const VERSION: Version = Version { major: 1, minor: 1 };
 
 /// A protocol version `major.minor`. Peers with the same major interoperate.
 ///
@@ -107,6 +107,36 @@ pub enum Msg {
     Pong {
         version: Version,
     },
+    /// Control socket only (1.1): `rowser status`. The reply is a `StatusReply`.
+    Status,
+    /// The Daemon's answer to `Status`.
+    StatusReply {
+        daemon_version: String,
+        protocol_version: Version,
+        /// `None` until the Daemon reads a config file.
+        #[serde(default)]
+        config_file: Option<String>,
+        paused: bool,
+        #[serde(default)]
+        forwards: Vec<ForwardInfo>,
+    },
+}
+
+impl Msg {
+    /// True for the messages that only the control socket accepts.
+    pub fn is_control(&self) -> bool {
+        matches!(self, Msg::Status | Msg::StatusReply { .. })
+    }
+}
+
+/// One local port of an open Callback forward, as `rowser status` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardInfo {
+    pub port: u16,
+    /// The Host alias, or the Reported host name when `unverified`.
+    pub host: String,
+    pub unverified: bool,
+    pub age_secs: u64,
 }
 
 #[derive(Debug)]

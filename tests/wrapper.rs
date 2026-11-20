@@ -86,13 +86,13 @@ async fn setup(alias: Option<&str>, code: u8, daemon: bool) -> Setup {
     let run = dir.0.join("run");
     let notifier = RecordingNotifier::default();
     if daemon {
-        let (direct, relay) = bind_sockets(&run).unwrap();
+        let (direct, relay, control) = bind_sockets(&run).unwrap();
         let d = Daemon::new(
             DaemonConfig::default(),
             RecordingOpener::default(),
             notifier.clone(),
         );
-        tokio::spawn(d.serve(direct, relay));
+        tokio::spawn(d.serve(direct, relay, control));
     } else {
         std::fs::create_dir(&run).unwrap();
     }
@@ -335,13 +335,13 @@ fn rowser_ssh_keeps_a_double_dash_and_help_flags() {
 async fn rowser_ssh_finds_the_daemon_through_rowser_runtime_dir() {
     let dir = TmpDir::new();
     let run = dir.0.join("rt");
-    let (direct, relay) = bind_sockets(&run).unwrap();
+    let (direct, relay, control) = bind_sockets(&run).unwrap();
     let d = Daemon::new(
         DaemonConfig::default(),
         RecordingOpener::default(),
         RecordingNotifier::default(),
     );
-    tokio::spawn(d.serve(direct, relay));
+    tokio::spawn(d.serve(direct, relay, control));
     fake_ssh(&dir.0, Some("h"), 0);
     let path = format!("{}:{}", dir.0.display(), std::env::var("PATH").unwrap());
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_rowser"))

@@ -4,6 +4,7 @@ pub mod browsers;
 pub mod callback;
 pub mod cli;
 pub mod config;
+pub mod control;
 pub mod daemon;
 pub mod detect;
 pub mod discovery;

@@ -69,6 +69,12 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show the running Daemon's state.
+    Status {
+        /// Print one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage rowser on a remote host.
     Remote {
         #[command(subcommand)]
@@ -126,6 +132,7 @@ impl Command {
             Command::Forward { .. } => "forward",
             Command::Doctor => "doctor",
             Command::Browsers { .. } => "browsers",
+            Command::Status { .. } => "status",
             Command::Remote { .. } => "remote install",
             Command::Keeper { .. } => "__keeper",
         }
@@ -182,6 +189,7 @@ pub fn run(command: Command) -> ExitCode {
         Command::Forward { port } => crate::shim::forward_main(port),
         Command::Doctor => crate::doctor::doctor_main(),
         Command::Browsers { json } => crate::browsers::browsers_main(json),
+        Command::Status { json } => crate::control::status_main(json),
         Command::Keeper {
             socket,
             forward_id,

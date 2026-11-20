@@ -112,7 +112,7 @@ async fn major_mismatch_fails_on_both_sides_with_both_versions() {
     }
     let text = err.to_string();
     assert!(text.contains("2.0"), "{text}");
-    assert!(text.contains("1.0"), "{text}");
+    assert!(text.contains("1.1"), "{text}");
     assert!(text.contains("rowser remote install <host>"), "{text}");
     assert!(text.contains("reinstall"), "{text}");
 }

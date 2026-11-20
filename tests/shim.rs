@@ -157,14 +157,14 @@ struct TestDaemon {
 
 async fn start_daemon() -> TestDaemon {
     let dir = TmpDir::new();
-    let (direct, relay) = bind_sockets(&dir.path("run")).unwrap();
+    let (direct, relay, control) = bind_sockets(&dir.path("run")).unwrap();
     let opener = RecordingOpener::default();
     let daemon = Daemon::new(
         DaemonConfig::default(),
         opener.clone(),
         RecordingNotifier::default(),
     );
-    tokio::spawn(daemon.serve(direct, relay));
+    tokio::spawn(daemon.serve(direct, relay, control));
     TestDaemon { dir, opener }
 }
 
@@ -232,7 +232,7 @@ async fn open_reports_a_version_mismatch_then_no_tunnel() {
     assert_eq!(run_open(&url, &mut env).await, ExitCode::FAILURE);
     assert_eq!(
         String::from_utf8(env.stderr).unwrap(),
-        "rowser: protocol version mismatch: this rowser speaks 1.0, the peer speaks 99.0; \
+        "rowser: protocol version mismatch: this rowser speaks 1.1, the peer speaks 99.0; \
          update the remote with `rowser remote install <host>` or reinstall rowser locally\n\
          rowser: no tunnel; open this URL manually: https://example.com/\n"
     );

@@ -38,11 +38,11 @@ impl Harness {
             &rowser::config::parse("[unverified]\nopen = \"system\"\n").unwrap(),
         );
         let dir = TmpDir::new("f");
-        let (direct, relay) = bind_sockets(&dir.0.join("run")).unwrap();
+        let (direct, relay, control) = bind_sockets(&dir.0.join("run")).unwrap();
         let opener = RecordingOpener::default();
         let notifier = RecordingNotifier::default();
         let daemon = Daemon::new(config, opener.clone(), notifier.clone());
-        tokio::spawn(daemon.serve(direct, relay));
+        tokio::spawn(daemon.serve(direct, relay, control));
         Harness {
             dir,
             opener,

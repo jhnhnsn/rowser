@@ -8,6 +8,13 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser status` shows the running Daemon: its version and protocol version, the runtime
+  directory, the config file, whether it is paused, and the open Callback forwards (local port,
+  host, age). `--json` prints the same as one JSON object. With no Daemon it prints
+  `rowser: the daemon is not running` and exits 1. The Daemon now also listens on
+  `rowserd-control.sock` (mode 0600) for local rowser commands; the protocol is now 1.1, and a
+  1.0 Shim or Wrapper still opens URLs and forwards callbacks.
+  ([#40](https://github.com/jhnhnsn/rowser/issues/40))
 - A config file, `$XDG_CONFIG_HOME/rowser/config.toml` (default `~/.config/rowser/config.toml`),
   with Routes: `[[route]]` entries send the URLs of one Host alias (optionally only URLs whose
   host matches `match` globs) to a Target, `system` or `ask`, and `ask = true` waits for the

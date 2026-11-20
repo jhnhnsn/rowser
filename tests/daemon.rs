@@ -33,10 +33,10 @@ impl<N: Notifier + Clone> Harness<N> {
     async fn with(config: DaemonConfig, notifier: N) -> Harness<N> {
         let dir = TmpDir::new("d");
         let run = dir.0.join("run");
-        let (direct, relay) = bind_sockets(&run).unwrap();
+        let (direct, relay, control) = bind_sockets(&run).unwrap();
         let opener = RecordingOpener::default();
         let daemon = Daemon::new(config, opener.clone(), notifier.clone());
-        tokio::spawn(daemon.serve(direct, relay));
+        tokio::spawn(daemon.serve(direct, relay, control));
         Harness {
             dir,
             opener,
@@ -864,13 +864,13 @@ impl Opener for FailingOpener {
 async fn a_failed_open_closes_the_forward() {
     let dir = TmpDir::new("d");
     let run = dir.0.join("run");
-    let (direct, relay) = bind_sockets(&run).unwrap();
+    let (direct, relay, control) = bind_sockets(&run).unwrap();
     let config = DaemonConfig {
         loopback: vec!["127.0.0.1".parse().unwrap()],
         ..DaemonConfig::default()
     };
     let daemon = Daemon::new(config, FailingOpener, RecordingNotifier::default());
-    tokio::spawn(daemon.serve(direct, relay));
+    tokio::spawn(daemon.serve(direct, relay, control));
     let stream = UnixStream::connect(run.join(DIRECT_SOCKET)).await.unwrap();
     let mut conn = Conn::connect(stream, Hello::current()).await.unwrap();
     let port = free_port();

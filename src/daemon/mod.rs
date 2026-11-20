@@ -29,6 +29,8 @@ pub use opener::{CommandOpener, Opener};
 pub const DIRECT_SOCKET: &str = "rowserd.sock";
 /// File name of the relay socket in the runtime directory.
 pub const RELAY_SOCKET: &str = "rowserd-relay.sock";
+/// File name of the control socket in the runtime directory (ADR 0006).
+pub const CONTROL_SOCKET: &str = "rowserd-control.sock";
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -99,16 +101,26 @@ impl Daemon {
         }
     }
 
-    /// Accepts connections on both sockets until an accept fails.
-    pub async fn serve(self, direct: UnixListener, relay: UnixListener) -> io::Result<()> {
+    /// Accepts connections on the three sockets until an accept fails.
+    pub async fn serve(
+        self,
+        direct: UnixListener,
+        relay: UnixListener,
+        control: UnixListener,
+    ) -> io::Result<()> {
         loop {
             let (stream, socket) = tokio::select! {
-                r = direct.accept() => (r?.0, Socket::Direct),
-                r = relay.accept() => (r?.0, Socket::Relay),
+                r = direct.accept() => (r?.0, Some(Socket::Direct)),
+                r = relay.accept() => (r?.0, Some(Socket::Relay)),
+                r = control.accept() => (r?.0, None),
             };
             let inner = self.inner.clone();
             tokio::spawn(async move {
-                if let Err(e) = inner.handle(stream, socket).await {
+                let result = match socket {
+                    Some(socket) => inner.handle(stream, socket).await,
+                    None => inner.handle_control(stream).await,
+                };
+                if let Err(e) = result {
                     tracing::debug!("connection ended: {e}");
                 }
             });
@@ -123,6 +135,9 @@ pub const NOT_APPROVED: &str =
 /// The error when `Notifier::confirm` gives `false` for `rowser forward`.
 pub const FORWARD_NOT_APPROVED: &str =
     "the forward was not approved: the user denied it, or the confirmation could not be shown (see the daemon log)";
+
+/// The error for a control message on the direct or relay socket.
+pub const CONTROL_ONLY: &str = "control messages are accepted only on the control socket";
 
 /// A failed `OpenResult` carrying `text`.
 fn open_error(text: impl Into<String>) -> Msg {
@@ -150,6 +165,10 @@ impl Inner {
         };
         let mut limit = Limit::new(self.config.rate_max, self.config.rate_window);
         while let Some(msg) = conn.recv().await? {
+            if msg.is_control() {
+                // ADR 0006: a Remote host never reaches the control socket.
+                return conn.send(&open_error(CONTROL_ONLY)).await;
+            }
             let reply = match msg {
                 Msg::Ping => Msg::Pong {
                     version: Hello::current().version(),
@@ -214,9 +233,45 @@ impl Inner {
         ))
     }
 
-    fn forward(&self, ports: &[u16]) -> forward::Created {
-        self.forwards
-            .create(ports, &self.config.loopback, self.config.forward_timeout)
+    fn forward(&self, ports: &[u16], host: &NoticeHost) -> forward::Created {
+        let host = match host {
+            NoticeHost::Alias(a) => (a.as_str(), false),
+            NoticeHost::Reported(r) => (r.as_str(), true),
+        };
+        self.forwards.create(
+            ports,
+            host,
+            &self.config.loopback,
+            self.config.forward_timeout,
+        )
+    }
+
+    /// The control socket: `rowser status` and later control commands.
+    async fn handle_control(&self, stream: UnixStream) -> crate::protocol::Result<()> {
+        let (mut conn, _) = Conn::accept(stream).await?;
+        while let Some(msg) = conn.recv().await? {
+            let reply = match msg {
+                Msg::Ping => Msg::Pong {
+                    version: Hello::current().version(),
+                },
+                Msg::Status => Msg::StatusReply {
+                    daemon_version: env!("CARGO_PKG_VERSION").into(),
+                    protocol_version: Hello::current().version(),
+                    config_file: None,
+                    paused: false,
+                    forwards: self.forwards.list(),
+                },
+                _ => {
+                    return conn
+                        .send(&open_error(
+                            "the control socket accepts only control messages",
+                        ))
+                        .await
+                }
+            };
+            conn.send(&reply).await?;
+        }
+        Ok(())
     }
 
     /// `rowser forward`: the same `--confirm-hosts` rules as an Open
@@ -234,7 +289,7 @@ impl Inner {
                 return error;
             }
         }
-        let created = self.forward(&ports);
+        let created = self.forward(&ports, &notice.host);
         if !confirm || !created.warnings.is_empty() {
             notice.warnings = created.warnings.clone();
             let notifier = self.notifier.clone();
@@ -283,7 +338,7 @@ impl Inner {
         }
         // Bind the Callback forward only after approval, so a denied URL
         // never holds a local port.
-        let created = self.forward(ports);
+        let created = self.forward(ports, &host);
         let opener = self.opener.clone();
         let notifier = self.notifier.clone();
         let forward_warned = !created.warnings.is_empty();
@@ -354,15 +409,16 @@ fn notice_host(stamp: &Option<String>, reported_host: String) -> NoticeHost {
     }
 }
 
-/// Binds the direct and relay sockets (mode 0600) in the runtime directory
-/// `dir`. A missing `dir` is created with mode 0700. An existing `dir` must be
+/// Binds the direct, relay and control sockets (mode 0600) in the runtime
+/// directory `dir`. A missing `dir` is created with mode 0700. An existing `dir` must be
 /// owned by the current user and have no group or other permission bits; it is
 /// never changed. A Stale socket is replaced; a live one is an error.
-pub fn bind_sockets(dir: &Path) -> io::Result<(UnixListener, UnixListener)> {
+pub fn bind_sockets(dir: &Path) -> io::Result<(UnixListener, UnixListener, UnixListener)> {
     prepare_dir(dir)?;
     Ok((
         bind(&dir.join(DIRECT_SOCKET))?,
         bind(&dir.join(RELAY_SOCKET))?,
+        bind(&dir.join(CONTROL_SOCKET))?,
     ))
 }
 
@@ -464,12 +520,15 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
     }
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let (direct, relay) = bind_sockets(&dir).map_err(|e| e.to_string())?;
+        let (direct, relay, control) = bind_sockets(&dir).map_err(|e| e.to_string())?;
         eprintln!("rowser daemon: listening in {}", dir.display());
         let daemon = match args.test_confirm {
             Some(answer) => Daemon::new(config, opener, testing::ScriptedNotifier::new(answer)),
             None => Daemon::new(config, opener, DesktopNotifier),
         };
-        daemon.serve(direct, relay).await.map_err(|e| e.to_string())
+        daemon
+            .serve(direct, relay, control)
+            .await
+            .map_err(|e| e.to_string())
     })
 }

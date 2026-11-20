@@ -50,6 +50,11 @@ Messages (one enum, `Msg`): `HostStamp{alias}`, `Open{url, reported_host, callba
 `DataConn{forward_id, conn_id}`, `Ping`, `Pong{version}`. A `conn_id` is random, and the Daemon
 accepts a `DataConn` only when its `forward_id` is the forward that sent that `Dial`.
 
+Control messages (protocol 1.1, control socket only; `Msg::is_control` names them, and the direct
+and relay sockets answer them with an `OpenResult` error and close the connection): `Status`,
+`StatusReply{daemon_version, protocol_version, config_file?, paused, forwards: [ForwardInfo{port,
+host, unverified, age_secs}]}`. The control socket also answers `Ping`.
+
 The version stays 1.0 until v0.1.0 ships, so these additions do not bump it. A Daemon built
 before `Forward` cannot parse it and closes the connection, so `rowser forward` prints "daemon closed the
 connection" and exits 1.
@@ -181,8 +186,12 @@ src/
 - The Opener port changes to `Opener::open(&Url, &Target) -> Result<()>`. `CommandOpener`
   runs `browsers::command` for a browser Target and the `--open-command` template for
   `system`. The test adapter records (URL, Target).
-- `daemon::serve` takes the control listener as a third socket. Control messages are refused on
-  the direct and relay sockets.
+- `daemon::serve` takes the control listener as a third socket (`bind_sockets` gives all three).
+  Control messages are refused on the direct and relay sockets.
+- `control` (client side): `control::request(runtime_dir, &Msg) -> Result<Msg, RequestError>`
+  is the one helper for every control command; `RequestError::NotRunning` prints
+  `rowser: the daemon is not running`. `control::run_status(StatusArgs, out, err)` is
+  `rowser status`; the runtime directory comes from `platform::runtime_dir`, as for `rowser ssh`.
 - The Wrapper registers its Session with the Daemon (protocol 1.1) and keeps that connection
   open until `ssh` exits, so `rowser status` lists Sessions.
 - Dependency direction: `cli ─► config, routes, browsers`; `daemon ─► routes, browsers,

@@ -52,13 +52,13 @@ fn lines(env: DoctorEnv<Vec<u8>>) -> Vec<String> {
 async fn round_trip_against_a_daemon_is_ok_and_exits_0() {
     let dir = TmpDir::new("doc");
     let run = dir.0.join("run");
-    let (direct, relay) = bind_sockets(&run).unwrap();
+    let (direct, relay, control) = bind_sockets(&run).unwrap();
     let daemon = Daemon::new(
         DaemonConfig::default(),
         RecordingOpener::default(),
         RecordingNotifier::default(),
     );
-    tokio::spawn(daemon.serve(direct, relay));
+    tokio::spawn(daemon.serve(direct, relay, control));
     let socket = run.join(DIRECT_SOCKET);
     let mut e = env(&dir, Some(socket.clone()));
     assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
@@ -67,9 +67,9 @@ async fn round_trip_against_a_daemon_is_ok_and_exits_0() {
     assert!(out[..3].iter().all(|l| l.starts_with("ok ")), "{out:?}");
     assert_eq!(
         out[3],
-        format!("ok   tunnel: {}: daemon protocol 1.0", socket.display())
+        format!("ok   tunnel: {}: daemon protocol 1.1", socket.display())
     );
-    assert_eq!(out[4], "ok   version: daemon and this rowser speak 1.0");
+    assert_eq!(out[4], "ok   version: daemon and this rowser speak 1.1");
 }
 
 #[tokio::test]
@@ -110,7 +110,7 @@ async fn minor_version_skew_warns_and_exits_0() {
     assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
     assert_eq!(
         lines(e).last().unwrap(),
-        "warn version: version skew: daemon speaks 1.7, this rowser speaks 1.0; \
+        "warn version: version skew: daemon speaks 1.7, this rowser speaks 1.1; \
          update with `rowser remote install <host>` or reinstall rowser locally"
     );
 }
@@ -131,7 +131,7 @@ async fn major_version_mismatch_fails_and_exits_1() {
     let out = lines(e);
     assert!(
         out[out.len() - 1].starts_with(
-            "fail version: protocol version mismatch: this rowser speaks 1.0, the peer speaks 99.0"
+            "fail version: protocol version mismatch: this rowser speaks 1.1, the peer speaks 99.0"
         ),
         "{out:?}"
     );

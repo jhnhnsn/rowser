@@ -182,7 +182,7 @@ impl World {
         std::fs::set_permissions(&ssh_shim, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let run_dir = dir.0.join("run");
-        let (direct, relay) = bind_sockets(&run_dir).unwrap();
+        let (direct, relay, control) = bind_sockets(&run_dir).unwrap();
         let opener = RecordingOpener::default();
         let notifier = RecordingNotifier::default();
         // The local side of a Callback forward binds [::1] only, so the
@@ -192,7 +192,7 @@ impl World {
             ..DaemonConfig::default()
         };
         let daemon = Daemon::new(config, opener.clone(), notifier.clone());
-        tokio::spawn(daemon.serve(direct, relay));
+        tokio::spawn(daemon.serve(direct, relay, control));
         let env = WrapperEnv {
             ssh: ssh_shim,
             relay_socket: run_dir.join(RELAY_SOCKET),
