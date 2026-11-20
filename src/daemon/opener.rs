@@ -5,9 +5,13 @@ use std::process::{Command, Stdio};
 
 use url::Url;
 
+use crate::config::Target;
+
 /// Opens a URL in the browser.
 pub trait Opener: Send + Sync + 'static {
-    fn open(&self, url: &Url) -> io::Result<()>;
+    /// Opens `url` in `target`. The Daemon passes `system` or a browser
+    /// Target, never `ask`.
+    fn open(&self, url: &Url, target: &Target) -> io::Result<()>;
 }
 
 /// Runs an `--open-command` template such as `xdg-open {url}`.
@@ -45,7 +49,9 @@ impl CommandOpener {
 }
 
 impl Opener for CommandOpener {
-    fn open(&self, url: &Url) -> io::Result<()> {
+    /// Runs the template for every Target. Browser Targets never reach the
+    /// Opener until browser discovery exists (#47): the Daemon falls back.
+    fn open(&self, url: &Url, _target: &Target) -> io::Result<()> {
         let mut child = Command::new(&self.program)
             .args(self.args.iter().map(|a| a.replace("{url}", url.as_str())))
             .stdin(Stdio::null())

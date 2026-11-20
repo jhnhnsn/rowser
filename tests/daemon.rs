@@ -5,12 +5,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::TmpDir;
+use rowser::config::Target;
 use rowser::daemon::testing::{Answer, RecordingNotifier, RecordingOpener, ScriptedNotifier};
 use rowser::daemon::{
     bind_sockets, CommandOpener, Daemon, DaemonConfig, NoticeHost, Notifier, Opener, DIRECT_SOCKET,
     FORWARD_NOT_APPROVED, NOT_APPROVED, RELAY_SOCKET,
 };
 use rowser::protocol::{Conn, Hello, Msg};
+use rowser::routes::Routes;
 use tokio::net::UnixStream;
 use url::Url;
 
@@ -250,9 +252,184 @@ async fn confirm_harness(
     let config = DaemonConfig {
         confirm_hosts: patterns.iter().map(|p| p.to_string()).collect(),
         confirm_unverified: unverified,
+        // Without this, `[unverified]` asks by default; these tests check
+        // `--confirm-hosts` alone.
+        routes: routes("[unverified]\nopen = \"system\"\n"),
         ..DaemonConfig::default()
     };
     Harness::with(config, ScriptedNotifier::new(answer)).await
+}
+
+fn routes(text: &str) -> Routes {
+    Routes::from_config(&rowser::config::parse(text).unwrap())
+}
+
+fn routed_harness(
+    text: &str,
+    answer: Answer,
+) -> impl std::future::Future<Output = Harness<ScriptedNotifier>> {
+    let config = DaemonConfig {
+        routes: routes(text),
+        ..DaemonConfig::default()
+    };
+    Harness::with(config, ScriptedNotifier::new(answer))
+}
+
+const G14: &str = "[[route]]\nhost = \"g14\"\nopen = \"system\"\n\n\
+                   [[route]]\nhost = \"g14\"\nmatch = [\"*.google.com\"]\nopen = \"system\"\nask = true\n\n\
+                   [default]\nopen = \"chrome:Work\"\n";
+
+#[tokio::test]
+async fn a_host_alias_reaches_the_opener_with_its_routes_target() {
+    let h = routed_harness(G14, Answer::Deny).await;
+    let mut conn = h.connect_relay("g14").await;
+    assert_eq!(
+        error_of(&request(&mut conn, open("https://example.com/a")).await),
+        None
+    );
+    assert_eq!(
+        h.opener.opens(),
+        [(Url::parse("https://example.com/a").unwrap(), Target::System)]
+    );
+    let notices = h.notifier.notices();
+    assert_eq!(notices[0].target, None);
+    assert!(notices[0].warnings.is_empty());
+    assert!(h.notifier.confirms().is_empty());
+}
+
+#[tokio::test]
+async fn an_unmatched_alias_goes_to_default_and_a_browser_target_falls_back_with_a_warning() {
+    let h = routed_harness(G14, Answer::Deny).await;
+    let mut conn = h.connect_relay("db1").await;
+    assert_eq!(
+        error_of(&request(&mut conn, open("https://example.com/b")).await),
+        None
+    );
+    assert_eq!(h.opener.opens()[0].1, Target::System);
+    let body = h.notifier.notices()[0].body();
+    assert!(
+        body.contains("target `chrome:Work` is not available yet; opened with `system`"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn first_route_wins_so_ask_true_on_a_later_route_is_not_used() {
+    let h = routed_harness(G14, Answer::Deny).await;
+    let mut conn = h.connect_relay("g14").await;
+    assert_eq!(
+        error_of(&request(&mut conn, open("https://mail.google.com/")).await),
+        None
+    );
+    assert!(h.notifier.confirms().is_empty());
+}
+
+#[tokio::test]
+async fn ask_true_on_a_route_waits_for_the_user() {
+    let text = "[[route]]\nhost = \"g14\"\nopen = \"system\"\nask = true\n";
+    let h = routed_harness(text, Answer::Deny).await;
+    let mut conn = h.connect_relay("g14").await;
+    let reply = request(&mut conn, open("https://example.com/")).await;
+    assert_eq!(error_of(&reply), Some(NOT_APPROVED));
+    assert!(h.opened().is_empty());
+    assert_eq!(h.notifier.confirms().len(), 1);
+}
+
+#[tokio::test]
+async fn an_ask_target_opens_in_system_after_open_and_the_notice_names_the_target() {
+    let text = "[[route]]\nhost = \"g14\"\nopen = \"ask\"\n[default]\nopen = \"ask\"\n";
+    let h = routed_harness(text, Answer::Approve).await;
+    let mut conn = h.connect_relay("g14").await;
+    assert_eq!(
+        error_of(&request(&mut conn, open("https://example.com/")).await),
+        None
+    );
+    assert_eq!(h.opener.opens()[0].1, Target::System);
+    assert_eq!(h.notifier.confirms().len(), 1);
+    let h = routed_harness(
+        "[[route]]\nhost = \"g14\"\nopen = \"safari\"\n",
+        Answer::Approve,
+    )
+    .await;
+    let mut conn = h.connect_relay("g14").await;
+    request(&mut conn, open("https://example.com/")).await;
+    let body = h.notifier.notices()[0].body();
+    assert!(
+        body.contains("target `safari` is not available yet"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_reported_host_named_like_a_route_never_uses_that_route() {
+    let h = routed_harness(G14, Answer::Deny).await;
+    let mut conn = h.connect(DIRECT_SOCKET).await;
+    let msg = Msg::Open {
+        url: "https://example.com/".into(),
+        reported_host: "g14".into(),
+        callback_ports: vec![],
+    };
+    // `[unverified]` defaults to `ask`; the `g14` Route would open at once.
+    assert_eq!(error_of(&request(&mut conn, msg).await), Some(NOT_APPROVED));
+    assert!(h.opened().is_empty());
+    assert_eq!(h.notifier.confirms().len(), 1);
+}
+
+#[tokio::test]
+async fn confirm_hosts_asks_first_on_top_of_a_route() {
+    let config = DaemonConfig {
+        confirm_hosts: vec!["g14".into()],
+        routes: routes(G14),
+        ..DaemonConfig::default()
+    };
+    let h = Harness::with(config, ScriptedNotifier::new(Answer::Deny)).await;
+    let mut conn = h.connect_relay("g14").await;
+    let reply = request(&mut conn, open("https://example.com/")).await;
+    assert_eq!(error_of(&reply), Some(NOT_APPROVED));
+}
+
+/// Runs `rowser daemon` with `XDG_CONFIG_HOME` in `dir` and gives its exit
+/// code and stderr. Only for a config that stops the Daemon.
+fn daemon_with_config(dir: &Path, text: &str) -> (Option<i32>, String) {
+    let conf = dir.join("config");
+    std::fs::create_dir_all(conf.join("rowser")).unwrap();
+    std::fs::write(conf.join("rowser").join("config.toml"), text).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rowser"))
+        .args(["daemon", "--runtime-dir"])
+        .arg(dir.join("run"))
+        .arg("--test-confirm")
+        .arg("deny")
+        .env("XDG_CONFIG_HOME", &conf)
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}/nobus", dir.display()),
+        )
+        .output()
+        .unwrap();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn an_invalid_config_file_stops_the_daemon_with_the_file_and_line() {
+    let dir = TmpDir::new("d");
+    let (code, stderr) =
+        daemon_with_config(&dir.0, "[[route]]\nhost = \"g14\"\nopen = \"chrome:\"\n");
+    assert_eq!(code, Some(1));
+    let file = dir.0.join("config").join("rowser").join("config.toml");
+    assert!(
+        stderr.contains(&format!(
+            "{}: line 3: invalid target `chrome:`",
+            file.display()
+        )),
+        "{stderr}"
+    );
+    assert!(
+        !dir.0.join("run").exists(),
+        "no sockets for an invalid file"
+    );
 }
 
 #[tokio::test]
@@ -411,7 +588,7 @@ fn command_opener_passes_the_url_as_one_argument() {
     let url = Url::parse(&raw).unwrap();
 
     let opener = CommandOpener::new(&format!("{} {{url}}", script.display())).unwrap();
-    opener.open(&url).unwrap();
+    opener.open(&url, &Target::System).unwrap();
 
     let out_path = dir.0.join("rec.sh.out");
     let mut out = String::new();
@@ -448,7 +625,10 @@ fn command_opener_returns_without_waiting_for_the_command_to_exit() {
     let opener = CommandOpener::new(&format!("{} {{url}}", script.display())).unwrap();
     let start = std::time::Instant::now();
     opener
-        .open(&Url::parse("https://example.com/").unwrap())
+        .open(
+            &Url::parse("https://example.com/").unwrap(),
+            &Target::System,
+        )
         .unwrap();
     assert!(start.elapsed() < Duration::from_secs(2));
     std::fs::write(&go, "").unwrap();
@@ -465,7 +645,10 @@ fn command_opener_reports_a_command_that_cannot_start() {
     let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     let opener = CommandOpener::new("/nonexistent/rowser-opener {url}").unwrap();
     assert!(opener
-        .open(&Url::parse("https://example.com/").unwrap())
+        .open(
+            &Url::parse("https://example.com/").unwrap(),
+            &Target::System
+        )
         .is_err());
     assert!(CommandOpener::new("   ").is_err());
 }
@@ -642,7 +825,7 @@ async fn manual_forward_on_the_direct_socket_matches_the_reported_host_with_conf
 struct FailingOpener;
 
 impl Opener for FailingOpener {
-    fn open(&self, _: &Url) -> std::io::Result<()> {
+    fn open(&self, _: &Url, _: &Target) -> std::io::Result<()> {
         Err(std::io::Error::other("no browser"))
     }
 }

@@ -22,6 +22,8 @@ fn listening_dir(var: &Path, flag: &[&Path]) -> String {
     let mut child = cmd
         .args(["--open-command", "true {url}"])
         .env("ROWSER_RUNTIME_DIR", var)
+        // Never read the real config: this directory has no config file.
+        .env("XDG_CONFIG_HOME", var.join("no-config"))
         .env_remove("ROWSER_LOG")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

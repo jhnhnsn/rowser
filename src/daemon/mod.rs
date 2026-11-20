@@ -19,7 +19,9 @@ use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 use url::Url;
 
+use crate::config::Target;
 use crate::protocol::{Conn, Hello, Msg};
+use crate::routes::{RequestHost, Routes};
 use limit::Limit;
 pub use notifier::{DesktopNotifier, Notice, NoticeHost, Notifier, Subject};
 pub use opener::{CommandOpener, Opener};
@@ -48,11 +50,14 @@ pub struct DaemonConfig {
     /// Addresses the local side of a Callback forward binds. Only loopback
     /// addresses are used; `Daemon::new` drops any other.
     pub loopback: Vec<IpAddr>,
+    /// The Routes from the config file (the spec's defaults without one).
+    pub routes: Routes,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         DaemonConfig {
+            routes: Routes::default(),
             rate_max: 5,
             rate_window: Duration::from_secs(10),
             confirm_hosts: vec![],
@@ -221,6 +226,7 @@ impl Inner {
         let confirm = self.config.needs_confirm(&host);
         let mut notice = Notice {
             subject: Subject::Forward(ports.clone()),
+            target: None,
             host,
             warnings: vec![],
         };
@@ -253,13 +259,16 @@ impl Inner {
                 url.scheme()
             ));
         }
-        let confirm = self.config.needs_confirm(&host);
+        let (target, ask, mut warnings) = self.route(&host, &url);
+        let confirm = ask || self.config.needs_confirm(&host);
+        let shown_target = (target != Target::System).then(|| target.to_string());
         if confirm {
             if let Err(error) = self
                 .confirm(Notice {
                     subject: Subject::Url(url.clone()),
                     host: host.clone(),
-                    warnings: vec![],
+                    target: shown_target.clone(),
+                    warnings: warnings.clone(),
                 })
                 .await
             {
@@ -271,15 +280,17 @@ impl Inner {
         let created = self.forward(ports);
         let opener = self.opener.clone();
         let notifier = self.notifier.clone();
-        let warnings = created.warnings.clone();
+        let forward_warned = !created.warnings.is_empty();
+        warnings.extend(created.warnings.iter().cloned());
         let result = tokio::task::spawn_blocking(move || {
-            opener.open(&url)?;
+            opener.open(&url, &target)?;
             // The user saw the confirmation; a second notice adds nothing
             // unless it carries a forward warning.
-            if !confirm || !warnings.is_empty() {
+            if !confirm || forward_warned {
                 notifier.notify(Notice {
                     subject: Subject::Url(url),
                     host,
+                    target: shown_target,
                     warnings,
                 });
             }
@@ -301,6 +312,43 @@ impl Inner {
                 open_error(format!("could not open the URL: {e}"))
             }
         }
+    }
+
+    /// The Target an Open request uses, whether it waits for the user, and
+    /// notice warnings. `ask` opens in the `[default]` Target after "Open". A
+    /// browser Target is not available yet (#47) and falls back to `[default]`.
+    fn route(&self, host: &NoticeHost, url: &Url) -> (Target, bool, Vec<String>) {
+        let routes = &self.config.routes;
+        let request_host = match host {
+            NoticeHost::Alias(a) => RequestHost::Alias(a.clone()),
+            NoticeHost::Reported(n) => RequestHost::Unverified(n.clone()),
+        };
+        let pick = routes.pick(&request_host, url);
+        let mut ask = pick.ask;
+        let mut warnings = vec![];
+        let fallback = |from: &Target, warnings: &mut Vec<String>| {
+            let mut from = from.clone();
+            let mut used = routes.fallback();
+            if let Target::Browser { .. } = used {
+                from = used;
+                used = Target::System;
+            }
+            if let Target::Browser { .. } = from {
+                warnings.push(format!(
+                    "target `{from}` is not available yet; opened with `{used}`"
+                ));
+            }
+            used
+        };
+        let target = match pick.target {
+            Target::System => Target::System,
+            Target::Ask => {
+                ask = true;
+                fallback(&Target::Ask, &mut warnings)
+            }
+            t => fallback(&t, &mut warnings),
+        };
+        (target, ask, warnings)
     }
 
     /// Waits for the user's answer. A denial, a timeout or a failed
@@ -432,7 +480,9 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
         .open_command
         .unwrap_or_else(|| crate::platform::default_open_command().into());
     let opener = CommandOpener::new(&template)?;
+    let file = crate::config::load(&crate::config::path()?)?;
     let mut config = DaemonConfig {
+        routes: Routes::from_config(&file),
         confirm_hosts: args.confirm_hosts,
         confirm_unverified: args.confirm_unverified,
         ..DaemonConfig::default()

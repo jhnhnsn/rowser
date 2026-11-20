@@ -32,7 +32,11 @@ struct Harness {
 }
 
 impl Harness {
-    async fn start(config: DaemonConfig) -> Harness {
+    async fn start(mut config: DaemonConfig) -> Harness {
+        // These tests use the direct socket; `[unverified]` asks by default.
+        config.routes = rowser::routes::Routes::from_config(
+            &rowser::config::parse("[unverified]\nopen = \"system\"\n").unwrap(),
+        );
         let dir = TmpDir::new("f");
         let (direct, relay) = bind_sockets(&dir.0.join("run")).unwrap();
         let opener = RecordingOpener::default();

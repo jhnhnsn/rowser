@@ -6,22 +6,32 @@ use std::sync::{Arc, Condvar, Mutex};
 use url::Url;
 
 use super::{Notice, Notifier, Opener};
+use crate::config::Target;
 
-/// Records every URL it is asked to open, and never opens a browser.
+/// Records every URL and Target it is asked to open, and never opens a
+/// browser.
 #[derive(Debug, Clone, Default)]
 pub struct RecordingOpener {
-    urls: Arc<Mutex<Vec<Url>>>,
+    opened: Arc<Mutex<Vec<(Url, Target)>>>,
 }
 
 impl RecordingOpener {
     pub fn urls(&self) -> Vec<Url> {
-        self.urls.lock().unwrap().clone()
+        self.opens().into_iter().map(|(u, _)| u).collect()
+    }
+
+    /// Every (URL, Target) pair, in order.
+    pub fn opens(&self) -> Vec<(Url, Target)> {
+        self.opened.lock().unwrap().clone()
     }
 }
 
 impl Opener for RecordingOpener {
-    fn open(&self, url: &Url) -> io::Result<()> {
-        self.urls.lock().unwrap().push(url.clone());
+    fn open(&self, url: &Url, target: &Target) -> io::Result<()> {
+        self.opened
+            .lock()
+            .unwrap()
+            .push((url.clone(), target.clone()));
         Ok(())
     }
 }

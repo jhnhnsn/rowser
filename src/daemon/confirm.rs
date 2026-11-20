@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use super::{DaemonConfig, NoticeHost};
+use crate::routes::glob_match;
 
 /// How long a confirmation waits for the user by default. The Daemon's
 /// timeout and the desktop notification or dialog both use it.
@@ -20,34 +21,9 @@ impl DaemonConfig {
     }
 }
 
-/// Matches `name` against a glob `pattern` with `*` (any run) and `?` (one
-/// character), ignoring ASCII case.
-fn glob_match(pattern: &str, name: &str) -> bool {
-    let p: Vec<char> = pattern.chars().map(|c| c.to_ascii_lowercase()).collect();
-    let n: Vec<char> = name.chars().map(|c| c.to_ascii_lowercase()).collect();
-    let (mut pi, mut ni) = (0, 0);
-    let mut star: Option<(usize, usize)> = None;
-    while ni < n.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
-            pi += 1;
-            ni += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some((pi, ni));
-            pi += 1;
-        } else if let Some((sp, sn)) = star {
-            pi = sp + 1;
-            ni = sn + 1;
-            star = Some((sp, sn + 1));
-        } else {
-            return false;
-        }
-    }
-    p[pi..].iter().all(|&c| c == '*')
-}
-
 #[cfg(test)]
 mod tests {
-    use super::glob_match;
+    use crate::routes::glob_match;
 
     #[test]
     fn question_mark_matches_exactly_one_character() {

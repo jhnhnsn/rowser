@@ -26,6 +26,8 @@ pub enum Subject {
 pub struct Notice {
     pub subject: Subject,
     pub host: NoticeHost,
+    /// The Target the URL opens in, when it is not `system`.
+    pub target: Option<String>,
     /// Problems with the request that did not stop it, such as a busy
     /// Callback port.
     pub warnings: Vec<String>,
@@ -76,6 +78,10 @@ impl Notice {
             }
         };
         let mut body = format!("From {host}: {what}");
+        if let Some(target) = &self.target {
+            body.push_str("\nOpens in: ");
+            body.push_str(&clean(target, escape));
+        }
         for w in &self.warnings {
             body.push_str("\nWarning: ");
             body.push_str(&clean(w, escape));

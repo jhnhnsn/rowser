@@ -22,8 +22,18 @@ fn daemon(
 ) -> (Child, mpsc::Receiver<String>, Vec<String>) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Never read the real config. `[unverified]` opens at once, so the
+    // direct-socket request below gives a plain notification.
+    let config = dir.join("config");
+    std::fs::create_dir_all(config.join("rowser")).unwrap();
+    std::fs::write(
+        config.join("rowser").join("config.toml"),
+        "[unverified]\nopen = \"system\"\n",
+    )
+    .unwrap();
     let mut cmd = Command::new(EXE);
     cmd.arg("daemon")
+        .env("XDG_CONFIG_HOME", &config)
         .arg("--runtime-dir")
         .arg(dir)
         .arg("--open-command")

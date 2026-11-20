@@ -8,6 +8,14 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- A config file, `$XDG_CONFIG_HOME/rowser/config.toml` (default `~/.config/rowser/config.toml`),
+  with Routes: `[[route]]` entries send the URLs of one Host alias (optionally only URLs whose
+  host matches `match` globs) to a Target, `system` or `ask`, and `ask = true` waits for the
+  user first. `[unverified]` (default `ask`) takes requests that carry only a Reported host
+  name, and `[default]` (default `system`) takes the rest. The notification names the Target
+  when it is not `system`. Browser Targets such as `chrome:Work` are accepted but open with
+  `[default]` for now, with a warning. An invalid file stops `rowser daemon` with the file,
+  line and reason. ([#39](https://github.com/jhnhnsn/rowser/issues/39))
 - `rowser browsers` lists the browsers found on this machine, with their short names (such as
   `chrome` or `firefox`) and Profiles; `--json` prints the same list as JSON. On macOS it looks
   for the known browsers in `/Applications` and `~/Applications`; on Linux it reads the

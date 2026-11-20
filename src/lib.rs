@@ -3,6 +3,7 @@
 pub mod browsers;
 pub mod callback;
 pub mod cli;
+pub mod config;
 pub mod daemon;
 pub mod detect;
 pub mod discovery;
@@ -11,6 +12,7 @@ pub mod logging;
 pub mod platform;
 pub mod protocol;
 pub mod remote_install;
+pub mod routes;
 pub mod service;
 pub mod shim;
 pub mod wrapper;

@@ -59,6 +59,9 @@ rowser is a CLI; test it from the terminal.
 - Unix socket paths are limited to about 104–108 bytes: put test sockets in a short temp dir
   (e.g. `/tmp/rw.XXXX`), never under a long scratchpad or worktree path; remove it afterwards.
 - Never open the real browser or show real desktop notifications in a test.
+- `rowser daemon` reads `$XDG_CONFIG_HOME/rowser/config.toml`: always set `XDG_CONFIG_HOME` to a
+  temp dir (with or without a `rowser/config.toml`) so the real config is never read. Without a
+  file, `[unverified]` is `ask`, so direct-socket opens wait for `--test-confirm`.
 - Run the live daemon with `env DBUS_SESSION_BUS_ADDRESS=unix:path=<tmp>/nobus` so no real desktop
   notification shows (a failed notification only logs a warning).
 - Manual macOS checks (notifications, confirm dialogs) go on the ticket as a `ready-for-human` note;
