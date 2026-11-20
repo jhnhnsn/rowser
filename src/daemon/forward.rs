@@ -47,6 +47,8 @@ struct Active {
 /// What `Forwards::create` did.
 pub(super) struct Created {
     pub forward_id: Option<String>,
+    /// The local ports that bound.
+    pub ports: Vec<u16>,
     pub warnings: Vec<String>,
 }
 
@@ -59,6 +61,7 @@ impl Forwards {
         host: &NoticeHost,
         loopback: &[IpAddr],
         timeout: Duration,
+        on_end: impl FnOnce(&str, Duration) + Send + 'static,
     ) -> Created {
         let mut warnings = vec![];
         let mut listeners = vec![];
@@ -85,6 +88,7 @@ impl Forwards {
         if listeners.is_empty() {
             return Created {
                 forward_id: None,
+                ports: vec![],
                 warnings,
             };
         }
@@ -94,6 +98,7 @@ impl Forwards {
                 warnings.push(format!("could not make a forward id: {e}"));
                 return Created {
                     forward_id: None,
+                    ports: vec![],
                     warnings,
                 };
             }
@@ -104,6 +109,7 @@ impl Forwards {
         // One listener per loopback address: list each port once.
         bound.sort_unstable();
         bound.dedup();
+        let ports = bound.clone();
         let (host, unverified) = match host {
             NoticeHost::Alias(a) => (a.clone(), false),
             NoticeHost::Reported(r) => (r.clone(), true),
@@ -119,13 +125,16 @@ impl Forwards {
         );
         let this = self.clone();
         let forward_id = id.clone();
+        let started = tokio::time::Instant::now();
         tokio::spawn(async move {
             this.run(&forward_id, listeners, rx, timeout).await;
             this.waiting.lock().unwrap().remove(&forward_id);
             this.active.lock().unwrap().remove(&forward_id);
+            on_end(&forward_id, started.elapsed());
         });
         Created {
             forward_id: Some(id),
+            ports,
             warnings,
         }
     }

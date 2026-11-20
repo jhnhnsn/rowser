@@ -8,6 +8,13 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser activity [--follow] [--json]` shows the Daemon's last 200 Open requests and
+  `rowser forward` requests, newest last: time, host (Host alias, or the Reported host name
+  marked unverified), URL, the Route that matched, the Target, and the result (opened, denied,
+  timed out, rate limited, scheme refused, browser missing). A Callback forward shows its ports
+  and, once it closes, how long it stayed open. `--follow` keeps printing new requests until
+  Ctrl-C; `--json` prints one JSON object per line. A Daemon restart clears the list.
+  ([#48](https://github.com/jhnhnsn/rowser/issues/48))
 - `rowser reload` makes the running Daemon read the config file again. With a valid file, the
   new Routes apply to the next URL and it prints `rowser: config reloaded (<n> routes)`. An
   invalid file is refused with the file, line and reason, the Daemon keeps its old Routes, and

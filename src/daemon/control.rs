@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use tokio::net::UnixStream;
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::routes::Routes;
 
@@ -17,6 +18,27 @@ impl Inner {
                 Msg::Ping => pong(),
                 Msg::Status => self.status(),
                 Msg::Reload => self.reload(),
+                Msg::Activity { follow } => {
+                    let (entries, mut rx) = self.activity.watch();
+                    conn.send(&Msg::ActivityReply { entries }).await?;
+                    if !follow {
+                        continue;
+                    }
+                    // Streams until the client closes the connection.
+                    loop {
+                        tokio::select! {
+                            r = rx.recv() => match r {
+                                Ok(entry) => conn.send(&Msg::ActivityUpdate { entry: Box::new(entry) }).await?,
+                                Err(RecvError::Lagged(_)) => continue,
+                                Err(RecvError::Closed) => return Ok(()),
+                            },
+                            r = conn.recv() => match r {
+                                Ok(Some(_)) => continue,
+                                _ => return Ok(()),
+                            },
+                        }
+                    }
+                }
                 Msg::Session { host } => {
                     let _session = self.sessions.register(&host);
                     conn.send(&Msg::OpenResult {

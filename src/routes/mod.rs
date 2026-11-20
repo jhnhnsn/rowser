@@ -97,6 +97,7 @@ impl Routes {
     pub fn resolve(&self, host: &RequestHost, url: &Url) -> Resolved {
         let pick = self.pick(host, url);
         let mut resolved = Resolved {
+            route: pick.route,
             target: Target::System,
             ask: pick.ask,
             warnings: vec![],
@@ -130,6 +131,8 @@ impl Resolved {
 /// The result of `Routes::resolve`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
+    /// The index of the matching `[[route]]`, as in `Pick`.
+    pub route: Option<usize>,
     /// The Target the URL opens in.
     pub target: Target,
     /// The user approves the URL before it opens.

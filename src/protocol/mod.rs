@@ -150,6 +150,93 @@ pub enum Msg {
         #[serde(default)]
         sessions: Vec<SessionInfo>,
     },
+    /// Control socket only (1.1): `rowser activity`. The reply is an
+    /// `ActivityReply`; with `follow`, an `ActivityUpdate` follows for each
+    /// new or changed entry until the client closes the connection.
+    Activity {
+        #[serde(default)]
+        follow: bool,
+    },
+    /// The Daemon's answer to `Activity`: the kept entries, oldest first.
+    ActivityReply {
+        entries: Vec<ActivityEntry>,
+    },
+    /// A new entry, or a changed one (same `id`) when its Callback forward
+    /// closes.
+    ActivityUpdate {
+        entry: Box<ActivityEntry>,
+    },
+}
+
+/// What a request is, in `rowser activity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestKind {
+    Open,
+    Forward,
+}
+
+/// How the Daemon answered a request, in `rowser activity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// The URL opened, or the Callback forward started.
+    Opened,
+    Denied,
+    TimedOut,
+    Paused,
+    RateLimited,
+    SchemeRefused,
+    /// The Opener failed.
+    BrowserMissing,
+}
+
+impl Outcome {
+    /// The words `rowser activity` prints.
+    pub fn label(self) -> &'static str {
+        match self {
+            Outcome::Opened => "opened",
+            Outcome::Denied => "denied",
+            Outcome::TimedOut => "timed out",
+            Outcome::Paused => "paused",
+            Outcome::RateLimited => "rate limited",
+            Outcome::SchemeRefused => "scheme refused",
+            Outcome::BrowserMissing => "browser missing",
+        }
+    }
+}
+
+/// One Open request or `rowser forward` request, as `rowser activity`
+/// shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    /// Counts up from 1 for each request since the Daemon started.
+    pub id: u64,
+    /// Seconds since the Unix epoch.
+    pub time: u64,
+    pub kind: RequestKind,
+    /// The Host alias, or the Reported host name when `unverified`.
+    pub host: String,
+    pub unverified: bool,
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The Route that matched: `route <n>` (from 1, in file order),
+    /// `[unverified]` or `[default]`. `None` for a forward, or a request
+    /// refused before Route matching.
+    #[serde(default)]
+    pub route: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+    pub result: Outcome,
+    /// The local ports of its Callback forward.
+    #[serde(default)]
+    pub ports: Vec<u16>,
+    /// How long the Callback forward stayed open; `None` while it is open.
+    #[serde(default)]
+    pub open_secs: Option<u64>,
+    /// Notice warnings, such as a Target that fell back to `[default]`.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// One connected Wrapper, as `rowser status` shows it.
@@ -174,6 +261,9 @@ impl Msg {
                 | Msg::Session { .. }
                 | Msg::Reload
                 | Msg::Reloaded { .. }
+                | Msg::Activity { .. }
+                | Msg::ActivityReply { .. }
+                | Msg::ActivityUpdate { .. }
         )
     }
 }

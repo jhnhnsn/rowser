@@ -77,6 +77,15 @@ pub enum Command {
     },
     /// Make the running Daemon read the config file again.
     Reload,
+    /// Show the Daemon's last 200 requests, newest last.
+    Activity {
+        /// Keep printing new requests until Ctrl-C.
+        #[arg(long)]
+        follow: bool,
+        /// Print one JSON object per line.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage rowser on a remote host.
     Remote {
         #[command(subcommand)]
@@ -136,6 +145,7 @@ impl Command {
             Command::Browsers { .. } => "browsers",
             Command::Status { .. } => "status",
             Command::Reload => "reload",
+            Command::Activity { .. } => "activity",
             Command::Remote { .. } => "remote install",
             Command::Keeper { .. } => "__keeper",
         }
@@ -194,6 +204,7 @@ pub fn run(command: Command) -> ExitCode {
         Command::Browsers { json } => crate::browsers::browsers_main(json),
         Command::Status { json } => crate::control::status_main(json),
         Command::Reload => crate::control::reload_main(),
+        Command::Activity { follow, json } => crate::control::activity_main(follow, json),
         Command::Keeper {
             socket,
             forward_id,

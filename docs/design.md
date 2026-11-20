@@ -221,5 +221,12 @@ src/
 - Dependency direction: `cli ─► config, routes, browsers, control`; `control ─► protocol,
   platform`; `daemon ─► config, routes, browsers, protocol`; `routes ─► config` types only;
   `doctor ─► config, routes, browsers`.
+- `rowser activity`: `Msg::Activity{follow}` on the control socket; the reply is
+  `ActivityReply{entries}` (oldest first), and with `follow` an `ActivityUpdate{entry}` follows
+  for each new entry and for an entry whose Callback forward closed (same `id`, now with
+  `open_secs`). `daemon/activity.rs` keeps the ring (200 entries) and a broadcast channel;
+  `Forwards::create` takes an `on_end` callback that reports how long the forward stayed open.
+  `Resolved.route` carries the Route index, shown as `route <n>` (from 1), `[unverified]` or
+  `[default]`. `control::run_activity(ActivityArgs, out, err)` is the client.
 - `DaemonConfig.config_file` is the config file path the Daemon resolved (`config::path`);
   `rowser status` shows it, with `(no file)` when no file was there at start.

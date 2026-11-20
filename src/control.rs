@@ -9,7 +9,9 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::net::UnixStream;
 
-use crate::protocol::{Conn, ForwardInfo, Hello, Msg, SessionInfo, CONTROL_SOCKET};
+use crate::protocol::{
+    ActivityEntry, Conn, ForwardInfo, Hello, Msg, Outcome, RequestKind, SessionInfo, CONTROL_SOCKET,
+};
 
 /// The line every control command prints when the Daemon does not answer.
 pub const NOT_RUNNING: &str = "rowser: the daemon is not running";
@@ -42,20 +44,9 @@ pub fn request(runtime_dir: &Path, msg: &Msg) -> Result<Msg, RequestError> {
         .enable_all()
         .build()
         .map_err(|e| RequestError::Other(e.to_string()))?;
-    let path = runtime_dir.join(CONTROL_SOCKET);
     runtime.block_on(async {
         let exchange = async {
-            let stream = UnixStream::connect(&path)
-                .await
-                .map_err(|_| RequestError::NotRunning)?;
-            let mut conn = Conn::connect(stream, Hello::current())
-                .await
-                .map_err(|e| match e {
-                    crate::protocol::Error::VersionMismatch { .. } => {
-                        RequestError::Other(e.to_string())
-                    }
-                    _ => RequestError::NotRunning,
-                })?;
+            let mut conn = open_control(runtime_dir).await?;
             conn.send(msg).await.map_err(|_| RequestError::NotRunning)?;
             match conn.recv().await {
                 Ok(Some(reply)) => Ok(reply),
@@ -66,6 +57,19 @@ pub fn request(runtime_dir: &Path, msg: &Msg) -> Result<Msg, RequestError> {
             .await
             .unwrap_or(Err(RequestError::NotRunning))
     })
+}
+
+/// Connects to the control socket in `runtime_dir` and does the handshake.
+async fn open_control(runtime_dir: &Path) -> Result<Conn<UnixStream>, RequestError> {
+    let stream = UnixStream::connect(runtime_dir.join(CONTROL_SOCKET))
+        .await
+        .map_err(|_| RequestError::NotRunning)?;
+    Conn::connect(stream, Hello::current())
+        .await
+        .map_err(|e| match e {
+            crate::protocol::Error::VersionMismatch { .. } => RequestError::Other(e.to_string()),
+            _ => RequestError::NotRunning,
+        })
 }
 
 /// `rowser status` inputs.
@@ -232,6 +236,185 @@ pub fn run_reload(
 pub fn reload_main() -> ExitCode {
     run_reload(
         crate::platform::runtime_dir(),
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+}
+
+/// `rowser activity` inputs.
+pub struct ActivityArgs {
+    /// The runtime directory, found as `rowser ssh` finds it.
+    pub runtime_dir: Result<PathBuf, String>,
+    pub json: bool,
+    /// Keep printing new and changed entries until the process ends.
+    pub follow: bool,
+}
+
+/// `rowser activity`: prints the Daemon's recent requests, newest last,
+/// one line (or one JSON object) each.
+pub fn run_activity(args: ActivityArgs, out: &mut impl Write, err: &mut impl Write) -> ExitCode {
+    let dir = match args.runtime_dir {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = writeln!(err, "rowser activity: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let print = |out: &mut dyn Write, e: &ActivityEntry| -> std::io::Result<()> {
+        if args.json {
+            let json = serde_json::to_string(e).map_err(std::io::Error::other)?;
+            writeln!(out, "{json}")?;
+        } else {
+            writeln!(out, "{}", activity_line(e))?;
+        }
+        out.flush()
+    };
+    let msg = Msg::Activity {
+        follow: args.follow,
+    };
+    if !args.follow {
+        let entries = match request(&dir, &msg) {
+            Ok(Msg::ActivityReply { entries }) => entries,
+            Ok(other) => return unexpected(err, other),
+            Err(e) => {
+                let _ = writeln!(err, "{e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        for e in &entries {
+            if print(out, e).is_err() {
+                return ExitCode::FAILURE;
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = writeln!(err, "rowser: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(async {
+        let first = tokio::time::timeout(ANSWER_TIMEOUT, async {
+            let mut conn = open_control(&dir).await?;
+            conn.send(&msg)
+                .await
+                .map_err(|_| RequestError::NotRunning)?;
+            match conn.recv().await {
+                Ok(Some(reply)) => Ok((conn, reply)),
+                _ => Err(RequestError::NotRunning),
+            }
+        })
+        .await
+        .unwrap_or(Err(RequestError::NotRunning));
+        let (mut conn, entries) = match first {
+            Ok((conn, Msg::ActivityReply { entries })) => (conn, entries),
+            Ok((_, other)) => return unexpected(err, other),
+            Err(e) => {
+                let _ = writeln!(err, "{e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        for e in &entries {
+            if print(out, e).is_err() {
+                return ExitCode::SUCCESS;
+            }
+        }
+        loop {
+            match conn.recv().await {
+                Ok(Some(Msg::ActivityUpdate { entry })) => {
+                    // A closed stdout (`| head`) ends the command quietly.
+                    if print(out, &entry).is_err() {
+                        return ExitCode::SUCCESS;
+                    }
+                }
+                Ok(Some(_)) => continue,
+                _ => {
+                    let _ = writeln!(err, "{NOT_RUNNING}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    })
+}
+
+fn unexpected(err: &mut impl Write, reply: Msg) -> ExitCode {
+    let text = match reply {
+        Msg::OpenResult { error: Some(e), .. } => e,
+        other => format!("unexpected reply {other:?}"),
+    };
+    let _ = writeln!(err, "rowser activity: {text}");
+    ExitCode::FAILURE
+}
+
+/// One `rowser activity` text line.
+fn activity_line(e: &ActivityEntry) -> String {
+    let mut parts = vec![local_time(e.time)];
+    parts.push(if e.unverified {
+        format!("{} (unverified)", e.host)
+    } else {
+        e.host.clone()
+    });
+    let ports = || {
+        e.ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    match e.kind {
+        RequestKind::Open => parts.push(e.url.clone().unwrap_or_default()),
+        RequestKind::Forward => parts.push(format!("forward {}", ports())),
+    }
+    parts.extend(e.route.clone());
+    parts.extend(e.target.clone());
+    parts.push(e.result.label().to_string());
+    if e.result == Outcome::Opened && !e.ports.is_empty() {
+        let open = match e.open_secs {
+            None => "still open".to_string(),
+            Some(s) => format!("open {}", age(s)),
+        };
+        parts.push(match e.kind {
+            RequestKind::Open => format!("callback {} {open}", ports()),
+            RequestKind::Forward => open,
+        });
+    }
+    parts.extend(e.warnings.iter().map(|w| format!("warning: {w}")));
+    parts.join("  ")
+}
+
+/// Unix seconds as local `YYYY-MM-DD HH:MM:SS`.
+fn local_time(secs: u64) -> String {
+    let t = secs as libc::time_t;
+    // SAFETY: `tm` is plain data; localtime_r only writes into it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers are valid for the call.
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return secs.to_string();
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
+}
+
+/// `rowser activity` from the command line.
+pub fn activity_main(follow: bool, json: bool) -> ExitCode {
+    run_activity(
+        ActivityArgs {
+            runtime_dir: crate::platform::runtime_dir(),
+            json,
+            follow,
+        },
         &mut std::io::stdout(),
         &mut std::io::stderr(),
     )

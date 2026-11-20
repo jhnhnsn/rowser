@@ -1,6 +1,7 @@
 //! The Daemon: serves Open requests on the direct and relay sockets, and
 //! control commands on the control socket.
 
+mod activity;
 mod confirm;
 mod control;
 mod forward;
@@ -22,7 +23,7 @@ use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 use url::Url;
 
-use crate::protocol::{Conn, Hello, Msg};
+use crate::protocol::{ActivityEntry, Conn, Hello, Msg, Outcome, RequestKind};
 use crate::routes::{RequestHost, Resolved, Routes};
 use limit::Limit;
 pub use notifier::{DesktopNotifier, Notice, NoticeHost, Notifier, Subject};
@@ -94,6 +95,8 @@ struct Inner {
     notifier: Arc<dyn Notifier>,
     forwards: Arc<forward::Forwards>,
     sessions: Arc<session::Sessions>,
+    /// Recent requests, for `rowser activity`.
+    activity: Arc<activity::Activity>,
     /// True when a file was at `config.config_file` at start.
     config_file_exists: bool,
     /// The Routes in use: `config.routes` at start, replaced by a valid
@@ -115,6 +118,7 @@ impl Daemon {
                 notifier: Arc::new(notifier),
                 forwards: Arc::default(),
                 sessions: Arc::default(),
+                activity: Arc::default(),
             }),
         }
     }
@@ -208,10 +212,14 @@ impl Inner {
                     reported_host,
                     callback_ports,
                 } => {
+                    let host = notice_host(&stamp, reported_host);
                     if limit.allow() {
-                        let host = notice_host(&stamp, reported_host);
                         self.open(&url, host, &callback_ports).await
                     } else {
+                        let mut e = new_entry(RequestKind::Open, &host, Outcome::RateLimited);
+                        e.url = Some(url);
+                        e.ports = callback_ports;
+                        self.activity.push(e, None);
                         self.rate_error()
                     }
                 }
@@ -219,10 +227,13 @@ impl Inner {
                     reported_host,
                     callback_ports,
                 } => {
+                    let host = notice_host(&stamp, reported_host);
                     if limit.allow() {
-                        let host = notice_host(&stamp, reported_host);
                         self.manual_forward(host, callback_ports).await
                     } else {
+                        let mut e = new_entry(RequestKind::Forward, &host, Outcome::RateLimited);
+                        e.ports = callback_ports;
+                        self.activity.push(e, None);
                         self.rate_error()
                     }
                 }
@@ -262,6 +273,10 @@ impl Inner {
             host,
             &self.config.loopback,
             self.config.forward_timeout,
+            {
+                let activity = self.activity.clone();
+                move |id: &str, open| activity.forward_closed(id, open)
+            },
         )
     }
 
@@ -276,11 +291,18 @@ impl Inner {
             warnings: vec![],
         };
         if confirm {
-            if let Err(error) = self.confirm(notice.clone()).await {
+            if let Err((error, outcome)) = self.confirm(notice.clone()).await {
+                let mut e = new_entry(RequestKind::Forward, &notice.host, outcome);
+                e.ports = ports;
+                self.activity.push(e, None);
                 return error;
             }
         }
         let created = self.forward(&ports, &notice.host);
+        let mut e = new_entry(RequestKind::Forward, &notice.host, Outcome::Opened);
+        e.ports = created.ports.clone();
+        e.warnings = created.warnings.clone();
+        self.activity.push(e, created.forward_id.clone());
         if !confirm || !created.warnings.is_empty() {
             notice.warnings = created.warnings.clone();
             let notifier = self.notifier.clone();
@@ -293,12 +315,20 @@ impl Inner {
         }
     }
 
-    async fn open(&self, url: &str, host: NoticeHost, ports: &[u16]) -> Msg {
-        let url = match Url::parse(url) {
+    async fn open(&self, raw: &str, host: NoticeHost, ports: &[u16]) -> Msg {
+        let mut entry = new_entry(RequestKind::Open, &host, Outcome::SchemeRefused);
+        entry.url = Some(raw.to_string());
+        entry.ports = ports.to_vec();
+        let url = match Url::parse(raw) {
             Ok(u) => u,
-            Err(e) => return open_error(format!("invalid URL: {e}")),
+            Err(e) => {
+                // An unparsable URL has no allowed scheme either.
+                self.activity.push(entry, None);
+                return open_error(format!("invalid URL: {e}"));
+            }
         };
         if !matches!(url.scheme(), "http" | "https") {
+            self.activity.push(entry, None);
             return open_error(format!(
                 "URL scheme `{}` is not allowed; only http and https",
                 url.scheme()
@@ -309,13 +339,17 @@ impl Inner {
             NoticeHost::Reported(n) => RequestHost::Unverified(n.clone()),
         };
         let Resolved {
+            route,
             target,
             ask,
             mut warnings,
         } = self.routes().resolve(&request_host, &url);
+        entry.route = Some(route_label(route, &host));
+        entry.target = Some(target.to_string());
+        entry.warnings = warnings.clone();
         let confirm = ask || self.config.needs_confirm(&host);
         if confirm {
-            if let Err(error) = self
+            if let Err((error, outcome)) = self
                 .confirm(Notice {
                     subject: Subject::Url(url.clone()),
                     host: host.clone(),
@@ -324,12 +358,16 @@ impl Inner {
                 })
                 .await
             {
+                entry.result = outcome;
+                self.activity.push(entry, None);
                 return error;
             }
         }
         // Bind the Callback forward only after approval, so a denied URL
         // never holds a local port.
         let created = self.forward(ports, &host);
+        entry.ports = created.ports.clone();
+        entry.warnings.extend(created.warnings.iter().cloned());
         let opener = self.opener.clone();
         let notifier = self.notifier.clone();
         let forward_warned = !created.warnings.is_empty();
@@ -350,12 +388,19 @@ impl Inner {
         })
         .await;
         match result.map_err(io::Error::other).and_then(|r| r) {
-            Ok(()) => Msg::OpenResult {
-                forward_id: created.forward_id,
-                warnings: created.warnings,
-                error: None,
-            },
+            Ok(()) => {
+                entry.result = Outcome::Opened;
+                self.activity.push(entry, created.forward_id.clone());
+                Msg::OpenResult {
+                    forward_id: created.forward_id,
+                    warnings: created.warnings,
+                    error: None,
+                }
+            }
             Err(e) => {
+                entry.result = Outcome::BrowserMissing;
+                entry.ports.clear();
+                self.activity.push(entry, None);
                 // No keeper attaches when the Shim gets an error: free the
                 // ports now, not after the forward timeout.
                 if let Some(id) = &created.forward_id {
@@ -368,7 +413,7 @@ impl Inner {
 
     /// Waits for the user's answer. A denial, a timeout or a failed
     /// Notifier gives the error reply for the Shim.
-    async fn confirm(&self, notice: Notice) -> Result<(), Msg> {
+    async fn confirm(&self, notice: Notice) -> Result<(), (Msg, Outcome)> {
         let (not_approved, not_done) = match notice.subject {
             Subject::Url(_) => (NOT_APPROVED, "the URL was not opened"),
             Subject::Forward(_) => (FORWARD_NOT_APPROVED, "the port was not forwarded"),
@@ -381,13 +426,53 @@ impl Inner {
             // `confirm` gives only a bool, so a denial and a confirmation
             // that could not be shown look the same here; the Notifier logs
             // the second.
-            Ok(Ok(false)) => Err(open_error(not_approved)),
-            Ok(Err(e)) => Err(open_error(format!("confirmation failed: {e}"))),
-            Err(_) => Err(open_error(format!(
-                "no confirmation within {} seconds; {not_done}",
-                timeout.as_secs()
-            ))),
+            Ok(Ok(false)) => Err((open_error(not_approved), Outcome::Denied)),
+            Ok(Err(e)) => Err((
+                open_error(format!("confirmation failed: {e}")),
+                Outcome::Denied,
+            )),
+            Err(_) => Err((
+                open_error(format!(
+                    "no confirmation within {} seconds; {not_done}",
+                    timeout.as_secs()
+                )),
+                Outcome::TimedOut,
+            )),
         }
+    }
+}
+
+/// A new `rowser activity` entry, stamped with the time now. The ring
+/// sets its id.
+fn new_entry(kind: RequestKind, host: &NoticeHost, result: Outcome) -> ActivityEntry {
+    let (host, unverified) = match host {
+        NoticeHost::Alias(a) => (a.clone(), false),
+        NoticeHost::Reported(r) => (r.clone(), true),
+    };
+    ActivityEntry {
+        id: 0,
+        time: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        kind,
+        host,
+        unverified,
+        url: None,
+        route: None,
+        target: None,
+        result,
+        ports: vec![],
+        open_secs: None,
+        warnings: vec![],
+    }
+}
+
+/// The Route that matched, as `rowser activity` shows it.
+fn route_label(route: Option<usize>, host: &NoticeHost) -> String {
+    match (route, host) {
+        (Some(i), _) => format!("route {}", i + 1),
+        (None, NoticeHost::Reported(_)) => "[unverified]".into(),
+        (None, NoticeHost::Alias(_)) => "[default]".into(),
     }
 }
 
