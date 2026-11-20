@@ -13,6 +13,7 @@ use rowser::control::{run_status, StatusArgs};
 use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
 use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET, RELAY_SOCKET};
 use rowser::protocol::{Conn, Hello, Msg, Version, CONTROL_SOCKET};
+use rowser::routes::Routes;
 use tokio::net::{TcpListener, UnixStream};
 
 const V6: IpAddr = IpAddr::V6(Ipv6Addr::LOCALHOST);
@@ -120,11 +121,12 @@ async fn status_shows_the_daemon_version_and_an_open_callback_forward() {
             "paused:            no".to_string(),
         ]
     );
-    assert_eq!(lines[5], "callback forwards:");
+    assert_eq!(lines[5], "sessions:          none");
+    assert_eq!(lines[6], "callback forwards:");
     assert!(
-        lines[6].starts_with(&format!("  {port}  g14  ")),
+        lines[7].starts_with(&format!("  {port}  g14  ")),
         "{}",
-        lines[6]
+        lines[7]
     );
 
     let v = json_status(run.clone()).await;
@@ -158,7 +160,7 @@ async fn a_forward_from_the_direct_socket_shows_its_reported_host_as_unverified(
     ));
 
     let (_, out, _) = status(run.clone(), false).await;
-    let line = out.lines().nth(6).unwrap_or_default().to_string();
+    let line = out.lines().nth(7).unwrap_or_default().to_string();
     assert!(
         line.starts_with(&format!("  {port}  devbox (unverified)  ")),
         "{out}"
@@ -251,6 +253,84 @@ async fn a_protocol_1_0_shim_still_opens_on_the_1_1_daemon() {
         conn.recv().await.unwrap(),
         Some(Msg::OpenResult { error: None, .. })
     ));
+}
+
+/// A relay connection that registered a Session for `alias`.
+async fn session(run: &Path, alias: &str) -> Conn<UnixStream> {
+    let mut relay = connect(run.join(RELAY_SOCKET)).await;
+    relay
+        .send(&Msg::HostStamp {
+            alias: alias.into(),
+        })
+        .await
+        .unwrap();
+    relay.send(&Msg::Session).await.unwrap();
+    assert!(matches!(
+        relay.recv().await.unwrap(),
+        Some(Msg::OpenResult { error: None, .. })
+    ));
+    relay
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_shows_the_target_of_its_first_route_without_match() {
+    let text = "[[route]]\nhost = \"g14\"\nmatch = [\"*.google.com\"]\nopen = \"chrome:Work\"\n\
+                [[route]]\nhost = \"g1?\"\nopen = \"safari\"\n";
+    let config = DaemonConfig {
+        routes: Routes::from_config(&rowser::config::parse(text).unwrap()),
+        ..DaemonConfig::default()
+    };
+    let dir = TmpDir::new("ctl");
+    let run = start_with(&dir, config).await;
+    let _a = session(&run, "g14").await;
+    let _b = session(&run, "db1").await;
+
+    let (_, out, _) = status(run.clone(), false).await;
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[5], "sessions:");
+    assert!(
+        lines[6].starts_with("  g14  ") && lines[6].ends_with("  safari"),
+        "{out}"
+    );
+    assert!(
+        lines[7].starts_with("  db1  ") && lines[7].ends_with("  system"),
+        "{out}"
+    );
+
+    let v = json_status(run).await;
+    assert_eq!(v["sessions"][0]["host"], "g14");
+    assert_eq!(v["sessions"][0]["target"], "safari");
+    assert_eq!(v["sessions"][1]["target"], "system");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_ends_when_its_connection_closes() {
+    let dir = TmpDir::new("ctl");
+    let run = start(&dir).await;
+    let conn = session(&run, "g14").await;
+    assert_eq!(json_status(run.clone()).await["sessions"][0]["host"], "g14");
+    drop(conn);
+    for _ in 0..50 {
+        if json_status(run.clone()).await["sessions"] == serde_json::json!([]) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the session is still in status");
+}
+
+#[tokio::test]
+async fn a_session_is_refused_on_the_direct_socket() {
+    let dir = TmpDir::new("ctl");
+    let run = start(&dir).await;
+    let mut direct = connect(run.join(DIRECT_SOCKET)).await;
+    direct.send(&Msg::Session).await.unwrap();
+    match direct.recv().await.unwrap() {
+        Some(Msg::OpenResult { error: Some(e), .. }) => assert!(e.contains("relay socket"), "{e}"),
+        other => panic!("unexpected {other:?}"),
+    }
+    let v = json_status(run).await;
+    assert_eq!(v["sessions"], serde_json::json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread")]

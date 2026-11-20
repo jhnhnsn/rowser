@@ -80,6 +80,16 @@ impl Routes {
         }
     }
 
+    /// The Target `rowser status` shows for a Session: the first Route of
+    /// `alias` without a `match` list, else `[default]`. It is what an
+    /// `https` URL that no `match` list names opens in.
+    pub fn session_target(&self, alias: &str) -> Target {
+        self.routes
+            .iter()
+            .find(|r| r.matches.is_empty() && glob_match(&r.host, alias))
+            .map_or_else(|| self.default.clone(), |r| r.target.clone())
+    }
+
     /// The Target an Open request opens in, whether it waits for the user
     /// first, and the notice warnings. An `ask` Target waits, then opens in
     /// `[default]`. A browser Target is not available yet (#47) and falls back

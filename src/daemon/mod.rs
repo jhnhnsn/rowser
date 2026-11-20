@@ -7,6 +7,7 @@ mod forward;
 mod limit;
 mod notifier;
 mod opener;
+mod session;
 #[doc(hidden)]
 pub mod testing;
 
@@ -92,6 +93,7 @@ struct Inner {
     opener: Arc<dyn Opener>,
     notifier: Arc<dyn Notifier>,
     forwards: Arc<forward::Forwards>,
+    sessions: Arc<session::Sessions>,
     /// True when a file was at `config.config_file` at start.
     config_file_exists: bool,
 }
@@ -108,6 +110,7 @@ impl Daemon {
                 opener: Arc::new(opener),
                 notifier: Arc::new(notifier),
                 forwards: Arc::default(),
+                sessions: Arc::default(),
             }),
         }
     }
@@ -218,6 +221,26 @@ impl Inner {
                     } else {
                         self.rate_error()
                     }
+                }
+                Msg::Session => {
+                    let Some(alias) = &stamp else {
+                        return conn
+                            .send(&open_error(
+                                "sessions are accepted only on the relay socket",
+                            ))
+                            .await;
+                    };
+                    let _session = self.sessions.register(alias);
+                    conn.send(&Msg::OpenResult {
+                        forward_id: None,
+                        warnings: vec![],
+                        error: None,
+                    })
+                    .await?;
+                    // The Session lasts until the Wrapper closes the
+                    // connection; the guard drops it then.
+                    while let Ok(Some(_)) = conn.recv().await {}
+                    return Ok(());
                 }
                 Msg::AttachForward { forward_id } => {
                     return match self.forwards.attach(&forward_id, conn) {

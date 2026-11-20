@@ -96,6 +96,7 @@ async fn run_async(args: Vec<OsString>, env: WrapperEnv) -> ExitCode {
     ];
     full.extend(args);
     let relay = env.relay_socket.clone();
+    let alias_for_session = alias.clone();
     let accept = tokio::spawn(async move {
         loop {
             let stream = match listener.accept().await {
@@ -116,7 +117,11 @@ async fn run_async(args: Vec<OsString>, env: WrapperEnv) -> ExitCode {
             });
         }
     });
+    // Hold the Session connection open until ssh exits; dropping it ends
+    // the Session on the Daemon.
+    let session = register_session(&env.relay_socket, alias_for_session).await;
     let code = supervise(&env.ssh, &full).await;
+    drop(session);
     // This ends the accept loop only. Relay tasks already started keep
     // running until their connection closes (or the runtime drops on return).
     accept.abort();
@@ -133,6 +138,32 @@ async fn daemon_answers(relay: &Path) -> bool {
         tokio::time::timeout(ANSWER_TIMEOUT, attempt).await,
         Ok(Some(_))
     )
+}
+
+/// Registers the Session on the relay socket (protocol 1.1). `None` when
+/// the Daemon speaks 1.0 or does not accept it: URLs still open then, and
+/// only `rowser status` misses the Session.
+async fn register_session(relay: &Path, alias: String) -> Option<Conn<UnixStream>> {
+    let attempt = async {
+        let stream = UnixStream::connect(relay).await.ok()?;
+        let mut conn = Conn::connect(stream, Hello::current()).await.ok()?;
+        if !conn.peer_version().has_sessions() {
+            return None;
+        }
+        conn.send(&Msg::HostStamp { alias }).await.ok()?;
+        conn.send(&Msg::Session).await.ok()?;
+        match conn.recv().await.ok()? {
+            Some(Msg::OpenResult { error: None, .. }) => Some(conn),
+            other => {
+                tracing::debug!("session not registered: {other:?}");
+                None
+            }
+        }
+    };
+    tokio::time::timeout(ANSWER_TIMEOUT, attempt)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// The Host alias: the `host` line of `ssh -G <args>`, else the argv

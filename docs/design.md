@@ -204,7 +204,11 @@ src/
   `rowser: the daemon is not running`. `control::run_status(StatusArgs, out, err)` is
   `rowser status`; the runtime directory comes from `platform::runtime_dir`, as for `rowser ssh`.
 - The Wrapper registers its Session with the Daemon (protocol 1.1) and keeps that connection
-  open until `ssh` exits, so `rowser status` lists Sessions.
+  open until `ssh` exits, so `rowser status` lists Sessions. On the relay socket, after the
+  Host stamp, it sends `Msg::Session`; the Daemon answers `OpenResult` and keeps the Session in
+  `daemon/session.rs` until the connection closes. The Wrapper skips this when the Daemon's
+  hello is 1.0 (`Conn::peer_version`). The shown Target is `Routes::session_target(alias)`:
+  the alias's first Route without `match`, else `[default]`.
 - Dependency direction: `cli ─► config, routes, browsers, control`; `control ─► protocol,
   platform`; `daemon ─► config, routes, browsers, protocol`; `routes ─► config` types only;
   `doctor ─► config, routes, browsers`.

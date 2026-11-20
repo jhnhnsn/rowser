@@ -30,6 +30,11 @@ impl Version {
         Version { major, minor }
     }
 
+    /// True for 1.1 and later of the same major: the peer knows Sessions.
+    pub fn has_sessions(self) -> bool {
+        self.major == VERSION.major && self.minor >= 1
+    }
+
     pub fn major(self) -> u32 {
         self.major
     }
@@ -107,6 +112,10 @@ pub enum Msg {
         forward_id: String,
         conn_id: u64,
     },
+    /// Relay socket only (1.1), right after the Host stamp: the Wrapper
+    /// registers its Session. The reply is an `OpenResult`. The Session
+    /// lasts until the connection closes; no other message follows.
+    Session,
     Ping,
     Pong {
         version: Version,
@@ -127,7 +136,21 @@ pub enum Msg {
         paused: bool,
         #[serde(default)]
         forwards: Vec<ForwardInfo>,
+        #[serde(default)]
+        sessions: Vec<SessionInfo>,
     },
+}
+
+/// One connected Wrapper, as `rowser status` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// The Host alias of the Host stamp.
+    pub host: String,
+    /// Seconds since the Session registered.
+    pub age_secs: u64,
+    /// The Target the Host alias's Routes give an `https` URL that no
+    /// `match` list names.
+    pub target: String,
 }
 
 impl Msg {
@@ -196,6 +219,8 @@ pub struct Conn<S> {
     stream: BufReader<S>,
     /// Set after `LineTooLong`: the stream is mid-line and cannot be framed.
     broken: bool,
+    /// The peer's hello version, set by the handshake.
+    peer: Version,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
@@ -203,6 +228,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
         Conn {
             stream: BufReader::new(stream),
             broken: false,
+            peer: VERSION,
         }
     }
 
@@ -212,7 +238,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
         conn.write(&hello).await?;
         let peer: Hello = conn.read().await?.ok_or(Error::Closed)?;
         require_same_major(hello.version, peer.version)?;
+        conn.peer = peer.version;
         Ok(conn)
+    }
+
+    /// The protocol version the peer sent in its hello.
+    pub fn peer_version(&self) -> Version {
+        self.peer
     }
 
     /// Reads the peer's hello and replies with ours, even on a major mismatch
@@ -222,6 +254,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
         let peer: Hello = conn.read().await?.ok_or(Error::Closed)?;
         conn.write(&Hello::current()).await?;
         require_same_major(VERSION, peer.version)?;
+        conn.peer = peer.version;
         Ok((conn, peer))
     }
 

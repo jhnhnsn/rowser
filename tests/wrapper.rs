@@ -385,6 +385,90 @@ fn rowser_ssh_refuses_a_relative_rowser_runtime_dir() {
     assert_eq!(argv(&dir.0), ["h"]);
 }
 
+/// `rowser status --json` against the runtime directory `run`.
+async fn status_json(run: PathBuf) -> serde_json::Value {
+    tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = rowser::control::run_status(
+            rowser::control::StatusArgs {
+                runtime_dir: Ok(run),
+                json: true,
+            },
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, ExitCode::SUCCESS, "{}", String::from_utf8_lossy(&err));
+        serde_json::from_slice(&out).unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_lists_the_session_while_ssh_runs_and_drops_it_after() {
+    let s = setup(Some("g14"), 0, true).await;
+    let wrapper = spawn_wrapper(&["g14"], s.env.clone());
+    argv(&s.dir.0);
+    let v = status_json(s.env.session_dir.clone()).await;
+    let sessions = v["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{v}");
+    assert_eq!(sessions[0]["host"], "g14");
+    assert_eq!(sessions[0]["target"], "system");
+    assert!(sessions[0]["age_secs"].as_u64().unwrap() < 60);
+
+    std::fs::write(s.dir.0.join("done"), "").unwrap();
+    assert_eq!(wrapper.join().unwrap(), ExitCode::SUCCESS);
+    for _ in 0..50 {
+        if status_json(s.env.session_dir.clone()).await["sessions"] == serde_json::json!([]) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the session is still in status");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_1_0_daemon_gets_no_session_and_the_tunnel_still_works() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let dir = TmpDir::new();
+    let run = dir.0.join("run");
+    std::fs::create_dir(&run).unwrap();
+    let listener = tokio::net::UnixListener::bind(run.join(RELAY_SOCKET)).unwrap();
+    // A 1.0 Daemon: answers each hello with 1.0 and records every line.
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = lines.clone();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let (r, mut w) = stream.into_split();
+                let mut r = BufReader::new(r).lines();
+                let _hello = r.next_line().await;
+                w.write_all(b"{\"version\":{\"major\":1,\"minor\":0}}\n")
+                    .await
+                    .unwrap();
+                while let Ok(Some(l)) = r.next_line().await {
+                    seen.lock().unwrap().push(l);
+                }
+            });
+        }
+    });
+    let env = WrapperEnv {
+        ssh: fake_ssh(&dir.0, Some("g14"), 0),
+        relay_socket: run.join(RELAY_SOCKET),
+        session_dir: run,
+    };
+    let wrapper = spawn_wrapper(&["g14"], env);
+    let got = argv(&dir.0);
+    assert_eq!(got[0], "-R");
+    std::fs::write(dir.0.join("done"), "").unwrap();
+    assert_eq!(wrapper.join().unwrap(), ExitCode::SUCCESS);
+    let seen = lines.lock().unwrap().clone();
+    assert!(seen.iter().all(|l| !l.contains("Session")), "{seen:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn without_a_daemon_ssh_runs_without_the_forward() {
     let s = setup(Some("h"), 3, false).await;

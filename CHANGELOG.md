@@ -8,6 +8,11 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser status` lists Sessions: each `rowser ssh` that is connected to the Daemon, with its
+  Host alias, how long it has run, and the Target its first Route without `match` gives
+  (`system` with no Route). A Session ends when `ssh` exits. A newer `rowser ssh` still works
+  with an older (protocol 1.0) Daemon; it then does not show in `rowser status`.
+  ([#44](https://github.com/jhnhnsn/rowser/issues/44))
 - On a Remote host with a desktop, `xdg-open` linked to rowser no longer breaks local browsing:
   when no Tunnel answers and `WAYLAND_DISPLAY` or `DISPLAY` is set, the Shim hands the URL to
   the first `xdg-open` on `PATH` that is not rowser itself and exits with its exit code. With no

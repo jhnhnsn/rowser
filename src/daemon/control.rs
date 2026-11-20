@@ -3,7 +3,7 @@
 use tokio::net::UnixStream;
 
 use super::{open_error, pong, Inner};
-use crate::protocol::{Conn, Hello, Msg};
+use crate::protocol::{Conn, Hello, Msg, SessionInfo};
 
 impl Inner {
     pub(super) async fn handle_control(&self, stream: UnixStream) -> crate::protocol::Result<()> {
@@ -38,6 +38,16 @@ impl Inner {
             // `rowser pause` (#49) sets this; until then the Daemon never pauses.
             paused: false,
             forwards: self.forwards.list(),
+            sessions: self
+                .sessions
+                .list()
+                .into_iter()
+                .map(|(host, start)| SessionInfo {
+                    target: self.config.routes.session_target(&host).to_string(),
+                    age_secs: start.elapsed().as_secs(),
+                    host,
+                })
+                .collect(),
         }
     }
 }

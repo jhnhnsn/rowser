@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::net::UnixStream;
 
-use crate::protocol::{Conn, ForwardInfo, Hello, Msg, CONTROL_SOCKET};
+use crate::protocol::{Conn, ForwardInfo, Hello, Msg, SessionInfo, CONTROL_SOCKET};
 
 /// The line every control command prints when the Daemon does not answer.
 pub const NOT_RUNNING: &str = "rowser: the daemon is not running";
@@ -98,6 +98,7 @@ pub fn run_status(args: StatusArgs, out: &mut impl Write, err: &mut impl Write) 
         config_file_exists,
         paused,
         forwards,
+        sessions,
     } = reply
     else {
         let text = match reply {
@@ -114,6 +115,7 @@ pub fn run_status(args: StatusArgs, out: &mut impl Write, err: &mut impl Write) 
         config_file,
         config_file_exists,
         paused,
+        sessions,
         forwards,
     };
     let written = if args.json {
@@ -138,6 +140,7 @@ struct StatusView {
     config_file: Option<String>,
     config_file_exists: bool,
     paused: bool,
+    sessions: Vec<SessionInfo>,
     forwards: Vec<ForwardInfo>,
 }
 
@@ -156,6 +159,14 @@ fn write_text(out: &mut impl Write, s: &StatusView) -> std::io::Result<()> {
         "paused:            {}",
         if s.paused { "yes" } else { "no" }
     )?;
+    if s.sessions.is_empty() {
+        writeln!(out, "sessions:          none")?;
+    } else {
+        writeln!(out, "sessions:")?;
+        for x in &s.sessions {
+            writeln!(out, "  {}  {}  {}", x.host, age(x.age_secs), x.target)?;
+        }
+    }
     if s.forwards.is_empty() {
         return writeln!(out, "callback forwards: none");
     }
