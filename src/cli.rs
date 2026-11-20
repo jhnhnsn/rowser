@@ -63,6 +63,12 @@ pub enum Command {
     },
     /// Check the remote setup.
     Doctor,
+    /// List the browsers and Profiles found on this machine.
+    Browsers {
+        /// Print the list as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage rowser on a remote host.
     Remote {
         #[command(subcommand)]
@@ -119,6 +125,7 @@ impl Command {
             Command::Open { .. } => "open",
             Command::Forward { .. } => "forward",
             Command::Doctor => "doctor",
+            Command::Browsers { .. } => "browsers",
             Command::Remote { .. } => "remote install",
             Command::Keeper { .. } => "__keeper",
         }
@@ -174,6 +181,7 @@ pub fn run(command: Command) -> ExitCode {
         Command::Ssh { args } => ssh(args),
         Command::Forward { port } => crate::shim::forward_main(port),
         Command::Doctor => crate::doctor::doctor_main(),
+        Command::Browsers { json } => crate::browsers::browsers_main(json),
         Command::Keeper {
             socket,
             forward_id,

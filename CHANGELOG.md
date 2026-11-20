@@ -8,6 +8,10 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser browsers` lists the browsers found on this machine, with their short names (such as
+  `chrome` or `firefox`) and Profiles; `--json` prints the same list as JSON. On macOS it looks
+  for the known browsers in `/Applications` and `~/Applications`; on Linux it reads the
+  `.desktop` files that handle `https`. ([#41](https://github.com/jhnhnsn/rowser/issues/41))
 - `rowser remote install` now checks the downloaded release asset against the release's
   `SHA256SUMS` before it installs anything. A mismatch, a missing entry or a missing
   `SHA256SUMS` stops the install with a clear error and leaves the Remote host unchanged.

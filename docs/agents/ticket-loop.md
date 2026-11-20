@@ -53,6 +53,9 @@ rowser is a CLI; test it from the terminal.
   `HOME` to a temp dir. `--local-build <path>` skips the download; the hidden `--release-url
   <base>` points the download at a local HTTP server serving `rowser-<target>.tar.gz` and
   `SHA256SUMS` (`sha256sum` output; the download is refused without a matching entry).
+- `rowser browsers [--json]` reads `HOME`, `XDG_DATA_HOME`, `XDG_DATA_DIRS` and
+  `XDG_CONFIG_HOME` on Linux: set all four to a temp tree with fake `.desktop` files,
+  `Local State` and `~/.mozilla/firefox/profiles.ini` files. It only reads; it opens nothing.
 - Unix socket paths are limited to about 104–108 bytes: put test sockets in a short temp dir
   (e.g. `/tmp/rw.XXXX`), never under a long scratchpad or worktree path; remove it afterwards.
 - Never open the real browser or show real desktop notifications in a test.

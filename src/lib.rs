@@ -1,5 +1,6 @@
 //! rowser: open URLs from SSH sessions in the local browser.
 
+pub mod browsers;
 pub mod callback;
 pub mod cli;
 pub mod daemon;
