@@ -8,6 +8,15 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- Routes can open a URL in a given browser and Profile: `open = "chrome:Work"`,
+  `"firefox:Dev"` or `"safari"`. A Profile is looked up by its folder name first, then by its
+  display name. On macOS rowser runs `open -b <bundle id>` (Chromium browsers get their
+  Profile with `--profile-directory`, Firefox with `-P`); on Linux it runs the browser's
+  desktop file `Exec` line, never through a shell. If the browser or Profile is missing, the
+  URL opens in `[default]` and the notification says so. `rowser route add --open chrome:Work`
+  writes the folder name (`chrome:Profile 2  # Work`), and `rowser route test` shows the
+  resolved browser and Profile, or the fallback.
+  ([#47](https://github.com/jhnhnsn/rowser/issues/47))
 - `rowser pause [--for <duration>]` (such as `30m`, `1h`, `2h30m`) stops the Daemon from
   opening URLs and starting `rowser forward`; `rowser resume` ends the pause. While paused,
   `xdg-open` on the remote host prints `rowser: paused; open this URL manually: <url>` and
