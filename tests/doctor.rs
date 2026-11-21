@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use common::TmpDir;
 use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
 use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET};
-use rowser::doctor::{run_doctor, DoctorEnv};
+use rowser::doctor::{run_doctor, DoctorEnv, FIX};
 use rowser::protocol::{Conn, Hello, Msg, Version};
 use tokio::net::UnixListener;
 
@@ -40,7 +40,8 @@ fn env(dir: &TmpDir, over: Option<PathBuf>) -> DoctorEnv<Vec<u8>> {
     .unwrap();
     std::fs::write(
         config.join("mimeapps.list"),
-        "[Default Applications]\nx-scheme-handler/https=rowser.desktop\n",
+        "[Default Applications]\nx-scheme-handler/http=rowser.desktop\n\
+         x-scheme-handler/https=rowser.desktop\n",
     )
     .unwrap();
     std::fs::create_dir_all(data.join("applications")).unwrap();
@@ -52,8 +53,6 @@ fn env(dir: &TmpDir, over: Option<PathBuf>) -> DoctorEnv<Vec<u8>> {
         home: Some(home),
         tunnel_dir: dir.0.join("tunnels"),
         socket_override: over,
-        config_home: Some(config),
-        data_home: Some(data),
         graphical: false,
         self_exe: Some(bin.join("rowser")),
         stdout: Vec::new(),
@@ -84,12 +83,15 @@ async fn round_trip_against_a_daemon_is_ok_and_exits_0() {
     assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
     let out = lines(e);
     assert_eq!(out.len(), 9, "{out:?}");
-    assert!(out[..7].iter().all(|l| l.starts_with("ok ")), "{out:?}");
+    assert!(out.iter().all(|l| l.starts_with("ok ")), "{out:?}");
     assert_eq!(
-        out[7],
+        line(&out, "tunnel"),
         format!("ok   tunnel: {}: daemon protocol 1.1", socket.display())
     );
-    assert_eq!(out[8], "ok   version: daemon and this rowser speak 1.1");
+    assert_eq!(
+        line(&out, "version"),
+        "ok   version: daemon and this rowser speak 1.1"
+    );
 }
 
 #[tokio::test]
@@ -103,15 +105,65 @@ async fn a_missing_default_browser_setup_warns_with_the_fix() {
     std::fs::remove_dir_all(home.join(".local/share")).unwrap();
     assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
     let out = lines(e);
-    let fix = "; fix: run `rowser remote install <host>` on the Local machine";
-    for (i, name) in [
-        (3, "environment.d"),
-        (4, "rowser.desktop"),
-        (5, "default browser"),
-    ] {
-        assert!(out[i].starts_with(&format!("warn {name}: ")), "{out:?}");
-        assert!(out[i].ends_with(fix), "{out:?}");
+    for name in ["environment.d", "rowser.desktop", "default browser"] {
+        let found: Vec<&String> = out
+            .iter()
+            .filter(|l| l.starts_with(&format!("warn {name}: ")))
+            .collect();
+        assert!(!found.is_empty(), "{name}: {out:?}");
+        assert!(found.iter().all(|l| l.ends_with(FIX)), "{out:?}");
     }
+    // One warning for each URL type.
+    assert_eq!(
+        out.iter()
+            .filter(|l| l.starts_with("warn default browser: "))
+            .count(),
+        2,
+        "{out:?}"
+    );
+}
+
+/// The line for check `name`.
+fn line<'a>(out: &'a [String], name: &str) -> &'a str {
+    out.iter()
+        .find(|l| l[5..].starts_with(&format!("{name}: ")))
+        .unwrap_or_else(|| panic!("no {name} line: {out:?}"))
+}
+
+#[tokio::test]
+async fn no_home_warns_and_skips_the_home_checks() {
+    let dir = TmpDir::new("doc");
+    let sock = dir.0.join("ok.sock");
+    fake_daemon(sock.clone(), Version::new(1, 1));
+    let mut e = env(&dir, Some(sock));
+    e.home = None;
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    assert_eq!(
+        line(&out, "PATH"),
+        "warn PATH: HOME is not set; cannot check ~/.local/bin"
+    );
+    assert_eq!(
+        line(&out, "default browser"),
+        "warn default browser: HOME is not set; cannot check the default browser"
+    );
+    assert!(!out.iter().any(|l| l.contains("environment.d")), "{out:?}");
+}
+
+#[tokio::test]
+async fn a_graphical_session_without_a_real_xdg_open_warns() {
+    let dir = TmpDir::new("doc");
+    let sock = dir.0.join("ok.sock");
+    fake_daemon(sock.clone(), Version::new(1, 1));
+    let mut e = env(&dir, Some(sock));
+    e.graphical = true;
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    assert_eq!(
+        line(&out, "fallback"),
+        "warn fallback: graphical session but no real xdg-open on PATH; \
+         fix: install the `xdg-utils` package (e.g. `sudo apt install xdg-utils`)"
+    );
 }
 
 #[tokio::test]
@@ -191,6 +243,6 @@ async fn warnings_alone_do_not_fail() {
     e.path = Some(dir.0.join("empty-bin").into_os_string());
     assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
     let out = lines(e);
-    assert!(out[0].starts_with("warn PATH: "), "{out:?}");
-    assert_eq!(out[2], "warn BROWSER: BROWSER is not set");
+    assert!(line(&out, "PATH").starts_with("warn PATH: "), "{out:?}");
+    assert_eq!(line(&out, "BROWSER"), "warn BROWSER: BROWSER is not set");
 }

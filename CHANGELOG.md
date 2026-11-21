@@ -15,10 +15,13 @@ All notable changes to rowser are listed here. The format follows
   `rowser activity` shows `paused`. A Daemon restart ends a pause.
   ([#49](https://github.com/jhnhnsn/rowser/issues/49))
 - `rowser doctor` on a Remote host also checks the default-browser setup:
-  `~/.config/environment.d/rowser.conf` sets `BROWSER` and `PATH`, `rowser.desktop` exists and is
-  the default handler for `https` links (from `xdg-mime query default`, else `mimeapps.list`), and,
+  `~/.config/environment.d/rowser.conf` sets `BROWSER=rowser` and puts `~/.local/bin` first on
+  `PATH`, `~/.local/share/applications/rowser.desktop` exists and is the default handler for
+  `http` and `https` links (from `xdg-mime query default`, else `~/.config/mimeapps.list`), and,
   with a graphical session, a real `xdg-open` exists for the fallback. Each failed check prints
-  one warning line with its fix (`rowser remote install <host>` on the Local machine).
+  one warning line with its fix: `rowser remote install <host>` on the Local machine, or the lines
+  to add when the file is one that install keeps (your own `environment.d` file, a symlinked
+  `mimeapps.list`).
   ([#52](https://github.com/jhnhnsn/rowser/issues/52))
 - `rowser route list|add|remove|move|test` manages the Routes in the config file.
   `route add <host> [--match <glob>]… --open <target> [--ask]` appends a Route, `remove <n>` and

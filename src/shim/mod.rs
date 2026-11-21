@@ -3,7 +3,7 @@
 
 mod keeper;
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -12,6 +12,7 @@ use url::Url;
 
 use crate::detect::{callback_ports, Procfs};
 use crate::discovery::find_tunnel_path;
+use crate::platform::real_xdg_open;
 use crate::protocol::Msg;
 pub use keeper::{keeper_main, run_keeper, KeeperArgs};
 
@@ -131,24 +132,6 @@ fn run_real_xdg_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> Option<ExitCo
 /// rowser on `PATH` passes the canonical-path check below. A Shim that sees
 /// this variable does not run `xdg-open`, so neither case loops.
 const FALLBACK_GUARD: &str = "ROWSER_SHIM_FALLBACK";
-
-/// The first executable `xdg-open` in `search_path` whose canonical path is
-/// not the canonical path of `self_exe`.
-pub(crate) fn real_xdg_open(search_path: &OsStr, self_exe: Option<&Path>) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let own = self_exe.and_then(|p| std::fs::canonicalize(p).ok());
-    std::env::split_paths(search_path)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join("xdg-open"))
-        .find(|candidate| {
-            let Ok(real) = std::fs::canonicalize(candidate) else {
-                return false;
-            };
-            let executable = std::fs::metadata(&real)
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
-            executable && Some(&real) != own.as_ref()
-        })
-}
 
 /// What `request_forward` did.
 enum Outcome {

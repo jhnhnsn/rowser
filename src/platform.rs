@@ -1,7 +1,7 @@
 //! Default paths and commands per OS.
 
-use std::ffi::OsString;
-use std::path::PathBuf;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
 /// Names under which rowser acts as `rowser open` (installed as symlinks).
 pub const BROWSER_NAMES: [&str; 3] = ["xdg-open", "sensible-browser", "www-browser"];
@@ -54,6 +54,36 @@ pub(crate) fn runtime_dir_from(var: impl Fn(&str) -> Option<OsString>) -> Result
         )?;
         Ok(PathBuf::from(dir).join("rowser"))
     }
+}
+
+/// The first line of the `environment.d` file `rowser remote install`
+/// writes. A file without it is the user's own: rowser keeps it.
+pub const ENVIRONMENT_D_MARK: &str =
+    "# Written by rowser remote install; rowser overwrites this file.";
+
+/// True when `path` is a file with an execute bit, as a shell `PATH` search needs.
+pub fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// The first `<dir>/<name>` on `path` (absolute dirs only) that is
+/// executable and that `accept` takes.
+pub fn find_on_path(path: &OsStr, name: &str, accept: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|d| d.is_absolute())
+        .map(|d| d.join(name))
+        .find(|f| is_executable(f) && accept(f))
+}
+
+/// The first executable `xdg-open` on `search_path` whose canonical path is
+/// not the canonical path of `self_exe`: the real one, for the Shim's local
+/// fallback.
+pub fn real_xdg_open(search_path: &OsStr, self_exe: Option<&Path>) -> Option<PathBuf> {
+    let own = self_exe.and_then(|p| std::fs::canonicalize(p).ok());
+    find_on_path(search_path, "xdg-open", |f| {
+        std::fs::canonicalize(f).is_ok_and(|real| Some(&real) != own.as_ref())
+    })
 }
 
 /// The default `--open-command`.

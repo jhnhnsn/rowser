@@ -207,9 +207,7 @@ pub enum DefaultBy {
     MimeappsList,
 }
 
-/// The first line of the `environment.d` file rowser writes. A file without
-/// it is the user's own: rowser keeps it.
-const ENVIRONMENT_D_MARK: &str = "# Written by rowser remote install; rowser overwrites this file.";
+use crate::platform::ENVIRONMENT_D_MARK;
 
 /// The whole `~/.config/environment.d/rowser.conf` rowser writes: the mark,
 /// then `BROWSER` and `PATH`. `$HOME` and `$PATH` are literal, for
