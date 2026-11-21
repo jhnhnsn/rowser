@@ -160,7 +160,8 @@ or none). A kept user file, a failed write or a failed `xdg-mime` is a warning, 
 ## Dependency direction
 
 ```
-cli ─► daemon, shim, wrapper, service, remote_install, doctor
+cli ─► daemon, shim, wrapper, service, remote_install, doctor, route
+route ─► config, routes, control
 daemon ─► protocol
 shim ─► protocol, discovery, detect
 wrapper ─► protocol
@@ -190,6 +191,7 @@ src/
   config/            config file: path rules, load + validate (toml), edit in place (toml_edit)
   routes/            Route matching: (Host alias or unverified, URL) -> (Route index, Target); pure
   browsers/          browser + Profile discovery per OS; resolves a Target to an argv
+  route.rs           `rowser route list|add|remove|move|test`: edits the config file, then reloads
   daemon/control.rs  internal: control socket handlers (status, activity, pause, pending, reload)
   daemon/activity.rs internal: in-memory ring of the last 200 requests
   daemon/session.rs  internal: Sessions, one per Wrapper control connection
@@ -240,7 +242,8 @@ src/
   Wrapper copies raw Tunnel bytes there after the Host stamp. The Wrapper skips this when no
   control socket answers or the Daemon's hello is 1.0 (`Conn::peer_version`). The shown Target is `Routes::session_target(alias)`:
   the alias's first Route without `match`, else `[default]`.
-- Dependency direction: `cli ─► config, routes, browsers, control`; `control ─► protocol,
+- Dependency direction: `cli ─► config, routes, browsers, control, route`;
+  `route ─► config, routes, control`; `control ─► protocol,
   platform`; `daemon ─► config, routes, browsers, protocol`; `routes ─► config` types only;
   `doctor ─► config, routes, browsers`.
 - `rowser route`: `route::run_route(RouteArgs { config_file, runtime_dir, action }, out, err)`.

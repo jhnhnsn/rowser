@@ -212,7 +212,14 @@ pub fn reload(runtime_dir: &Path) -> Result<usize, RequestError> {
     }
 }
 
-/// `rowser reload`: prints `rowser: config reloaded (<n> routes)`.
+/// The line `rowser reload` and the `rowser route` commands print after a
+/// reload: `rowser: config reloaded (<n> routes)`, `(1 route)` for one.
+pub fn reloaded_line(routes: usize) -> String {
+    let s = if routes == 1 { "" } else { "s" };
+    format!("rowser: config reloaded ({routes} route{s})")
+}
+
+/// `rowser reload`: prints `reloaded_line`.
 pub fn run_reload(
     runtime_dir: Result<PathBuf, String>,
     out: &mut impl Write,
@@ -222,7 +229,7 @@ pub fn run_reload(
         .map_err(RequestError::Other)
         .and_then(|dir| reload(&dir));
     match result {
-        Ok(n) => match writeln!(out, "rowser: config reloaded ({n} routes)") {
+        Ok(n) => match writeln!(out, "{}", reloaded_line(n)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => ExitCode::FAILURE,
         },

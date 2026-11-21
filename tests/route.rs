@@ -166,6 +166,102 @@ fn move_and_remove_keep_the_comments() {
 }
 
 #[test]
+fn move_keeps_one_blank_line_between_routes_and_none_at_the_top() {
+    let dir = TmpDir::new("rt");
+    let file = dir.0.join("config.toml");
+    std::fs::write(
+        &file,
+        "# r1\n[[route]]\nhost = \"g14\"\nopen = \"system\"\n",
+    )
+    .unwrap();
+    let run = dir.0.join("run");
+    route(&file, &run, add("db1", &[], "firefox", false));
+    let (code, _, err) = route(&file, &run, RouteAction::Move { n: 2, to: 1 });
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "[[route]]\nhost = \"db1\"\nopen = \"firefox\"\n\n\
+         # r1\n[[route]]\nhost = \"g14\"\nopen = \"system\"\n"
+    );
+}
+
+const HEADED: &str = "# my routes, by hand\n\n\
+                      # the laptop\n[[route]]\nhost = \"g14\"\nopen = \"system\"\n\n\
+                      [[route]]\nhost = \"db1\"\nopen = \"firefox\"\n";
+
+#[test]
+fn the_file_header_stays_at_the_top_on_move_and_remove() {
+    let dir = TmpDir::new("rt");
+    let file = dir.0.join("config.toml");
+    let run = dir.0.join("run");
+    std::fs::write(&file, HEADED).unwrap();
+    let (code, _, err) = route(&file, &run, RouteAction::Move { n: 2, to: 1 });
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "# my routes, by hand\n\n\
+         [[route]]\nhost = \"db1\"\nopen = \"firefox\"\n\n\
+         # the laptop\n[[route]]\nhost = \"g14\"\nopen = \"system\"\n"
+    );
+
+    std::fs::write(&file, HEADED).unwrap();
+    let (code, _, err) = route(&file, &run, RouteAction::Remove { n: 1 });
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "# my routes, by hand\n\n[[route]]\nhost = \"db1\"\nopen = \"firefox\"\n"
+    );
+}
+
+#[test]
+fn remove_route_1_of_hand_takes_its_comment_and_keeps_default() {
+    // HAND has no blank line under its first comment: the comment is
+    // Route 1's own, so it goes with Route 1.
+    let dir = TmpDir::new("rt");
+    let file = dir.0.join("config.toml");
+    std::fs::write(&file, HAND).unwrap();
+    let run = dir.0.join("run");
+    let (code, _, err) = route(&file, &run, RouteAction::Remove { n: 1 });
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "[default]\nopen = \"system\"\n"
+    );
+}
+
+#[test]
+fn list_with_no_file_shows_only_the_fallbacks() {
+    let dir = TmpDir::new("rt");
+    let file = dir.0.join("missing/config.toml");
+    let run = dir.0.join("run");
+    assert_eq!(list(&file, &run), "[unverified]  ask\n[default]  system\n");
+    assert!(!file.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_change_keeps_a_symlinked_file_and_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TmpDir::new("rt");
+    let real = dir.0.join("dotfiles/config.toml");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::write(&real, HAND).unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let file = dir.0.join("config.toml");
+    std::os::unix::fs::symlink(&real, &file).unwrap();
+    let run = dir.0.join("run");
+    let (code, _, err) = route(&file, &run, add("db1", &[], "firefox", false));
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    assert!(std::fs::symlink_metadata(&file)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(std::fs::read_to_string(&real).unwrap().contains("db1"));
+    let mode = std::fs::metadata(&real).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
 fn remove_and_move_refuse_a_number_out_of_range() {
     let dir = TmpDir::new("rt");
     let file = dir.0.join("config.toml");
@@ -228,7 +324,9 @@ fn route_test_prints_the_target_and_the_route_and_needs_no_daemon() {
 
 const V6: IpAddr = IpAddr::V6(Ipv6Addr::LOCALHOST);
 
-/// The `route` label of the Daemon's activity entry for one Open request.
+/// The Target the Daemon opened and the `route` label of its activity
+/// entry for one Open request, as `<target>  <label>`, the `route test`
+/// form.
 async fn daemon_route(file: &Path, alias: Option<&str>, url: &str) -> String {
     let dir = TmpDir::new("rtd");
     let run: PathBuf = dir.0.join("run");
@@ -238,9 +336,10 @@ async fn daemon_route(file: &Path, alias: Option<&str>, url: &str) -> String {
         routes: rowser::routes::Routes::from_config(&rowser::config::load(file).unwrap()),
         ..DaemonConfig::default()
     };
+    let opener = RecordingOpener::default();
     let daemon = Daemon::new(
         config,
-        RecordingOpener::default(),
+        opener.clone(),
         ScriptedNotifier::new(Answer::Approve),
     );
     tokio::spawn(daemon.serve(direct, relay, control));
@@ -273,7 +372,16 @@ async fn daemon_route(file: &Path, alias: Option<&str>, url: &str) -> String {
     let Msg::ActivityReply { entries } = reply else {
         panic!("{reply:?}")
     };
-    entries[0].route.clone().unwrap()
+    let opens = opener.opens();
+    assert_eq!(opens.len(), 1, "{opens:?}");
+    // Until browser Targets open (#47), the Daemon opens a browser Target
+    // with `system` and names the picked Target in a warning.
+    let fell_back = entries[0]
+        .warnings
+        .iter()
+        .find_map(|w| w.strip_prefix("target `")?.split('`').next());
+    let target = fell_back.map_or_else(|| opens[0].1.to_string(), str::to_string);
+    format!("{target}  {}", entries[0].route.clone().unwrap())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -301,8 +409,42 @@ async fn a_change_reloads_a_running_daemon() {
     assert_eq!(code, ExitCode::SUCCESS, "{err}");
     assert_eq!(
         out,
-        "rowser: added route 1\nrowser: the daemon reloaded the config file (1 routes)\n"
+        "rowser: added route 1\nrowser: config reloaded (1 route)\n"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_daemon_that_refuses_the_reload_is_reported_and_the_change_stays() {
+    let dir = TmpDir::new("rt");
+    let file = dir.0.join("config.toml");
+    // The Daemon reads another, invalid file, so it refuses the reload.
+    let other = dir.0.join("other.toml");
+    std::fs::write(&other, "[[route]]\nhost = \"g14\"\nopen = 7\n").unwrap();
+    let run = dir.0.join("run");
+    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let config = DaemonConfig {
+        loopback: vec![V6],
+        config_file: Some(other),
+        ..DaemonConfig::default()
+    };
+    let daemon = Daemon::new(
+        config,
+        RecordingOpener::default(),
+        ScriptedNotifier::new(Answer::Approve),
+    );
+    tokio::spawn(daemon.serve(direct, relay, control));
+    let (f, r) = (file.clone(), run.clone());
+    let (code, out, err) =
+        tokio::task::spawn_blocking(move || route(&f, &r, add("g14", &[], "system", false)))
+            .await
+            .unwrap();
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    assert!(
+        out.starts_with("rowser: added route 1\nrowser: the daemon did not reload: "),
+        "{out}"
+    );
+    assert!(out.contains("line 3"), "{out}");
+    assert!(std::fs::read_to_string(&file).unwrap().contains("g14"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -311,9 +453,9 @@ async fn route_test_agrees_with_the_daemon() {
     let file = dir.0.join("config.toml");
     std::fs::write(
         &file,
-        "[[route]]\nhost = \"db1\"\nopen = \"system\"\n\
-         [[route]]\nhost = \"g14\"\nmatch = [\"*.google.com\"]\nopen = \"system\"\n\
-         [[route]]\nhost = \"g*\"\nopen = \"system\"\n\
+        "[[route]]\nhost = \"db1\"\nopen = \"firefox\"\n\
+         [[route]]\nhost = \"g14\"\nmatch = [\"*.google.com\"]\nopen = \"chrome:Work\"\n\
+         [[route]]\nhost = \"g*\"\nopen = \"safari\"\n\
          [unverified]\nopen = \"system\"\n",
     )
     .unwrap();
@@ -333,7 +475,7 @@ async fn route_test_agrees_with_the_daemon() {
             .await
             .unwrap();
         assert_eq!(code, ExitCode::SUCCESS, "{err}");
-        let got = out.trim_end().split("  ").nth(1).unwrap().to_string();
+        let got = out.trim_end().to_string();
         assert_eq!(got, want, "{alias:?} {url}");
     }
 }

@@ -197,9 +197,116 @@ fn route_array(doc: &mut toml_edit::DocumentMut) -> &mut toml_edit::ArrayOfTable
             toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
         );
     }
+    // `edit_doc` parsed the text as a valid file first, and `parse` refuses
+    // a `route` key that is not `[[route]]`.
     doc["route"]
         .as_array_of_tables_mut()
         .expect("a valid file has `route` as [[route]]")
+}
+
+/// The table that renders first in the file.
+enum Top {
+    Route(usize),
+    Table(String),
+}
+
+/// Finds the table at the top of the file; `None` when key-values come
+/// first or the file has no tables.
+fn top(doc: &toml_edit::DocumentMut) -> Option<Top> {
+    if doc.iter().any(|(_, item)| item.is_value()) {
+        return None;
+    }
+    let mut best: Option<(usize, Top)> = None;
+    let mut consider = |pos: Option<usize>, t: Top| {
+        let pos = pos.unwrap_or(usize::MAX);
+        if best.as_ref().is_none_or(|(p, _)| pos < *p) {
+            best = Some((pos, t));
+        }
+    };
+    for (key, item) in doc.iter() {
+        match item {
+            toml_edit::Item::Table(t) => consider(t.position(), Top::Table(key.to_string())),
+            toml_edit::Item::ArrayOfTables(a) if key == "route" => {
+                for (i, t) in a.iter().enumerate() {
+                    consider(t.position(), Top::Route(i));
+                }
+            }
+            _ => {}
+        }
+    }
+    best.map(|(_, t)| t)
+}
+
+fn top_table_mut<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    top: &Top,
+) -> Option<&'a mut toml_edit::Table> {
+    match top {
+        Top::Route(i) => route_array(doc).get_mut(*i),
+        Top::Table(k) => doc.get_mut(k)?.as_table_mut(),
+    }
+}
+
+fn prefix(t: &toml_edit::Table) -> String {
+    t.decor()
+        .prefix()
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// `text` without its leading blank lines.
+fn trim_blank_lines(text: &str) -> &str {
+    let mut rest = text;
+    while let Some(end) = rest.find('\n') {
+        if !rest[..end].trim().is_empty() {
+            break;
+        }
+        rest = &rest[end + 1..];
+    }
+    rest
+}
+
+/// Takes the file header off the top Route: the part of its comments up to
+/// the last blank line. The rest stays with the Route.
+fn take_header(doc: &mut toml_edit::DocumentMut) -> String {
+    let Some(Top::Route(i)) = top(doc) else {
+        return String::new();
+    };
+    let Some(t) = route_array(doc).get_mut(i) else {
+        return String::new();
+    };
+    let p = prefix(t);
+    let Some(cut) = p.rfind("\n\n").or_else(|| p.rfind("\n\r\n")) else {
+        return String::new();
+    };
+    let cut = p[cut..]
+        .find(|c: char| !c.is_whitespace())
+        .map_or(p.len(), |n| cut + n);
+    let (header, rest) = p.split_at(cut);
+    t.decor_mut().set_prefix(rest);
+    header.to_string()
+}
+
+/// Gives each Route one blank line above it and the top table none, then
+/// puts `header` back at the top of the file.
+fn tidy(doc: &mut toml_edit::DocumentMut, header: &str) {
+    for t in route_array(doc).iter_mut() {
+        let p = format!("\n{}", trim_blank_lines(&prefix(t)));
+        t.decor_mut().set_prefix(p);
+    }
+    match top(doc) {
+        Some(top) => {
+            if let Some(t) = top_table_mut(doc, &top) {
+                let p = format!("{header}{}", trim_blank_lines(&prefix(t)));
+                t.decor_mut().set_prefix(p);
+            }
+        }
+        None => {
+            let trailing = doc.trailing().as_str().unwrap_or("").to_string();
+            doc.set_trailing(format!("{header}{trailing}"));
+        }
+    }
 }
 
 /// Gives the edited text after it checks that it is a valid file.
@@ -217,9 +324,10 @@ fn check_number(n: usize, count: usize) -> Result<usize, String> {
 }
 
 /// Appends `route` as a new `[[route]]` to the config text. Comments and
-/// layout stay. Refuses an invalid text or result.
-pub fn add_route(text: &str, route: &Route) -> Result<String, String> {
-    let (mut doc, _) = edit_doc(text)?;
+/// layout stay. Gives the new text and the new Route's number. Refuses an
+/// invalid text or result.
+pub fn add_route(text: &str, route: &Route) -> Result<(String, usize), String> {
+    let (mut doc, count) = edit_doc(text)?;
     let mut t = toml_edit::Table::new();
     t["host"] = toml_edit::value(route.host.as_str());
     if !route.matches.is_empty() {
@@ -234,23 +342,27 @@ pub fn add_route(text: &str, route: &Route) -> Result<String, String> {
         t["ask"] = toml_edit::value(true);
     }
     route_array(&mut doc).push(t);
-    finish(&doc)
+    Ok((finish(&doc)?, count + 1))
 }
 
-/// Removes Route `n` (from 1) from the config text.
+/// Removes Route `n` (from 1) from the config text. The file header (the
+/// comments above a blank line at the top) stays.
 pub fn remove_route(text: &str, n: usize) -> Result<String, String> {
     let (mut doc, count) = edit_doc(text)?;
     let i = check_number(n, count)?;
+    let header = take_header(&mut doc);
     route_array(&mut doc).remove(i);
+    tidy(&mut doc, &header);
     finish(&doc)
 }
 
 /// Moves Route `n` to place `to` (both from 1) in the config text. Each
-/// Route keeps its comments.
+/// Route keeps its comments; the file header stays at the top.
 pub fn move_route(text: &str, n: usize, to: usize) -> Result<String, String> {
     let (mut doc, count) = edit_doc(text)?;
     let from = check_number(n, count)?;
     let to = check_number(to, count)?;
+    let header = take_header(&mut doc);
     let routes = route_array(&mut doc);
     let positions: Vec<Option<usize>> = routes.iter().map(|t| t.position()).collect();
     let mut tables: Vec<toml_edit::Table> = routes.iter().cloned().collect();
@@ -264,20 +376,38 @@ pub fn move_route(text: &str, n: usize, to: usize) -> Result<String, String> {
         }
         routes.push(t);
     }
+    tidy(&mut doc, &header);
     finish(&doc)
 }
 
 /// Writes `text` to `path` through a temp file and a rename, so the file is
-/// never half written. Creates the directory when missing.
+/// never half written. Creates the directory when missing. A symlinked
+/// file stays a symlink (the write goes to its target), and the file keeps
+/// its permissions.
 pub fn write(path: &Path, text: &str) -> Result<(), String> {
     let fail = |e: std::io::Error| format!("{}: {e}", path.display());
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(fail)?;
     }
+    let (path, old) = match std::fs::canonicalize(path) {
+        Ok(real) => {
+            let perms = std::fs::metadata(&real).map_err(fail)?.permissions();
+            (real, Some(perms))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (path.to_path_buf(), None),
+        Err(e) => return Err(fail(e)),
+    };
+    let path = path.as_path();
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(".tmp{}", std::process::id()));
     let tmp = PathBuf::from(tmp);
     std::fs::write(&tmp, text).map_err(fail)?;
+    if let Some(perms) = old {
+        if let Err(e) = std::fs::set_permissions(&tmp, perms) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(fail(e));
+        }
+    }
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         fail(e)
