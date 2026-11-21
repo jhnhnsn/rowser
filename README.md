@@ -3,6 +3,8 @@
 > [!WARNING]
 > rowser is under active development and has no release yet. Expect rough edges and breaking
 > changes until the first release.
+>
+> rowser runs on Linux and macOS for now. Other platforms come later.
 
 Open URLs from headless SSH hosts in your local browser — including OAuth logins that call back
 to `localhost` on the remote host.
