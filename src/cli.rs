@@ -77,6 +77,14 @@ pub enum Command {
     },
     /// Make the running Daemon read the config file again.
     Reload,
+    /// Refuse each URL and `rowser forward` until `rowser resume`.
+    Pause {
+        /// End the pause by itself after this long, such as 30m, 1h or 2h30m.
+        #[arg(long = "for", value_name = "DURATION", value_parser = crate::control::parse_duration)]
+        for_: Option<std::time::Duration>,
+    },
+    /// End a `rowser pause`.
+    Resume,
     /// Show the Daemon's last 200 requests, newest last.
     Activity {
         /// Keep printing new requests until Ctrl-C.
@@ -213,6 +221,8 @@ impl Command {
             Command::Browsers { .. } => "browsers",
             Command::Status { .. } => "status",
             Command::Reload => "reload",
+            Command::Pause { .. } => "pause",
+            Command::Resume => "resume",
             Command::Activity { .. } => "activity",
             Command::Route { .. } => "route",
             Command::Remote { .. } => "remote install",
@@ -273,6 +283,8 @@ pub fn run(command: Command) -> ExitCode {
         Command::Browsers { json } => crate::browsers::browsers_main(json),
         Command::Status { json } => crate::control::status_main(json),
         Command::Reload => crate::control::reload_main(),
+        Command::Pause { for_ } => crate::control::pause_main(for_),
+        Command::Resume => crate::control::resume_main(),
         Command::Activity { follow, json } => crate::control::activity_main(follow, json),
         Command::Route { action } => crate::route::route_main(action.into()),
         Command::Keeper {

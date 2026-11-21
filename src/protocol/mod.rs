@@ -154,10 +154,31 @@ pub enum Msg {
         #[serde(default)]
         config_file_exists: bool,
         paused: bool,
+        /// When a `rowser pause --for` ends, in seconds since the Unix epoch.
+        #[serde(default)]
+        paused_until: Option<u64>,
         #[serde(default)]
         forwards: Vec<ForwardInfo>,
         #[serde(default)]
         sessions: Vec<SessionInfo>,
+    },
+    /// Control socket only (1.1): `rowser pause [--for]`. The Daemon refuses
+    /// each Open request and `rowser forward` until `Resume`, until
+    /// `for_secs` pass, or until it restarts. The reply is `Paused`.
+    Pause {
+        #[serde(default)]
+        for_secs: Option<u64>,
+    },
+    /// The Daemon's answer to `Pause`: when the pause ends, in seconds since
+    /// the Unix epoch; `None` until `Resume`.
+    Paused {
+        until: Option<u64>,
+    },
+    /// Control socket only (1.1): `rowser resume`. The reply is `Resumed`.
+    Resume,
+    /// The Daemon's answer to `Resume`: false when it was not paused.
+    Resumed {
+        was_paused: bool,
     },
     /// Control socket only (1.1): `rowser activity`. The reply is an
     /// `ActivityReply`; with `follow`, an `ActivityUpdate` follows for each
@@ -197,6 +218,8 @@ pub enum Outcome {
     SchemeRefused,
     /// The Opener failed.
     BrowserMissing,
+    /// Refused because of `rowser pause`.
+    Paused,
 }
 
 impl Outcome {
@@ -209,6 +232,7 @@ impl Outcome {
             Outcome::RateLimited => "rate limited",
             Outcome::SchemeRefused => "scheme refused",
             Outcome::BrowserMissing => "browser missing",
+            Outcome::Paused => "paused",
         }
     }
 }
@@ -271,6 +295,10 @@ impl Msg {
                 | Msg::Activity { .. }
                 | Msg::ActivityReply { .. }
                 | Msg::ActivityUpdate { .. }
+                | Msg::Pause { .. }
+                | Msg::Paused { .. }
+                | Msg::Resume
+                | Msg::Resumed { .. }
         )
     }
 }

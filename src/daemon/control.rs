@@ -1,6 +1,7 @@
 //! The control socket handler: `rowser status` and later control commands.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::UnixStream;
 use tokio::sync::broadcast::error::RecvError;
@@ -8,7 +9,7 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::protocol::{Conn, Hello, Msg, SessionInfo};
 use crate::routes::Routes;
 
-use super::{open_error, pong, Inner, Loaded};
+use super::{open_error, pong, unix_now, Inner, Loaded, Pause};
 
 impl Inner {
     pub(super) async fn handle_control(&self, stream: UnixStream) -> crate::protocol::Result<()> {
@@ -18,6 +19,8 @@ impl Inner {
                 Msg::Ping => pong(),
                 Msg::Status => self.status(),
                 Msg::Reload => self.reload(),
+                Msg::Pause { for_secs } => self.pause(for_secs),
+                Msg::Resume => self.resume(),
                 Msg::Activity { follow } => {
                     let (entries, mut rx) = self.activity.watch();
                     conn.send(&Msg::ActivityReply { entries }).await?;
@@ -99,7 +102,47 @@ impl Inner {
         }
     }
 
+    /// `rowser pause [--for]`: replaces any pause in effect.
+    fn pause(&self, for_secs: Option<u64>) -> Msg {
+        let end = for_secs.map(|s| {
+            let at = tokio::time::Instant::now() + Duration::from_secs(s);
+            (at, unix_now() + s)
+        });
+        *self.pause.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pause { end });
+        tracing::info!(
+            "paused{}",
+            for_secs.map_or(String::new(), |s| format!(" for {s} seconds"))
+        );
+        Msg::Paused {
+            until: end.map(|(_, u)| u),
+        }
+    }
+
+    /// `rowser resume`.
+    fn resume(&self) -> Msg {
+        let was_paused = self.paused().is_some();
+        *self.pause.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        if was_paused {
+            tracing::info!("resumed");
+        }
+        Msg::Resumed { was_paused }
+    }
+
+    /// `Some` while a pause is in effect, with when it ends (Unix seconds)
+    /// for `rowser pause --for`. A pause whose time passed ends here.
+    pub(super) fn paused(&self) -> Option<Option<u64>> {
+        let mut pause = self.pause.lock().unwrap_or_else(|e| e.into_inner());
+        match &*pause {
+            Some(Pause { end: Some((at, _)) }) if tokio::time::Instant::now() >= *at => {
+                *pause = None;
+                None
+            }
+            p => p.as_ref().map(|p| p.end.map(|(_, u)| u)),
+        }
+    }
+
     fn status(&self) -> Msg {
+        let paused = self.paused();
         Msg::StatusReply {
             daemon_version: env!("CARGO_PKG_VERSION").into(),
             protocol_version: Hello::current().version(),
@@ -113,8 +156,8 @@ impl Inner {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .config_file_exists,
-            // `rowser pause` (#49) sets this; until then the Daemon never pauses.
-            paused: false,
+            paused: paused.is_some(),
+            paused_until: paused.flatten(),
             forwards: self.forwards.list(),
             sessions: self
                 .sessions

@@ -101,6 +101,7 @@ pub fn run_status(args: StatusArgs, out: &mut impl Write, err: &mut impl Write) 
         config_file,
         config_file_exists,
         paused,
+        paused_until,
         forwards,
         sessions,
     } = reply
@@ -119,6 +120,7 @@ pub fn run_status(args: StatusArgs, out: &mut impl Write, err: &mut impl Write) 
         config_file,
         config_file_exists,
         paused,
+        paused_until,
         sessions,
         forwards,
     };
@@ -144,6 +146,8 @@ struct StatusView {
     config_file: Option<String>,
     config_file_exists: bool,
     paused: bool,
+    /// When a `rowser pause --for` ends, in seconds since the Unix epoch.
+    paused_until: Option<u64>,
     sessions: Vec<SessionInfo>,
     forwards: Vec<ForwardInfo>,
 }
@@ -158,11 +162,12 @@ fn write_text(out: &mut impl Write, s: &StatusView) -> std::io::Result<()> {
     writeln!(out, "protocol version:  {}", s.protocol_version)?;
     writeln!(out, "runtime directory: {}", s.runtime_dir.display())?;
     writeln!(out, "config file:       {config_file}")?;
-    writeln!(
-        out,
-        "paused:            {}",
-        if s.paused { "yes" } else { "no" }
-    )?;
+    let paused = match (s.paused, s.paused_until) {
+        (false, _) => "no".to_string(),
+        (true, None) => "yes".to_string(),
+        (true, Some(u)) => format!("yes, until {}", local_time(u)),
+    };
+    writeln!(out, "paused:            {paused}")?;
     if s.sessions.is_empty() {
         writeln!(out, "sessions:          none")?;
     } else {
@@ -235,6 +240,130 @@ pub fn run_reload(
 /// `rowser reload` from the command line.
 pub fn reload_main() -> ExitCode {
     run_reload(
+        crate::platform::runtime_dir(),
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+}
+
+/// Reads a `rowser pause --for` duration: hours, minutes and seconds in
+/// that order, each once, such as `30m`, `1h`, `2h30m` or `45s`.
+pub fn parse_duration(text: &str) -> Result<Duration, String> {
+    let bad = || format!("invalid duration `{text}`: use a value such as 30m, 1h or 2h30m");
+    let mut secs: u64 = 0;
+    let mut digits = String::new();
+    let mut last_unit = 0;
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        let (rank, unit) = match c {
+            'h' => (1, 3600),
+            'm' => (2, 60),
+            's' => (3, 1),
+            _ => return Err(bad()),
+        };
+        if digits.is_empty() || rank <= last_unit {
+            return Err(bad());
+        }
+        let n: u64 = digits.parse().map_err(|_| bad())?;
+        secs = n
+            .checked_mul(unit)
+            .and_then(|v| secs.checked_add(v))
+            .ok_or_else(bad)?;
+        digits.clear();
+        last_unit = rank;
+    }
+    if !digits.is_empty() || secs == 0 {
+        return Err(bad());
+    }
+    Ok(Duration::from_secs(secs))
+}
+
+/// Prints `line`, or reports `e` as `rowser <name>: …`.
+fn finish(
+    name: &str,
+    result: Result<String, RequestError>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> ExitCode {
+    match result {
+        Ok(line) => match writeln!(out, "{line}") {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        },
+        Err(RequestError::Other(e)) => {
+            let _ = writeln!(err, "rowser {name}: {e}");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            let _ = writeln!(err, "{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `rowser pause [--for]`: prints `rowser: paused` or
+/// `rowser: paused until <local time>`.
+pub fn run_pause(
+    runtime_dir: Result<PathBuf, String>,
+    for_: Option<Duration>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> ExitCode {
+    let msg = Msg::Pause {
+        for_secs: for_.map(|d| d.as_secs()),
+    };
+    let result =
+        runtime_dir
+            .map_err(RequestError::Other)
+            .and_then(|dir| match request(&dir, &msg)? {
+                Msg::Paused { until: None } => Ok("rowser: paused".to_string()),
+                Msg::Paused { until: Some(u) } => {
+                    Ok(format!("rowser: paused until {}", local_time(u)))
+                }
+                other => Err(unexpected_reply(other)),
+            });
+    finish("pause", result, out, err)
+}
+
+/// `rowser resume`: prints `rowser: resumed`, or `rowser: not paused`.
+pub fn run_resume(
+    runtime_dir: Result<PathBuf, String>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> ExitCode {
+    let result = runtime_dir.map_err(RequestError::Other).and_then(|dir| {
+        match request(&dir, &Msg::Resume)? {
+            Msg::Resumed { was_paused: true } => Ok("rowser: resumed".to_string()),
+            Msg::Resumed { was_paused: false } => Ok("rowser: not paused".to_string()),
+            other => Err(unexpected_reply(other)),
+        }
+    });
+    finish("resume", result, out, err)
+}
+
+fn unexpected_reply(reply: Msg) -> RequestError {
+    RequestError::Other(match reply {
+        Msg::OpenResult { error: Some(e), .. } => e,
+        other => format!("unexpected reply {other:?}"),
+    })
+}
+
+/// `rowser pause` from the command line.
+pub fn pause_main(for_: Option<Duration>) -> ExitCode {
+    run_pause(
+        crate::platform::runtime_dir(),
+        for_,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+}
+
+/// `rowser resume` from the command line.
+pub fn resume_main() -> ExitCode {
+    run_resume(
         crate::platform::runtime_dir(),
         &mut std::io::stdout(),
         &mut std::io::stderr(),

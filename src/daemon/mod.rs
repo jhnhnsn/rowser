@@ -17,7 +17,7 @@ use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use tokio::net::{UnixListener, UnixStream};
@@ -110,6 +110,15 @@ struct Inner {
     /// The Routes in use and the file state: set at start, replaced by a
     /// valid `rowser reload`.
     loaded: RwLock<Loaded>,
+    /// `rowser pause`: in memory only, so a Daemon restart ends it.
+    pause: Mutex<Option<Pause>>,
+}
+
+/// A pause in effect.
+struct Pause {
+    /// For `rowser pause --for`: when it ends, on the tokio clock and in
+    /// Unix seconds.
+    end: Option<(tokio::time::Instant, u64)>,
 }
 
 impl Daemon {
@@ -129,6 +138,7 @@ impl Daemon {
                 forwards: Arc::default(),
                 sessions: Arc::default(),
                 activity: Arc::default(),
+                pause: Mutex::default(),
             }),
         }
     }
@@ -223,7 +233,12 @@ impl Inner {
                     callback_ports,
                 } => {
                     let host = notice_host(&stamp, reported_host);
-                    if limit.allow() {
+                    if self.paused().is_some() {
+                        let mut e = new_entry(RequestKind::Open, &host, Outcome::Paused);
+                        e.url = Some(url.clone());
+                        self.record(e, callback_ports);
+                        open_error(format!("paused; open this URL manually: {url}"))
+                    } else if limit.allow() {
                         self.open(&url, host, &callback_ports).await
                     } else {
                         let mut e = new_entry(RequestKind::Open, &host, Outcome::RateLimited);
@@ -237,7 +252,16 @@ impl Inner {
                     callback_ports,
                 } => {
                     let host = notice_host(&stamp, reported_host);
-                    if limit.allow() {
+                    if self.paused().is_some() {
+                        let ports = callback_ports
+                            .iter()
+                            .map(u16::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let e = new_entry(RequestKind::Forward, &host, Outcome::Paused);
+                        self.record(e, callback_ports);
+                        open_error(format!("paused; port {ports} was not forwarded"))
+                    } else if limit.allow() {
                         self.manual_forward(host, callback_ports).await
                     } else {
                         let e = new_entry(RequestKind::Forward, &host, Outcome::RateLimited);
@@ -323,7 +347,7 @@ impl Inner {
             if let Err((error, outcome)) = self.confirm(notice.clone()).await {
                 let e = new_entry(RequestKind::Forward, &notice.host, outcome);
                 self.record(e, ports);
-                return error;
+                return open_error(error);
             }
         }
         let created = self.forward(&ports, &notice.host);
@@ -387,7 +411,7 @@ impl Inner {
             {
                 entry.result = outcome;
                 self.activity.push(entry, None);
-                return error;
+                return open_error(error);
             }
         }
         // Bind the Callback forward only after approval, so a denied URL
@@ -437,8 +461,8 @@ impl Inner {
     }
 
     /// Waits for the user's answer. A denial, a timeout or a failed
-    /// Notifier gives the error reply for the Shim.
-    async fn confirm(&self, notice: Notice) -> Result<(), (Msg, Outcome)> {
+    /// Notifier gives the error text for the Shim.
+    async fn confirm(&self, notice: Notice) -> Result<(), (String, Outcome)> {
         let (not_approved, not_done) = match notice.subject {
             Subject::Url(_) => (NOT_APPROVED, "the URL was not opened"),
             Subject::Forward(_) => (FORWARD_NOT_APPROVED, "the port was not forwarded"),
@@ -451,20 +475,24 @@ impl Inner {
             // `confirm` gives only a bool, so a denial and a confirmation
             // that could not be shown look the same here; the Notifier logs
             // the second.
-            Ok(Ok(false)) => Err((open_error(not_approved), Outcome::Denied)),
-            Ok(Err(e)) => Err((
-                open_error(format!("confirmation failed: {e}")),
-                Outcome::Denied,
-            )),
+            Ok(Ok(false)) => Err((not_approved.to_string(), Outcome::Denied)),
+            Ok(Err(e)) => Err((format!("confirmation failed: {e}"), Outcome::Denied)),
             Err(_) => Err((
-                open_error(format!(
+                format!(
                     "no confirmation within {} seconds; {not_done}",
                     timeout.as_secs()
-                )),
+                ),
                 Outcome::TimedOut,
             )),
         }
     }
+}
+
+/// Seconds since the Unix epoch.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// A new `rowser activity` entry, stamped with the time now. The ring
@@ -473,9 +501,7 @@ fn new_entry(kind: RequestKind, host: &NoticeHost, result: Outcome) -> ActivityE
     let (host, unverified) = host.parts();
     ActivityEntry {
         id: 0,
-        time: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs()),
+        time: unix_now(),
         kind,
         host: host.to_string(),
         unverified,

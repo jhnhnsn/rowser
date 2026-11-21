@@ -53,7 +53,7 @@ accepts a `DataConn` only when its `forward_id` is the forward that sent that `D
 Control messages (protocol 1.1, control socket only; `Msg::is_control` names them, and the direct
 and relay sockets answer them with an `OpenResult` error and close the connection): `Status`,
 `StatusReply{daemon_version, protocol_version, config_file?, config_file_exists, paused,
-forwards: [ForwardInfo{port, host, unverified, age_secs}],
+paused_until?, forwards: [ForwardInfo{port, host, unverified, age_secs}],
 sessions: [SessionInfo{host, age_secs, target}]}`, and `Session{host}` (the Wrapper registers
 its Session; the reply is an `OpenResult`, and the Session lasts until that connection closes),
 `Reload` (the Daemon reads the config file again; the reply is `Reloaded{routes}` with the number
@@ -62,6 +62,8 @@ of Routes, or an `OpenResult` error with the file, line and reason, and the old 
 oldest first, and with `follow` an `ActivityUpdate{entry}` follows for each new entry and for an
 entry whose Callback forward closed, with the same `id` and now `open_secs`, until the client
 closes the connection).
+`Pause{for_secs?}` (the reply is `Paused{until?}`, Unix seconds) and `Resume` (the reply is
+`Resumed{was_paused}`).
 The Daemon keeps its Routes behind a lock, so a reload applies to the next Open request.
 `control::reload(runtime_dir)` is the client call `rowser reload` and the `rowser route`
 commands share. The control socket also answers `Ping`. `CONTROL_SOCKET` (the socket's file
@@ -224,6 +226,12 @@ src/
   `[unverified]` or `[default]`. `control::run_activity(ActivityArgs, out, err)` is the client;
   its text lines pass through `protocol::printable`, which the Notifier also uses, so a forged
   host name or URL cannot move text with control or bidi characters.
+- `rowser pause` / `rowser resume`: `Inner.pause` holds the pause in memory (a restart ends
+  it), with its end on the tokio clock (so tests use `start_paused`) and in Unix seconds for
+  `StatusReply.paused_until`. A pause whose end passed is cleared when next read. `handle`
+  checks it before the rate limit and answers with an `OpenResult` error
+  (`paused; open this URL manually: <url>`), which the Shim prints after `rowser: ` and exits 1,
+  so the Shim needs no change. `control::parse_duration` reads `--for`.
 - The Wrapper registers its Session with the Daemon (protocol 1.1) and keeps that connection
   open until `ssh` exits, so `rowser status` lists Sessions. On the control socket (local only,
   mode 0600) it sends `Msg::Session{host}` with the `ssh -G` Host alias; the Daemon answers
