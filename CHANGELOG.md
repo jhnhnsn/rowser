@@ -200,6 +200,8 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- The tests build without warnings on Rust 1.100, so `cargo clippy --all-targets -- -D warnings`
+  passes again for contributors and in CI. ([#61](https://github.com/jhnhnsn/rowser/issues/61))
 - `rowser doctor --help` now says "Check the local and remote setup", because doctor checks
   the Local machine too. ([#60](https://github.com/jhnhnsn/rowser/issues/60))
 - On macOS, the notification for an opened URL now shows. It did not show on current macOS. The
