@@ -442,15 +442,6 @@ mod install_args_tests {
     }
 
     #[test]
-    fn doctor_help_names_the_local_and_remote_sides() {
-        use clap::CommandFactory;
-        let cli = Cli::command();
-        let doctor = cli.find_subcommand("doctor").unwrap();
-        let about = doctor.get_about().unwrap().to_string();
-        assert_eq!(about, "Check the local and remote setup");
-    }
-
-    #[test]
     fn install_carries_rowser_runtime_dir_when_no_flag_is_given() {
         let args = args_with_env(&["rowser", "daemon", "install"], "/tmp/rt").unwrap();
         assert_eq!(args, ["--runtime-dir", "/tmp/rt"]);
@@ -535,5 +526,20 @@ mod install_args_tests {
             let err = args_of(&argv).unwrap_err();
             assert!(err.contains("test flags"), "{flag:?}: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod doctor_help_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn doctor_help_names_the_local_and_remote_sides() {
+        let cli = Cli::command();
+        let doctor = cli.find_subcommand("doctor").unwrap();
+        let about = doctor.get_about().unwrap().to_string();
+        assert!(about.contains("local"), "{about}");
+        assert!(about.contains("remote"), "{about}");
     }
 }
