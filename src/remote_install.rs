@@ -161,6 +161,14 @@ const MIMEAPPS_AWK: &str = "/^\\[/ {if(s&&!d){print h1;print h2;d=1} s=(\\$0==se
      s&&/^x-scheme-handler\\/https?[ \\t]*=/ {next} {print} \
      END{if(!d){if(!s){if(NR>0)print nl; print sec} print h1; print h2}}";
 
+/// The `sh` part that turns the path in `$x` into a quoted `Exec` argument, as
+/// the Desktop Entry spec says: `"`, `` ` ``, `$` and `\` get a backslash, `%`
+/// becomes `%%`, and then each backslash is doubled (the string escape rule
+/// applies before the quote rule). No single quotes and no `\\`: a fish login
+/// shell on the Remote host folds `\\` to `\` inside `'…'`, so `$b` holds the
+/// backslash.
+const EXEC_QUOTE: &str = r#"b=$(printf "\134"); r="$x"; x=; while [ -n "$r" ]; do c="${r%"${r#?}"}"; r="${r#?}"; case "$c" in "$b") x="$x$b$b$b$b";; \"|\`|\$) x="$x$b$b$c";; %) x="$x%%";; *) x="$x$c";; esac; done; x="\"$x\"";"#;
+
 /// The `sh` part that writes `~/.local/share/applications/rowser.desktop` and
 /// makes it the default for `http` and `https`: with `xdg-mime` when the
 /// Remote host has it, else in `~/.config/mimeapps.list` (a symlink there is
@@ -168,7 +176,7 @@ const MIMEAPPS_AWK: &str = "/^\\[/ {if(s&&!d){print h1;print h2;d=1} s=(\\$0==se
 fn desktop_script() -> String {
     format!(
         " a=\"$HOME/.local/share/applications\"; t=\"$a/rowser.desktop\"; x=\"$HOME/.local/bin/rowser\"; \
-         case \"$x\" in *[[:space:]]*) x=\"\\\"$x\\\"\";; esac; \
+         {EXEC_QUOTE} \
          if mkdir -p \"$a\" && rm -f \"$t.tmp\" && printf \"%s\\n\" \"[Desktop Entry]\" \"Type=Application\" \
          \"Name=rowser\" \"Comment=Open URLs in the browser on your local machine\" \"Exec=$x open %u\" \
          \"NoDisplay=true\" \"MimeType=x-scheme-handler/http;x-scheme-handler/https;\" >\"$t.tmp\" \
@@ -373,6 +381,8 @@ mod tests {
     fn remote_script_fits_in_single_quotes_and_stays_in_home() {
         let s = remote_script();
         assert!(!s.contains('\''), "{s}");
+        // A fish login shell folds `\\` to `\` inside single quotes.
+        assert!(!s.contains("\\\\"), "{s}");
         assert!(s.contains("ln -sfn rowser \"$d/xdg-open\""), "{s}");
         assert!(s.contains("ln -sfn rowser \"$d/www-browser\""), "{s}");
     }

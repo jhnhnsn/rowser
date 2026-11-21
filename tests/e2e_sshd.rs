@@ -433,10 +433,23 @@ async fn remote_install_puts_the_binary_and_links_in_the_remote_home() {
     let w = World::start().await;
     // sshd sets HOME from the passwd entry, so the `ssh` wrapper puts a temp
     // HOME in front of the remote command (`ssh -- <host> <command>`). The
-    // install never touches the real home of the test user. A real `xdg-mime`
-    // on the remote PATH also gets temp XDG dirs and a dead session bus.
+    // install never touches the real home of the test user. The remote PATH is
+    // a dir of linked tools only, so the real `xdg-mime` never runs and the
+    // install writes `mimeapps.list` in the temp HOME.
     let home = w.dir.0.join("remote-home");
     std::fs::create_dir(&home).unwrap();
+    let tools = w.dir.0.join("toolbox");
+    std::fs::create_dir(&tools).unwrap();
+    let real_path = std::env::var("PATH").unwrap();
+    for tool in [
+        "sh", "mkdir", "rm", "cat", "chmod", "mv", "ln", "head", "awk", "uname",
+    ] {
+        let found = std::env::split_paths(&real_path)
+            .map(|d| d.join(tool))
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| panic!("no {tool} on PATH"));
+        std::os::unix::fs::symlink(found, tools.join(tool)).unwrap();
+    }
     let wrap = w.dir.0.join("wrap");
     std::fs::create_dir(&wrap).unwrap();
     let ssh = wrap.join("ssh");
@@ -444,10 +457,10 @@ async fn remote_install_puts_the_binary_and_links_in_the_remote_home() {
         &ssh,
         format!(
             "#!/bin/sh\n[ \"$1\" = -- ] && [ $# -eq 3 ] || exit 99\n\
-             exec /usr/bin/ssh -F {} -- \"$2\" \"HOME={h} XDG_CONFIG_HOME={h}/.config \
-             XDG_DATA_HOME={h}/.local/share DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/rowser-test $3\"\n",
+             exec /usr/bin/ssh -F {} -- \"$2\" \"HOME={} PATH={} $3\"\n",
             w.path("ssh_config"),
-            h = home.display()
+            home.display(),
+            tools.display()
         ),
     )
     .unwrap();
@@ -483,4 +496,10 @@ async fn remote_install_puts_the_binary_and_links_in_the_remote_home() {
     assert!(home
         .join(".local/share/applications/rowser.desktop")
         .is_file());
+    assert_eq!(
+        std::fs::read_to_string(home.join(".config/mimeapps.list")).unwrap(),
+        "[Default Applications]\nx-scheme-handler/http=rowser.desktop\n\
+         x-scheme-handler/https=rowser.desktop\n"
+    );
+    assert!(stdout.contains("in ~/.config/mimeapps.list"), "{stdout}");
 }

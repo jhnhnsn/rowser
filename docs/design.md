@@ -150,8 +150,10 @@ plist, choosing the release asset from `uname -sm`, PATH-order checks) as functi
 tests; do not add ports around `systemctl`, `launchctl` or `ssh`. `remote_install` gets one
 real seam: `BinarySource` (download release asset vs. use a local build), which has two
 production adapters. `install` returns `Installed`, which says whether the remote script
-wrote `~/.config/environment.d/rowser.conf` (`ENVIRONMENT_D_CONTENT`); a kept user file or a
-failed write is a warning, not an error.
+wrote `~/.config/environment.d/rowser.conf` (`environment_d`, `ENVIRONMENT_D_CONTENT`), whether
+it wrote `~/.local/share/applications/rowser.desktop` (`desktop`), and how rowser became the
+default for `http` and `https` (`default_by`: `DefaultBy::XdgMime`, `DefaultBy::MimeappsList`,
+or none). A kept user file, a failed write or a failed `xdg-mime` is a warning, not an error.
 
 ## Dependency direction
 

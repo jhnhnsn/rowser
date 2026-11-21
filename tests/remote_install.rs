@@ -512,7 +512,7 @@ fn install_writes_the_desktop_file_and_mimeapps_list_without_xdg_mime() {
 
     let out = run_install(&dir, &home, "Linux x86_64", &local);
     assert!(out.status.success(), "{out:?}");
-    let exec = format!("{}/.local/bin/rowser", home.display());
+    let exec = format!("\"{}/.local/bin/rowser\"", home.display());
     assert_eq!(
         std::fs::read_to_string(home.join(DESKTOP)).unwrap(),
         desktop_content(&exec)
@@ -645,6 +645,93 @@ fn install_quotes_the_desktop_exec_path_with_a_space_in_home() {
     assert_eq!(
         std::fs::read_to_string(home.join(DESKTOP)).unwrap(),
         desktop_content(&exec)
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_escapes_reserved_characters_in_the_desktop_exec_path() {
+    let dir = temp_dir("deskesc");
+    let home = dir.join("h\"o`m$e%x\\y");
+    std::fs::create_dir_all(&home).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    // Desktop Entry spec: `"`, `` ` ``, `$` and `\` get a backslash inside the
+    // quotes, `%` becomes `%%`, and then every backslash is doubled by the
+    // string escape rule.
+    let base = dir.display().to_string();
+    let exec = format!("\"{base}/h\\\\\"o\\\\`m\\\\$e%%x\\\\\\\\y/.local/bin/rowser\"");
+    assert_eq!(
+        std::fs::read_to_string(home.join(DESKTOP)).unwrap(),
+        desktop_content(&exec)
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_warns_and_succeeds_when_the_applications_dir_cannot_be_written() {
+    let dir = temp_dir("deskfail");
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join(".local/share")).unwrap();
+    // `applications` is a file, so `mkdir -p` fails.
+    std::fs::write(home.join(".local/share/applications"), "").unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+
+    let out = run_install(&dir, &home, "Linux x86_64", &local);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(home.join(".local/bin/rowser")).unwrap(),
+        "LOCAL"
+    );
+    assert!(!home.join(MIMEAPPS).exists());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "warning: cannot write ~/.local/share/applications/rowser.desktop: \
+             rowser is not the default browser."
+        ),
+        "{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("rowser.desktop"), "{stdout}");
+    assert!(stdout.contains("export BROWSER=rowser"), "{stdout}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn install_warns_and_succeeds_when_xdg_mime_fails() {
+    let dir = temp_dir("xdgfail");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+    let bin = dir.join("xdg");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("xdg-mime"), "#!/bin/sh\nexit 1\n").unwrap();
+    chmod_755(&bin.join("xdg-mime"));
+
+    let args = ["--local-build", local.to_str().unwrap()];
+    let out = run_install_remote(&dir, &home, "Linux x86_64", &args, Some(&bin));
+    assert!(out.status.success(), "{out:?}");
+    assert!(home.join(DESKTOP).is_file());
+    assert!(!home.join(MIMEAPPS).exists());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("warning: xdg-mime failed: rowser is not the default browser."),
+        "{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Wrote ~/.local/share/applications/rowser.desktop"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Made rowser.desktop the default"),
+        "{stdout}"
     );
     std::fs::remove_dir_all(dir).unwrap();
 }

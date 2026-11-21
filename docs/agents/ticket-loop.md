@@ -54,13 +54,16 @@ rowser is a CLI; test it from the terminal.
   is `cfg`-gated; on Linux test it through `service::launchd_install` / `launchd_uninstall`, which
   take the `launchctl` program path: `cargo test --lib launchd` runs them with a fake script.
 - `rowser remote install <host>` runs the `ssh`, `curl` and `tar` on `PATH`: put a fake `ssh`
-  first on `PATH` that answers `uname -sm` and runs the copy command locally with `sh -c`, and set
-  `HOME` to a temp dir. `--local-build <path>` skips the download; the hidden `--release-url
-  <base>` points the download at a local HTTP server serving `rowser-<target>.tar.gz` and
-  `SHA256SUMS` (`sha256sum` output; the download is refused without a matching entry).
-  The install runs `xdg-mime` when the remote `PATH` has it: the fake `ssh` must set the remote
-  `PATH` to a dir of linked tools only (`sh mkdir rm cat chmod mv ln head awk`), plus a fake
-  `xdg-mime` that logs its arguments when wanted. Never let the real `xdg-mime` run.
+  first on `PATH` that answers `uname -sm` and runs the copy command locally with `sh -c` under
+  a remote `PATH` of `$FAKE_REMOTE_PATH`, and set `HOME` to a temp dir. The install runs
+  `xdg-mime` when the remote `PATH` has it, so set `FAKE_REMOTE_PATH` to a dir of linked tools
+  only (`sh mkdir rm cat chmod mv ln head awk`), plus a fake `xdg-mime` that logs its arguments
+  when wanted. Never let the real `xdg-mime` run. Also unset `XDG_CONFIG_HOME` and
+  `XDG_DATA_HOME` and set `DBUS_SESSION_BUS_ADDRESS` to a dead path (`unix:path=/nonexistent/…`).
+  `--local-build <path>` skips the download; the hidden `--release-url <base>` points the
+  download at a local HTTP server serving `rowser-<target>.tar.gz` and `SHA256SUMS`
+  (`sha256sum` output; the download is refused without a matching entry). The sshd e2e test
+  puts `HOME=<tmp> PATH=<toolbox>` in front of the remote command, never through `SetEnv`.
 - `rowser browsers [--json]` reads `HOME`, `XDG_DATA_HOME`, `XDG_DATA_DIRS` and
   `XDG_CONFIG_HOME` on Linux: set all four to a temp tree with fake `.desktop` files,
   `Local State` and `~/.mozilla/firefox/profiles.ini` files. It only reads; it opens nothing.
