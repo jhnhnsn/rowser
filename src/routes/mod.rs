@@ -277,6 +277,7 @@ mod tests {
                 }],
                 exec: None,
             }],
+            os: None,
         }
     }
 

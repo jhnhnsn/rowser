@@ -64,7 +64,7 @@ pub struct RouteArgs {
 /// Runs one `rowser route` command.
 pub fn run_route(args: RouteArgs, out: &mut impl Write, err: &mut impl Write) -> ExitCode {
     let name = args.action.name();
-    match run_inner(args, out) {
+    match run_inner(args, out, err) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             let _ = writeln!(err, "rowser route {name}: {e}");
@@ -130,7 +130,7 @@ fn test(
     Ok(())
 }
 
-fn run_inner(args: RouteArgs, out: &mut impl Write) -> Result<(), String> {
+fn run_inner(args: RouteArgs, out: &mut impl Write, err: &mut impl Write) -> Result<(), String> {
     let file = args.config_file?;
     let read = || match std::fs::read_to_string(&file) {
         Ok(t) => Ok(t),
@@ -184,7 +184,7 @@ fn run_inner(args: RouteArgs, out: &mut impl Write) -> Result<(), String> {
             let (text, n) =
                 config::add_route(&read()?, &route, comment.as_deref()).map_err(in_file)?;
             if let Some(note) = note {
-                writeln!(out, "{note}").map_err(io)?;
+                writeln!(err, "{note}").map_err(io)?;
             }
             (text, format!("added route {n}"))
         }

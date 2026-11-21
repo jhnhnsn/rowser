@@ -341,6 +341,7 @@ fn set() -> Browsers {
             ),
             browser("safari", "com.apple.Safari", "", &[]),
         ],
+        os: None,
     }
 }
 
@@ -435,6 +436,37 @@ fn linux_argv_handles_field_codes_quotes_and_flatpak_markers() {
 }
 
 #[test]
+fn linux_argv_decodes_desktop_entry_string_escapes() {
+    let mut b = browser("chrome", "x", "", &[]);
+    // The escapes decode first, so a decoded space still separates words
+    // unless it is in quotes.
+    b.exec = Some(r#""/opt/My\sBrowser/bin" --a="x\ty" --b=\\s a\sb %u"#.into());
+    assert_eq!(
+        argv(Os::Linux, &b, None, U).unwrap(),
+        ["/opt/My Browser/bin", "--a=x\ty", r"--b=\s", "a", "b", U]
+    );
+    b.exec = Some(r#""/opt/a\\\\b" --n=1\n2 --r=\r"#.into());
+    assert_eq!(
+        argv(Os::Linux, &b, None, U).unwrap(),
+        [r"/opt/a\b", "--n=1\n2", "--r=\r", U]
+    );
+}
+
+#[test]
+fn a_scanned_browser_with_no_usable_exec_is_not_available() {
+    let mut b = set();
+    b.os = Some(Os::Linux);
+    b.all[0].exec = None;
+    assert_eq!(
+        b.normalize(&t("chrome")).unwrap_err(),
+        "browser `chrome` has no Exec line"
+    );
+    b.all[0].exec = Some("\"unclosed".into());
+    assert!(b.normalize(&t("chrome")).is_err());
+    assert_eq!(b.normalize(&t("firefox")).unwrap(), t("firefox"));
+}
+
+#[test]
 fn lookup_tries_the_folder_name_then_the_display_name() {
     let b = set();
     assert_eq!(
@@ -447,7 +479,11 @@ fn lookup_tries_the_folder_name_then_the_display_name() {
     );
     assert_eq!(
         b.normalize(&t("firefox:abc.dev")).unwrap(),
-        t("firefox:Dev")
+        t("firefox:abc.dev")
+    );
+    assert_eq!(
+        b.normalize(&t("firefox:Dev")).unwrap(),
+        t("firefox:abc.dev")
     );
     let mut folder_clash = set();
     folder_clash.all[0].profiles.push(Profile {

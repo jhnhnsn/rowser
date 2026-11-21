@@ -201,19 +201,31 @@ src/
   &Url) -> Pick { route: Option<usize>, target: Target, ask: bool }`. `rowser route test`, the
   Daemon and `rowser doctor` all call it. `Target` (`system`, `ask`, `<browser>[:<profile>]`)
   lives in `config`, which parses it.
-- `Routes::resolve(&RequestHost, &Url) -> Resolved { target, ask, warnings }` applies the
-  fallback rules on top of `pick`: an `ask` Target waits, then opens in `[default]`; a browser
-  Target that is not available falls back to `[default]` with a warning; and a `[default]` of
-  `ask` makes that fallback wait too (ADR 0008). The Daemon calls `resolve`, not `pick`.
+- `Routes::resolve(&RequestHost, &Url, &Browsers) -> Resolved { target, ask, warnings }`
+  applies the fallback rules on top of `pick`: an `ask` Target waits, then opens in
+  `[default]`; a browser Target that `Browsers::normalize` rejects (browser or profile missing,
+  or no argv can be built, such as a Linux browser with no usable `Exec`) falls back to
+  `[default]` with a warning; and a `[default]` of `ask` makes that fallback wait too (ADR
+  0008). A found browser Target comes back with its profile as a folder name. The Daemon calls
+  `resolve`, not `pick`.
 - `routes::glob_match` is the one glob matcher, for Routes and `--confirm-hosts`.
 - `Notice.target: Option<Target>` carries the Target of an Open request (`None` for a `rowser
   forward` request); the notice body names it when it is not `system`.
 - `browsers` takes its roots as plain values (`/Applications`, `~/Applications`, XDG data dirs,
   the browsers' profile directories) so tests point it at temp dirs. `Browsers::scan(roots)`
-  and `Browsers::command(&Target, &Url) -> Result<Command>`. No port: there is one adapter.
-- The Opener port changes to `Opener::open(&Url, &Target) -> Result<()>`. `CommandOpener`
-  runs `browsers::command` for a browser Target and the `--open-command` template for
-  `system`. The test adapter records (URL, Target).
+  (records `roots.os` in `Browsers.os`); `Browsers::find(&Target)` looks a profile up by folder
+  name, then display name; `Browsers::normalize(&Target) -> Result<Target, String>` gives the
+  Target with the profile folder name (Firefox: the `Path` folder from `profiles.ini`), and
+  after a scan also checks that an argv can be built; `Browsers::command(Os, &Target, &str) ->
+  Result<Vec<String>, String>` is a pure argv builder over `browsers::argv(Os, &Browser,
+  Option<&Profile>, url)`. It runs nothing. Firefox maps the folder to `-P <name>`. No port:
+  there is one adapter.
+- The Opener port changes to `Opener::open(&Url, &Target) -> Result<()>`.
+  `CommandOpener::new(template)?.with_browsers(roots)` scans under `roots` and runs
+  `Browsers::command` for a browser Target (without `with_browsers` it refuses one), and the
+  `--open-command` template for `system`. The test adapter records (URL, Target).
+- `DaemonConfig.browser_roots: Option<Roots>` is where the Daemon scans for browsers on each
+  Open request; `None` means no browsers, so every browser Target falls back to `[default]`.
 - `daemon::serve` takes the control listener as a third socket (`bind_sockets` gives all three).
   Control messages are refused on the direct and relay sockets.
 - `control` (client side): `control::request(runtime_dir, &Msg) -> Result<Msg, RequestError>`
@@ -245,14 +257,18 @@ src/
   control socket answers or the Daemon's hello is 1.0 (`Conn::peer_version`). The shown Target is `Routes::session_target(alias)`:
   the alias's first Route without `match`, else `[default]`.
 - Dependency direction: `cli ─► config, routes, browsers, control, route`;
-  `route ─► config, routes, control`; `control ─► protocol,
-  platform`; `daemon ─► config, routes, browsers, protocol`; `routes ─► config` types only;
+  `route ─► config, routes, browsers, control`; `control ─► protocol,
+  platform`; `daemon ─► config, routes, browsers, protocol`; `routes ─► config, browsers`
+  (types and `Browsers::normalize`); `browsers ─► config` (`Target`);
   `doctor ─► config, routes, browsers`.
-- `rowser route`: `route::run_route(RouteArgs { config_file, runtime_dir, action }, out, err)`.
+- `rowser route`: `route::run_route(RouteArgs { config_file, runtime_dir, action, browsers },
+  out, err)`. Warnings go to `err`.
   `config::{add_route, remove_route, move_route}` are text-to-text edits with `toml_edit`
   (comments stay; a comment above a Route moves with it); each checks the text before and the
   result after with `config::parse`. `config::write` writes through a temp file and a rename.
-  After a change it calls `control::reload`; `route test` calls `Routes::pick`.
+  After a change it calls `control::reload`; `route test` calls `Routes::pick`, and
+  `Routes::resolve` for a browser Target. `route add` writes a found profile as its folder
+  name with the display name as a trailing comment.
 - `DaemonConfig.config_file` is the config file path the Daemon resolved (`config::path`);
   `rowser status` shows it, with `(no file)` when no file was there at start or at the last
   valid reload. The Daemon keeps that flag with the Routes, behind one lock.

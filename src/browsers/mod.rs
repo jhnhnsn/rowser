@@ -99,6 +99,10 @@ pub struct Browser {
 #[serde(transparent)]
 pub struct Browsers {
     pub all: Vec<Browser>,
+    /// The OS the scan ran for. `Some`: `normalize` also checks that an argv
+    /// can be built, so a browser that cannot start falls back.
+    #[serde(skip)]
+    pub os: Option<Os>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -219,7 +223,10 @@ impl Browsers {
             Os::MacOs => scan_mac(roots),
             Os::Linux => scan_linux(roots),
         };
-        Browsers { all }
+        Browsers {
+            all,
+            os: Some(roots.os),
+        }
     }
 
     /// One line per browser: `chrome  Google Chrome  profiles: Personal (Default)`.
@@ -488,12 +495,16 @@ impl Browsers {
     }
 
     /// The Target in the form rowser writes: the profile as its folder name
-    /// (Firefox: its `-P` name).
+    /// (Firefox: the `Path` folder from `profiles.ini`). After a scan it
+    /// also checks that an argv can be built.
     pub fn normalize(&self, target: &Target) -> Result<Target, String> {
         let (b, p) = self.find(target)?;
+        if let Some(os) = self.os {
+            argv(os, b, p, "https://localhost/")?;
+        }
         Ok(Target::Browser {
             browser: b.name.clone(),
-            profile: p.map(|p| profile_arg(b, p).to_string()),
+            profile: p.map(|p| p.dir.clone()),
         })
     }
 
@@ -501,15 +512,6 @@ impl Browsers {
     pub fn command(&self, os: Os, target: &Target, url: &str) -> Result<Vec<String>, String> {
         let (b, p) = self.find(target)?;
         argv(os, b, p, url)
-    }
-}
-
-/// The value that names `p` on the command line: the folder for Chromium,
-/// the display name for Firefox (`-P <name>`).
-fn profile_arg<'a>(b: &Browser, p: &'a Profile) -> &'a str {
-    match family_of(&b.name) {
-        Some(Family::Firefox) => &p.name,
-        _ => &p.dir,
     }
 }
 
@@ -582,14 +584,42 @@ pub fn argv(
     }
 }
 
-/// Splits an `Exec` value into words: spaces separate words, double quotes
-/// group them, and a backslash in quotes escapes the next character.
+/// Decodes the Desktop Entry string escapes `\s`, `\n`, `\t`, `\r` and
+/// `\\` in one pass; any other backslash stays for the quote rules.
+fn unescape_string(v: &str) -> String {
+    let mut out = String::new();
+    let mut chars = v.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('s') => out.push(' '),
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some(n) => {
+                out.push('\\');
+                out.push(n);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Splits an `Exec` value into words: first the string escapes are
+/// decoded, then spaces separate words, double quotes group them, and a
+/// backslash in quotes escapes the next character.
 fn split_exec(exec: &str) -> Result<Vec<String>, String> {
     let mut words = Vec::new();
     let mut cur = String::new();
     let mut in_word = false;
     let mut quoted = false;
-    let mut chars = exec.chars();
+    let decoded = unescape_string(exec);
+    let mut chars = decoded.chars();
     while let Some(c) = chars.next() {
         match c {
             '"' => {

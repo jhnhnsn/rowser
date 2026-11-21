@@ -24,8 +24,8 @@ fn route(file: &Path, run: &Path, action: RouteAction) -> (ExitCode, String, Str
     route_with(file, run, action, fixture_browsers())
 }
 
-/// `chrome` with Profiles `Personal (Default)` and `Work (Profile 2)`, and
-/// `safari`.
+/// `chrome` with Profiles `Personal (Default)` and `Work (Profile 2)`,
+/// `firefox` with `Dev (abc.dev)`, and `safari`.
 fn fixture_browsers() -> Browsers {
     let b = |name: &str, profiles: Vec<Profile>| Browser {
         name: name.into(),
@@ -45,8 +45,10 @@ fn fixture_browsers() -> Browsers {
                 "chrome",
                 vec![p("Personal", "Default"), p("Work", "Profile 2")],
             ),
+            b("firefox", vec![p("Dev", "abc.dev")]),
             b("safari", vec![]),
         ],
+        os: None,
     }
 }
 
@@ -130,18 +132,31 @@ fn add_writes_a_missing_browser_as_given_with_a_warning() {
     let dir = TmpDir::new("rt");
     let file = dir.0.join("config.toml");
     let run = dir.0.join("run");
-    let (code, out, err) = route(&file, &run, add("g14", &[], "firefox:Dev", false));
+    let (code, out, err) = route(&file, &run, add("g14", &[], "edge:Dev", false));
     assert_eq!(code, ExitCode::SUCCESS, "{err}");
-    assert!(
-        out.starts_with(
-            "rowser: warning: browser `firefox` is not installed; \
-             the route falls back to [default] until it is found\n\
-             rowser: added route 1\n"
-        ),
-        "{out}"
+    assert_eq!(
+        err,
+        "rowser: warning: browser `edge` is not installed; \
+         the route falls back to [default] until it is found\n"
     );
+    assert!(out.starts_with("rowser: added route 1\n"), "{out}");
     let text = std::fs::read_to_string(&file).unwrap();
-    assert!(text.contains("open = \"firefox:Dev\"\n"), "{text}");
+    assert!(text.contains("open = \"edge:Dev\"\n"), "{text}");
+}
+
+#[test]
+fn add_writes_a_firefox_profile_as_its_folder_with_the_name_comment() {
+    let dir = TmpDir::new("rt");
+    let file = dir.0.join("config.toml");
+    let run = dir.0.join("run");
+    let (code, _, err) = route(&file, &run, add("g14", &[], "firefox:Dev", false));
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    assert_eq!(err, "");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("open = \"firefox:abc.dev\"  # Dev\n"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -382,13 +397,22 @@ fn route_test_prints_the_target_and_the_route_and_needs_no_daemon() {
     );
     std::fs::write(
         &file,
-        "[[route]]\nhost = \"g14\"\nopen = \"firefox:Dev\"\n[default]\nopen = \"chrome:Personal\"\n",
+        "[[route]]\nhost = \"g14\"\nopen = \"edge:Dev\"\n[default]\nopen = \"chrome:Personal\"\n",
     )
     .unwrap();
     assert_eq!(
         t("g14", "https://example.com/", false),
-        "chrome:Default  route 1\nwarning: target `firefox:Dev` is not available \
-         (browser `firefox` is not installed); fell back to [default] `chrome:Personal`\n"
+        "chrome:Default  route 1\nwarning: target `edge:Dev` is not available \
+         (browser `edge` is not installed); fell back to [default] `chrome:Personal`\n"
+    );
+    std::fs::write(
+        &file,
+        "[[route]]\nhost = \"g14\"\nopen = \"firefox:Dev\"\n[default]\nopen = \"system\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        t("g14", "https://example.com/", false),
+        "firefox:abc.dev  route 1\n"
     );
 }
 

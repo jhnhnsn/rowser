@@ -23,6 +23,7 @@ use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 use url::Url;
 
+use crate::browsers::{Browsers, Roots};
 use crate::protocol::{ActivityEntry, Conn, Hello, Msg, Outcome, RequestKind};
 use crate::routes::{RequestHost, Resolved, Routes};
 use limit::Limit;
@@ -61,13 +62,12 @@ pub struct DaemonConfig {
     pub config_file: Option<PathBuf>,
     /// Where browser discovery looks, for browser Targets. `None`: no
     /// browsers, so every browser Target falls back to `[default]`.
-    pub browser_roots: Option<crate::browsers::Roots>,
+    pub browser_roots: Option<Roots>,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         DaemonConfig {
-            browser_roots: None,
             routes: Routes::default(),
             config_file: None,
             rate_max: 5,
@@ -77,6 +77,7 @@ impl Default for DaemonConfig {
             confirm_timeout: confirm::CONFIRM_TIMEOUT,
             forward_timeout: crate::callback::FORWARD_TIMEOUT,
             loopback: crate::callback::LOOPBACK.to_vec(),
+            browser_roots: None,
         }
     }
 }
@@ -401,7 +402,7 @@ impl Inner {
                 .config
                 .browser_roots
                 .as_ref()
-                .map(crate::browsers::Browsers::scan)
+                .map(Browsers::scan)
                 .unwrap_or_default(),
         );
         entry.route = Some(route_label(route, &host));
@@ -655,7 +656,7 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
     let template = args
         .open_command
         .unwrap_or_else(|| crate::platform::default_open_command().into());
-    let roots = crate::browsers::Roots::from_env();
+    let roots = Roots::from_env();
     let opener = CommandOpener::new(&template)?.with_browsers(roots.clone());
     let config_path = crate::config::path()?;
     let file = crate::config::load(&config_path)?;
