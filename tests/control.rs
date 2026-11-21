@@ -174,11 +174,9 @@ async fn a_forward_from_the_direct_socket_shows_its_reported_host_as_unverified(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_forward_leaves_status_when_it_ends() {
     let dir = TmpDir::new("ctl");
-    let config = DaemonConfig {
-        forward_timeout: Duration::from_millis(300),
-        ..DaemonConfig::default()
-    };
-    let run = start_with(&dir, config).await;
+    // The default (long) timeout: the forward cannot end before the first
+    // status read. The keeper's disconnect ends it, at a time the test picks.
+    let run = start(&dir).await;
     let mut relay = connect(run.join(RELAY_SOCKET)).await;
     relay
         .send(&Msg::HostStamp {
@@ -193,7 +191,13 @@ async fn a_forward_leaves_status_when_it_ends() {
         })
         .await
         .unwrap();
-    relay.recv().await.unwrap();
+    let forward_id = match relay.recv().await.unwrap() {
+        Some(Msg::OpenResult {
+            forward_id: Some(id),
+            ..
+        }) => id,
+        other => panic!("unexpected {other:?}"),
+    };
     assert_eq!(
         json_status(run.clone()).await["forwards"]
             .as_array()
@@ -202,7 +206,13 @@ async fn a_forward_leaves_status_when_it_ends() {
         1
     );
 
-    // No keeper attaches, so the forward ends at its timeout.
+    // A keeper attaches and disconnects, so the forward ends.
+    let mut keeper = connect(run.join(DIRECT_SOCKET)).await;
+    keeper
+        .send(&Msg::AttachForward { forward_id })
+        .await
+        .unwrap();
+    drop(keeper);
     for _ in 0..50 {
         if json_status(run.clone()).await["forwards"] == serde_json::json!([]) {
             return;
