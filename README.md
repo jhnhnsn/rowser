@@ -1,5 +1,9 @@
 # rowser
 
+> [!WARNING]
+> rowser is under active development and has no release yet. Expect rough edges and breaking
+> changes until the first release.
+
 Open URLs from headless SSH hosts in your local browser — including OAuth logins that call back
 to `localhost` on the remote host.
 
@@ -45,10 +49,6 @@ against the other projects. Corrections are welcome.
 [local-open]: https://github.com/suan/local-open
 
 ## Status
-
-> [!WARNING]
-> rowser is under active development and has no release yet. Expect rough edges and breaking
-> changes until the first release.
 
 - **v0.1.0 (the core): built.** The daemon, shim, `rowser ssh` wrapper, callback forwards,
   `rowser daemon install` (systemd and launchd), `rowser remote install` (with checksum
