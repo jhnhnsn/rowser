@@ -61,7 +61,7 @@ pub enum Command {
         #[arg(value_parser = clap::value_parser!(u16).range(1024..))]
         port: u16,
     },
-    /// Check the remote setup.
+    /// Check the local and remote setup.
     Doctor,
     /// List the browsers and Profiles found on this machine.
     Browsers {
@@ -439,6 +439,15 @@ mod install_args_tests {
         install_args_from(&parse_from(argv).unwrap(), move |k| {
             (k == "ROWSER_RUNTIME_DIR").then(|| value.clone())
         })
+    }
+
+    #[test]
+    fn doctor_help_names_the_local_and_remote_sides() {
+        use clap::CommandFactory;
+        let cli = Cli::command();
+        let doctor = cli.find_subcommand("doctor").unwrap();
+        let about = doctor.get_about().unwrap().to_string();
+        assert_eq!(about, "Check the local and remote setup");
     }
 
     #[test]
