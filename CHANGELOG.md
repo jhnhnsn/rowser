@@ -8,6 +8,11 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser pending` lists the requests that wait for a confirmation (id, host, URL, Target and
+  age). `rowser approve <id> [--open <target>]` and `rowser deny <id>` answer one from the
+  terminal, and the notification or dialog closes. The first answer wins: a later answer from
+  the desktop or the terminal is refused. `rowser activity` shows who answered (`by terminal`
+  or `by desktop`). ([#50](https://github.com/jhnhnsn/rowser/issues/50))
 - `rowser doctor` now checks the Local machine too: that the config file parses (or the file
   and line of the error), that each Route's browser and Profile exist (and where the request
   falls back if not), and whether the Daemon answers, with its version. Doctor runs the Local
