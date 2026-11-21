@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use common::TmpDir;
+use rowser::browsers::{Browser, Browsers, Profile};
 use rowser::daemon::testing::{Answer, RecordingOpener, ScriptedNotifier};
 use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET, RELAY_SOCKET};
 use rowser::protocol::{Conn, Hello, Msg};
@@ -20,6 +21,41 @@ const HAND: &str = "# my routes, by hand\n\
 
 /// Runs one `rowser route` command; gives (exit, stdout, stderr).
 fn route(file: &Path, run: &Path, action: RouteAction) -> (ExitCode, String, String) {
+    route_with(file, run, action, fixture_browsers())
+}
+
+/// `chrome` with Profiles `Personal (Default)` and `Work (Profile 2)`, and
+/// `safari`.
+fn fixture_browsers() -> Browsers {
+    let b = |name: &str, profiles: Vec<Profile>| Browser {
+        name: name.into(),
+        display_name: name.into(),
+        bundle_id: None,
+        desktop_id: None,
+        profiles,
+        exec: None,
+    };
+    let p = |name: &str, dir: &str| Profile {
+        name: name.into(),
+        dir: dir.into(),
+    };
+    Browsers {
+        all: vec![
+            b(
+                "chrome",
+                vec![p("Personal", "Default"), p("Work", "Profile 2")],
+            ),
+            b("safari", vec![]),
+        ],
+    }
+}
+
+fn route_with(
+    file: &Path,
+    run: &Path,
+    action: RouteAction,
+    browsers: Browsers,
+) -> (ExitCode, String, String) {
     let mut out = Vec::new();
     let mut err = Vec::new();
     let code = run_route(
@@ -27,6 +63,7 @@ fn route(file: &Path, run: &Path, action: RouteAction) -> (ExitCode, String, Str
             config_file: Ok(file.to_path_buf()),
             runtime_dir: Ok(run.to_path_buf()),
             action,
+            browsers,
         },
         &mut out,
         &mut err,
@@ -78,10 +115,33 @@ fn add_appends_a_route_and_keeps_the_comments() {
     assert_eq!(
         list(&file, &run),
         "1  g14  system\n\
-         2  db*  match *.google.com  chrome:Work  ask\n\
+         2  db*  match *.google.com  chrome:Profile 2  ask\n\
          [unverified]  ask\n\
          [default]  system\n"
     );
+    assert!(
+        text.contains("open = \"chrome:Profile 2\"  # Work\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn add_writes_a_missing_browser_as_given_with_a_warning() {
+    let dir = TmpDir::new("rt");
+    let file = dir.0.join("config.toml");
+    let run = dir.0.join("run");
+    let (code, out, err) = route(&file, &run, add("g14", &[], "firefox:Dev", false));
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    assert!(
+        out.starts_with(
+            "rowser: warning: browser `firefox` is not installed; \
+             the route falls back to [default] until it is found\n\
+             rowser: added route 1\n"
+        ),
+        "{out}"
+    );
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("open = \"firefox:Dev\"\n"), "{text}");
 }
 
 #[test]
@@ -309,7 +369,7 @@ fn route_test_prints_the_target_and_the_route_and_needs_no_daemon() {
     };
     assert_eq!(
         t("g14", "https://mail.google.com/x", false),
-        "chrome:Work  route 1  ask\n"
+        "chrome:Profile 2  route 1  ask\n"
     );
     assert_eq!(t("g14", "https://example.com/", false), "safari  route 2\n");
     assert_eq!(
@@ -319,6 +379,16 @@ fn route_test_prints_the_target_and_the_route_and_needs_no_daemon() {
     assert_eq!(
         t("g14", "https://example.com/", true),
         "ask  [unverified]\n"
+    );
+    std::fs::write(
+        &file,
+        "[[route]]\nhost = \"g14\"\nopen = \"firefox:Dev\"\n[default]\nopen = \"chrome:Personal\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        t("g14", "https://example.com/", false),
+        "chrome:Default  route 1\nwarning: target `firefox:Dev` is not available \
+         (browser `firefox` is not installed); fell back to [default] `chrome:Personal`\n"
     );
 }
 
@@ -374,14 +444,8 @@ async fn daemon_route(file: &Path, alias: Option<&str>, url: &str) -> String {
     };
     let opens = opener.opens();
     assert_eq!(opens.len(), 1, "{opens:?}");
-    // Until browser Targets open (#47), the Daemon opens a browser Target
-    // with `system` and names the picked Target in a warning.
-    let fell_back = entries[0]
-        .warnings
-        .iter()
-        .find_map(|w| w.strip_prefix("target `")?.split('`').next());
-    let target = fell_back.map_or_else(|| opens[0].1.to_string(), str::to_string);
-    format!("{target}  {}", entries[0].route.clone().unwrap())
+    // The Daemon has no browsers here, so browser Targets fall back.
+    format!("{}  {}", opens[0].1, entries[0].route.clone().unwrap())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -471,11 +535,12 @@ async fn route_test_agrees_with_the_daemon() {
         let f = file.clone();
         let r = run.clone();
         let action = test_action(alias.unwrap_or("devbox"), url, alias.is_none());
-        let (code, out, err) = tokio::task::spawn_blocking(move || route(&f, &r, action))
-            .await
-            .unwrap();
+        let (code, out, err) =
+            tokio::task::spawn_blocking(move || route_with(&f, &r, action, Browsers::default()))
+                .await
+                .unwrap();
         assert_eq!(code, ExitCode::SUCCESS, "{err}");
-        let got = out.trim_end().to_string();
+        let got = out.lines().next().unwrap().to_string();
         assert_eq!(got, want, "{alias:?} {url}");
     }
 }

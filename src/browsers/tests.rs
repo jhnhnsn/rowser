@@ -306,3 +306,184 @@ fn linux_roots_from_vars_use_xdg_defaults() {
         assert_eq!(roots.config_dir, PathBuf::from("/h/.config"));
     }
 }
+
+fn browser(name: &str, bundle: &str, exec: &str, profiles: &[(&str, &str)]) -> Browser {
+    Browser {
+        name: name.into(),
+        display_name: name.into(),
+        bundle_id: Some(bundle.into()),
+        desktop_id: None,
+        profiles: profiles
+            .iter()
+            .map(|(n, d)| Profile {
+                name: n.to_string(),
+                dir: d.to_string(),
+            })
+            .collect(),
+        exec: Some(exec.into()),
+    }
+}
+
+fn set() -> Browsers {
+    Browsers {
+        all: vec![
+            browser(
+                "chrome",
+                "com.google.Chrome",
+                "/usr/bin/google-chrome-stable %U",
+                &[("Personal", "Default"), ("Work", "Profile 2")],
+            ),
+            browser(
+                "firefox",
+                "org.mozilla.firefox",
+                "/usr/lib/firefox/firefox %u",
+                &[("Dev", "abc.dev")],
+            ),
+            browser("safari", "com.apple.Safari", "", &[]),
+        ],
+    }
+}
+
+fn t(s: &str) -> Target {
+    s.parse().unwrap()
+}
+
+const U: &str = "https://e.com/a?b=1&c=%20";
+
+#[test]
+fn macos_argv_per_browser_kind() {
+    let b = set();
+    let argv = |s| b.command(Os::MacOs, &t(s), U).unwrap();
+    assert_eq!(
+        argv("chrome:Work"),
+        [
+            "open",
+            "-n",
+            "-b",
+            "com.google.Chrome",
+            U,
+            "--args",
+            "--profile-directory=Profile 2"
+        ]
+    );
+    assert_eq!(argv("chrome"), ["open", "-b", "com.google.Chrome", U]);
+    assert_eq!(
+        argv("firefox:abc.dev"),
+        [
+            "open",
+            "-b",
+            "org.mozilla.firefox",
+            U,
+            "--args",
+            "-P",
+            "Dev"
+        ]
+    );
+    assert_eq!(argv("safari"), ["open", "-b", "com.apple.Safari", U]);
+}
+
+#[test]
+fn linux_argv_puts_the_profile_before_the_url_in_exec() {
+    let b = set();
+    let argv = |s| b.command(Os::Linux, &t(s), U).unwrap();
+    assert_eq!(
+        argv("chrome:Profile 2"),
+        [
+            "/usr/bin/google-chrome-stable",
+            "--profile-directory=Profile 2",
+            U
+        ]
+    );
+    assert_eq!(argv("chrome"), ["/usr/bin/google-chrome-stable", U]);
+    assert_eq!(
+        argv("firefox:Dev"),
+        ["/usr/lib/firefox/firefox", "-P", "Dev", U]
+    );
+}
+
+#[test]
+fn linux_argv_handles_field_codes_quotes_and_flatpak_markers() {
+    let mut b = browser("chrome", "x", "", &[("Work", "Profile 2")]);
+    let run = |b: &Browser, p| argv(Os::Linux, b, p, U).unwrap();
+    b.exec = Some(
+        "/usr/bin/flatpak run --command=chrome com.google.Chrome @@u %U @@ --icon %i %c %k".into(),
+    );
+    assert_eq!(
+        run(&b, None),
+        [
+            "/usr/bin/flatpak",
+            "run",
+            "--command=chrome",
+            "com.google.Chrome",
+            U,
+            "--icon"
+        ]
+    );
+    b.exec = Some(r#""/opt/My Browser/bin" --x="a \"q\"" 100%%"#.into());
+    assert_eq!(
+        run(&b, Some(&b.profiles[0].clone())),
+        [
+            "/opt/My Browser/bin",
+            "--x=a \"q\"",
+            "100%",
+            "--profile-directory=Profile 2",
+            U
+        ]
+    );
+    b.exec = Some("\"unclosed".into());
+    assert!(argv(Os::Linux, &b, None, U).is_err());
+}
+
+#[test]
+fn lookup_tries_the_folder_name_then_the_display_name() {
+    let b = set();
+    assert_eq!(
+        b.normalize(&t("chrome:Work")).unwrap(),
+        t("chrome:Profile 2")
+    );
+    assert_eq!(
+        b.normalize(&t("chrome:Default")).unwrap(),
+        t("chrome:Default")
+    );
+    assert_eq!(
+        b.normalize(&t("firefox:abc.dev")).unwrap(),
+        t("firefox:Dev")
+    );
+    let mut folder_clash = set();
+    folder_clash.all[0].profiles.push(Profile {
+        name: "Profile 2".into(),
+        dir: "Profile 9".into(),
+    });
+    assert_eq!(
+        folder_clash.normalize(&t("chrome:Profile 2")).unwrap(),
+        t("chrome:Profile 2")
+    );
+}
+
+#[test]
+fn a_missing_browser_or_profile_is_an_error_that_names_it() {
+    let b = set();
+    assert_eq!(
+        b.normalize(&t("edge")).unwrap_err(),
+        "browser `edge` is not installed"
+    );
+    assert_eq!(
+        b.normalize(&t("chrome:Nope")).unwrap_err(),
+        "browser `chrome` has no profile `Nope`"
+    );
+    assert!(b.normalize(&t("safari:Work")).is_err());
+}
+
+#[test]
+fn linux_scan_keeps_the_exec_line() {
+    let dir = tmp_dir("exec");
+    write(
+        &dir.0.join("usr/share/applications/firefox.desktop"),
+        &format!(
+            "{}Exec=firefox %u\n[Desktop Action new]\nExec=firefox --new-window %u\n",
+            desktop("Firefox", "x-scheme-handler/https;")
+        ),
+    );
+    let found = Browsers::scan(&linux_roots(&dir.0));
+    assert_eq!(found.all[0].exec.as_deref(), Some("firefox %u"));
+}

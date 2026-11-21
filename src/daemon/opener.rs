@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 
 use url::Url;
 
+use crate::browsers::{Browsers, Roots};
 use crate::config::Target;
 
 /// Opens a URL in the browser.
@@ -29,6 +30,8 @@ pub trait Opener: Send + Sync + 'static {
 pub struct CommandOpener {
     program: String,
     args: Vec<String>,
+    /// Browser discovery roots; `None` refuses browser Targets.
+    roots: Option<Roots>,
 }
 
 impl CommandOpener {
@@ -44,25 +47,52 @@ impl CommandOpener {
         if !args.iter().any(|a| a.contains("{url}")) {
             args.push("{url}".into());
         }
-        Ok(CommandOpener { program, args })
+        Ok(CommandOpener {
+            program,
+            args,
+            roots: None,
+        })
+    }
+
+    /// Opens browser Targets with the browsers found under `roots`.
+    pub fn with_browsers(mut self, roots: Roots) -> CommandOpener {
+        self.roots = Some(roots);
+        self
+    }
+
+    /// The argv for one URL: `browsers::command` for a browser Target, else
+    /// the template.
+    fn argv(&self, url: &Url, target: &Target) -> io::Result<Vec<String>> {
+        if let Target::Browser { .. } = target {
+            let roots = self
+                .roots
+                .as_ref()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no browser discovery"))?;
+            return Browsers::scan(roots)
+                .command(roots.os, target, url.as_str())
+                .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e));
+        }
+        let mut v = vec![self.program.clone()];
+        v.extend(self.args.iter().map(|a| a.replace("{url}", url.as_str())));
+        Ok(v)
     }
 }
 
 impl Opener for CommandOpener {
-    /// Runs the template for every Target. Browser Targets never reach the
-    /// Opener until browser discovery exists (#47): the Daemon falls back.
-    fn open(&self, url: &Url, _target: &Target) -> io::Result<()> {
-        let mut child = Command::new(&self.program)
-            .args(self.args.iter().map(|a| a.replace("{url}", url.as_str())))
+    /// Runs the argv for `target`; never through a shell.
+    fn open(&self, url: &Url, target: &Target) -> io::Result<()> {
+        let argv = self.argv(url, target)?;
+        let program = argv[0].clone();
+        let mut child = Command::new(&program)
+            .args(&argv[1..])
             .stdin(Stdio::null())
             .spawn()
             .map_err(|e| {
                 io::Error::new(
                     e.kind(),
-                    format!("could not start open command `{}`: {e}", self.program),
+                    format!("could not start open command `{program}`: {e}"),
                 )
             })?;
-        let program = self.program.clone();
         std::thread::spawn(move || match child.wait() {
             Ok(status) if !status.success() => {
                 tracing::warn!("open command `{program}` failed: {status}")

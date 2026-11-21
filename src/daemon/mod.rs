@@ -59,11 +59,15 @@ pub struct DaemonConfig {
     /// The config file path the Daemon resolved, for `rowser status`.
     /// `None` when no path resolved.
     pub config_file: Option<PathBuf>,
+    /// Where browser discovery looks, for browser Targets. `None`: no
+    /// browsers, so every browser Target falls back to `[default]`.
+    pub browser_roots: Option<crate::browsers::Roots>,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         DaemonConfig {
+            browser_roots: None,
             routes: Routes::default(),
             config_file: None,
             rate_max: 5,
@@ -390,7 +394,16 @@ impl Inner {
             target,
             ask,
             mut warnings,
-        } = self.current_routes().resolve(&request_host, &url);
+        } = self.current_routes().resolve(
+            &request_host,
+            &url,
+            &self
+                .config
+                .browser_roots
+                .as_ref()
+                .map(crate::browsers::Browsers::scan)
+                .unwrap_or_default(),
+        );
         entry.route = Some(route_label(route, &host));
         entry.target = Some(target.to_string());
         entry.warnings = warnings.clone();
@@ -642,10 +655,12 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
     let template = args
         .open_command
         .unwrap_or_else(|| crate::platform::default_open_command().into());
-    let opener = CommandOpener::new(&template)?;
+    let roots = crate::browsers::Roots::from_env();
+    let opener = CommandOpener::new(&template)?.with_browsers(roots.clone());
     let config_path = crate::config::path()?;
     let file = crate::config::load(&config_path)?;
     let mut config = DaemonConfig {
+        browser_roots: Some(roots),
         routes: Routes::from_config(&file),
         config_file: Some(config_path),
         confirm_hosts: args.confirm_hosts,

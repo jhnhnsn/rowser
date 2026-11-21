@@ -325,8 +325,12 @@ fn check_number(n: usize, count: usize) -> Result<usize, String> {
 
 /// Appends `route` as a new `[[route]]` to the config text. Comments and
 /// layout stay. Gives the new text and the new Route's number. Refuses an
-/// invalid text or result.
-pub fn add_route(text: &str, route: &Route) -> Result<(String, usize), String> {
+/// invalid text or result. `comment` goes after `open` as `# <comment>`.
+pub fn add_route(
+    text: &str,
+    route: &Route,
+    comment: Option<&str>,
+) -> Result<(String, usize), String> {
     let (mut doc, count) = edit_doc(text)?;
     let mut t = toml_edit::Table::new();
     t["host"] = toml_edit::value(route.host.as_str());
@@ -337,7 +341,13 @@ pub fn add_route(text: &str, route: &Route) -> Result<(String, usize), String> {
         }
         t["match"] = toml_edit::value(a);
     }
-    t["open"] = toml_edit::value(route.target.to_string());
+    let mut open = toml_edit::Value::from(route.target.to_string());
+    if let Some(c) = comment {
+        // One line only, so the comment cannot end the line early.
+        let c = c.replace(['\n', '\r'], " ");
+        open.decor_mut().set_suffix(format!("  # {c}"));
+    }
+    t["open"] = toml_edit::Item::Value(open);
     if route.ask {
         t["ask"] = toml_edit::value(true);
     }

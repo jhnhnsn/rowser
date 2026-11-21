@@ -298,6 +298,122 @@ async fn a_host_alias_reaches_the_opener_with_its_routes_target() {
     assert!(h.notifier.confirms().is_empty());
 }
 
+/// Linux browser roots under `t` with `google-chrome.desktop` and Chrome
+/// Profiles `Personal (Default)` and `Work (Profile 2)`.
+fn chrome_roots(t: &Path) -> rowser::browsers::Roots {
+    let apps = t.join("share/applications");
+    std::fs::create_dir_all(&apps).unwrap();
+    std::fs::write(
+        apps.join("google-chrome.desktop"),
+        "[Desktop Entry]\nName=Google Chrome\nExec=/fake/chrome %U\n\
+         MimeType=x-scheme-handler/https;\n",
+    )
+    .unwrap();
+    let state = t.join("config/google-chrome");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join("Local State"),
+        r#"{"profile":{"info_cache":{"Default":{"name":"Personal"},"Profile 2":{"name":"Work"}}}}"#,
+    )
+    .unwrap();
+    rowser::browsers::Roots {
+        os: rowser::browsers::Os::Linux,
+        app_dirs: vec![],
+        data_dirs: vec![t.join("share")],
+        home: t.join("home"),
+        config_dir: t.join("config"),
+    }
+}
+
+#[tokio::test]
+async fn a_route_to_a_found_browser_reaches_the_opener_with_the_resolved_target() {
+    let roots_dir = TmpDir::new("br");
+    let text = "[[route]]\nhost = \"g14\"\nopen = \"chrome:Work\"\n\
+                [[route]]\nhost = \"db1\"\nopen = \"firefox:Dev\"\n\
+                [default]\nopen = \"chrome\"\n";
+    let config = DaemonConfig {
+        routes: routes(text),
+        browser_roots: Some(chrome_roots(&roots_dir.0)),
+        ..DaemonConfig::default()
+    };
+    let h = Harness::with(config, RecordingNotifier::default()).await;
+    let mut conn = h.connect_relay("g14").await;
+    assert_eq!(
+        error_of(&request(&mut conn, open("https://example.com/a")).await),
+        None
+    );
+    let mut conn = h.connect_relay("db1").await;
+    assert_eq!(
+        error_of(&request(&mut conn, open("https://example.com/b")).await),
+        None
+    );
+    let chrome = |p: Option<&str>| Target::Browser {
+        browser: "chrome".into(),
+        profile: p.map(str::to_owned),
+    };
+    assert_eq!(
+        h.opener.opens(),
+        [
+            (
+                Url::parse("https://example.com/a").unwrap(),
+                chrome(Some("Profile 2"))
+            ),
+            (Url::parse("https://example.com/b").unwrap(), chrome(None)),
+        ]
+    );
+    let notices = h.notifier.notices();
+    assert!(notices[0].warnings.is_empty());
+    assert_eq!(
+        notices[1].warnings,
+        [
+            "target `firefox:Dev` is not available (browser `firefox` is not installed); \
+          fell back to [default] `chrome`"
+        ]
+    );
+}
+
+#[test]
+fn command_opener_runs_the_browser_argv_without_a_shell() {
+    let dir = TmpDir::new("bo");
+    let log = dir.0.join("argv.log");
+    let script = dir.0.join("fake-chrome");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let roots = chrome_roots(&dir.0);
+    std::fs::write(
+        roots.data_dirs[0].join("applications/google-chrome.desktop"),
+        format!(
+            "[Desktop Entry]\nExec={} %U\nMimeType=x-scheme-handler/https;\n",
+            script.display()
+        ),
+    )
+    .unwrap();
+    let opener = CommandOpener::new("/nonexistent/rowser-open {url}")
+        .unwrap()
+        .with_browsers(roots);
+    let url = Url::parse("https://example.com/x?a=1;b=$(id)").unwrap();
+    let target = Target::Browser {
+        browser: "chrome".into(),
+        profile: Some("Profile 2".into()),
+    };
+    opener.open(&url, &target).unwrap();
+    let want = format!("--profile-directory=Profile 2\n{url}\n");
+    for _ in 0..100 {
+        if std::fs::read_to_string(&log).unwrap_or_default() == want {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("{:?}", std::fs::read_to_string(&log));
+}
+
 #[tokio::test]
 async fn an_unmatched_alias_goes_to_default_and_a_browser_target_falls_back_with_a_warning() {
     let h = routed_harness(G14, Answer::Deny).await;
@@ -309,7 +425,10 @@ async fn an_unmatched_alias_goes_to_default_and_a_browser_target_falls_back_with
     assert_eq!(h.opener.opens()[0].1, Target::System);
     let body = h.notifier.notices()[0].body();
     assert!(
-        body.contains("target `chrome:Work` is not available yet; opened with `system`"),
+        body.contains(
+            "target `chrome:Work` is not available (browser `chrome` is not installed); \
+             fell back to `system`"
+        ),
         "{body}"
     );
 }
@@ -384,10 +503,7 @@ async fn a_browser_target_falls_back_with_a_warning_in_the_notice() {
     let mut conn = h.connect_relay("g14").await;
     request(&mut conn, open("https://example.com/")).await;
     let body = h.notifier.notices()[0].body();
-    assert!(
-        body.contains("target `safari` is not available yet"),
-        "{body}"
-    );
+    assert!(body.contains("target `safari` is not available"), "{body}");
 }
 
 #[tokio::test]

@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::config::Target;
+
 #[cfg(test)]
 mod tests;
 
@@ -87,16 +89,19 @@ pub struct Browser {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub desktop_id: Option<String>,
     pub profiles: Vec<Profile>,
+    /// Linux: the desktop file's `Exec` line.
+    #[serde(skip)]
+    pub exec: Option<String>,
 }
 
 /// The browsers found by one scan.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Browsers {
     pub all: Vec<Browser>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Family {
     Chromium,
     Firefox,
@@ -256,6 +261,7 @@ fn scan_mac(roots: &Roots) -> Vec<Browser> {
             profiles: k.profiles.as_ref().map_or_else(Vec::new, |p| {
                 read_profiles(p.family, &roots.config_dir.join(p.mac))
             }),
+            exec: None,
         })
         .collect()
 }
@@ -311,6 +317,7 @@ fn scan_linux(roots: &Roots) -> Vec<Browser> {
                 bundle_id: None,
                 desktop_id: Some(format!("{id}.desktop")),
                 profiles,
+                exec: entry.exec,
             });
         }
     }
@@ -348,6 +355,7 @@ struct DesktopEntry {
     /// `Hidden=true`: XDG treats the file as deleted.
     hidden: bool,
     name: Option<String>,
+    exec: Option<String>,
 }
 
 impl DesktopEntry {
@@ -364,6 +372,8 @@ impl DesktopEntry {
                 entry.hidden = v.trim() == "true";
             } else if let Some(v) = line.strip_prefix("Name=") {
                 entry.name = Some(v.trim().to_string());
+            } else if let Some(v) = line.strip_prefix("Exec=") {
+                entry.exec = Some(v.trim().to_string());
             }
         }
         entry
@@ -442,6 +452,173 @@ fn firefox_profiles(dir: &Path) -> Vec<Profile> {
             })
         })
         .collect()
+}
+
+fn family_of(name: &str) -> Option<Family> {
+    KNOWN
+        .iter()
+        .find(|k| k.name == name)
+        .and_then(|k| k.profiles.as_ref())
+        .map(|p| p.family)
+}
+
+impl Browsers {
+    /// The browser and Profile a browser Target names. The profile is
+    /// looked up by folder name first, then by display name. The error says
+    /// what is missing.
+    pub fn find(&self, target: &Target) -> Result<(&Browser, Option<&Profile>), String> {
+        let Target::Browser { browser, profile } = target else {
+            return Err(format!("`{target}` is not a browser target"));
+        };
+        let b = self
+            .all
+            .iter()
+            .find(|b| &b.name == browser)
+            .ok_or_else(|| format!("browser `{browser}` is not installed"))?;
+        let Some(want) = profile else {
+            return Ok((b, None));
+        };
+        let p = b
+            .profiles
+            .iter()
+            .find(|p| &p.dir == want)
+            .or_else(|| b.profiles.iter().find(|p| &p.name == want))
+            .ok_or_else(|| format!("browser `{browser}` has no profile `{want}`"))?;
+        Ok((b, Some(p)))
+    }
+
+    /// The Target in the form rowser writes: the profile as its folder name
+    /// (Firefox: its `-P` name).
+    pub fn normalize(&self, target: &Target) -> Result<Target, String> {
+        let (b, p) = self.find(target)?;
+        Ok(Target::Browser {
+            browser: b.name.clone(),
+            profile: p.map(|p| profile_arg(b, p).to_string()),
+        })
+    }
+
+    /// The argv that opens `url` in a browser Target.
+    pub fn command(&self, os: Os, target: &Target, url: &str) -> Result<Vec<String>, String> {
+        let (b, p) = self.find(target)?;
+        argv(os, b, p, url)
+    }
+}
+
+/// The value that names `p` on the command line: the folder for Chromium,
+/// the display name for Firefox (`-P <name>`).
+fn profile_arg<'a>(b: &Browser, p: &'a Profile) -> &'a str {
+    match family_of(&b.name) {
+        Some(Family::Firefox) => &p.name,
+        _ => &p.dir,
+    }
+}
+
+/// The argv that opens `url` in `browser` (and `profile`) on `os`. Pure:
+/// it runs nothing and never goes through a shell.
+///
+/// macOS: `open [-n] -b <bundle id> <url> [--args <profile args>]`.
+/// Linux: the desktop file's `Exec`, with the field codes replaced; the
+/// profile arguments go just before the URL.
+pub fn argv(
+    os: Os,
+    browser: &Browser,
+    profile: Option<&Profile>,
+    url: &str,
+) -> Result<Vec<String>, String> {
+    let family = family_of(&browser.name);
+    let profile_args: Vec<String> = match (family, profile) {
+        (Some(Family::Chromium), Some(p)) => vec![format!("--profile-directory={}", p.dir)],
+        (Some(Family::Firefox), Some(p)) => vec!["-P".into(), p.name.clone()],
+        _ => vec![],
+    };
+    match os {
+        Os::MacOs => {
+            let id = browser
+                .bundle_id
+                .as_deref()
+                .ok_or_else(|| format!("browser `{}` has no bundle id", browser.name))?;
+            let mut v = vec!["open".to_string()];
+            if family == Some(Family::Chromium) && !profile_args.is_empty() {
+                v.push("-n".into());
+            }
+            v.extend(["-b".to_string(), id.to_string(), url.to_string()]);
+            if !profile_args.is_empty() {
+                v.push("--args".into());
+                v.extend(profile_args);
+            }
+            Ok(v)
+        }
+        Os::Linux => {
+            let exec = browser
+                .exec
+                .as_deref()
+                .ok_or_else(|| format!("browser `{}` has no Exec line", browser.name))?;
+            let words = split_exec(exec)?;
+            let mut v: Vec<String> = Vec::new();
+            let mut placed = false;
+            for w in words {
+                match w.as_str() {
+                    "%u" | "%U" | "%f" | "%F" => {
+                        if !placed {
+                            v.extend(profile_args.iter().cloned());
+                            v.push(url.to_string());
+                            placed = true;
+                        }
+                    }
+                    "%i" | "%c" | "%k" | "%d" | "%D" | "%n" | "%N" | "%v" | "%m" | "@@u" | "@@" => {
+                    }
+                    _ => v.push(w.replace("%%", "%")),
+                }
+            }
+            if v.is_empty() {
+                return Err(format!("browser `{}` has an empty Exec line", browser.name));
+            }
+            if !placed {
+                v.extend(profile_args);
+                v.push(url.to_string());
+            }
+            Ok(v)
+        }
+    }
+}
+
+/// Splits an `Exec` value into words: spaces separate words, double quotes
+/// group them, and a backslash in quotes escapes the next character.
+fn split_exec(exec: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut quoted = false;
+    let mut chars = exec.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                in_word = true;
+            }
+            '\\' if quoted => match chars.next() {
+                Some(n) => cur.push(n),
+                None => return Err("the Exec line ends in a backslash".into()),
+            },
+            ' ' | '\t' if !quoted => {
+                if in_word {
+                    words.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            _ => {
+                cur.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if quoted {
+        return Err("the Exec line has an unclosed quote".into());
+    }
+    if in_word {
+        words.push(cur);
+    }
+    Ok(words)
 }
 
 /// `rowser browsers [--json]`.

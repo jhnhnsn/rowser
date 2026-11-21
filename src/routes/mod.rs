@@ -3,6 +3,7 @@
 
 use url::Url;
 
+use crate::browsers::Browsers;
 use crate::config::{Config, Route, Target};
 
 /// The host an Open request comes from.
@@ -97,9 +98,11 @@ impl Routes {
 
     /// The Target an Open request opens in, whether it waits for the user
     /// first, and the notice warnings. An `ask` Target waits, then opens in
-    /// `[default]`. A browser Target is not available yet (#47) and falls back
-    /// to `[default]`; a `[default]` of `ask` then waits too (ADR 0008).
-    pub fn resolve(&self, host: &RequestHost, url: &Url) -> Resolved {
+    /// `[default]`. A browser Target found in `browsers` opens with its
+    /// profile as a folder name; a missing one falls back to `[default]`
+    /// with a warning, and a `[default]` of `ask` then waits too (ADR 0008).
+    /// A `[default]` that is missing too opens with `system`.
+    pub fn resolve(&self, host: &RequestHost, url: &Url, browsers: &Browsers) -> Resolved {
         let pick = self.pick(host, url);
         let mut resolved = Resolved {
             route: pick.route,
@@ -107,29 +110,31 @@ impl Routes {
             ask: pick.ask,
             warnings: vec![],
         };
-        if pick.target != Target::System {
-            // `ask` or a browser: both open in `[default]`.
-            resolved.take(&pick.target);
-            if pick.target != self.default {
-                resolved.take(&self.default);
+        let mut chain = vec![&pick.target];
+        if pick.target != self.default {
+            chain.push(&self.default);
+        }
+        for (i, target) in chain.iter().enumerate() {
+            match target {
+                Target::System => return resolved,
+                Target::Ask => resolved.ask = true,
+                Target::Browser { .. } => match browsers.normalize(target) {
+                    Ok(found) => {
+                        resolved.target = found;
+                        return resolved;
+                    }
+                    Err(why) => {
+                        let next = chain
+                            .get(i + 1)
+                            .map_or("`system`".to_string(), |t| format!("[default] `{t}`"));
+                        resolved.warnings.push(format!(
+                            "target `{target}` is not available ({why}); fell back to {next}"
+                        ));
+                    }
+                },
             }
         }
         resolved
-    }
-}
-
-impl Resolved {
-    /// Applies one Target on the way to `system`: `ask` makes the request
-    /// wait, and a browser Target adds a warning.
-    fn take(&mut self, target: &Target) {
-        match target {
-            Target::System => {}
-            Target::Ask => self.ask = true,
-            Target::Browser { .. } => self.warnings.push(format!(
-                "target `{target}` is not available yet; opened with `{}`",
-                Target::System
-            )),
-        }
     }
 }
 
@@ -255,7 +260,47 @@ mod tests {
     }
 
     fn resolve(text: &str, host: RequestHost) -> Resolved {
-        routes(text).resolve(&host, &url("https://e.com/"))
+        routes(text).resolve(&host, &url("https://e.com/"), &Browsers::default())
+    }
+
+    fn chrome() -> Browsers {
+        use crate::browsers::{Browser, Profile};
+        Browsers {
+            all: vec![Browser {
+                name: "chrome".into(),
+                display_name: "Google Chrome".into(),
+                bundle_id: None,
+                desktop_id: None,
+                profiles: vec![Profile {
+                    name: "Work".into(),
+                    dir: "Profile 2".into(),
+                }],
+                exec: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_found_browser_target_opens_with_the_profile_folder() {
+        let r = routes(
+            "[[route]]\nhost = \"g14\"\nopen = \"chrome:Work\"\n[default]\nopen = \"ask\"\n",
+        )
+        .resolve(&alias("g14"), &url("https://e.com/"), &chrome());
+        assert_eq!(r.target.to_string(), "chrome:Profile 2");
+        assert!(!r.ask);
+        assert!(r.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_missing_route_target_falls_back_to_a_found_browser_default() {
+        let r =
+            routes("[[route]]\nhost = \"g14\"\nopen = \"safari\"\n[default]\nopen = \"chrome\"\n")
+                .resolve(&alias("g14"), &url("https://e.com/"), &chrome());
+        assert_eq!(r.target.to_string(), "chrome");
+        assert_eq!(
+            r.warnings,
+            ["target `safari` is not available (browser `safari` is not installed); fell back to [default] `chrome`"]
+        );
     }
 
     #[test]
@@ -276,7 +321,7 @@ mod tests {
         assert!(r.ask);
         assert_eq!(
             r.warnings,
-            ["target `safari` is not available yet; opened with `system`"]
+            ["target `safari` is not available (browser `safari` is not installed); fell back to [default] `ask`"]
         );
         let text = "[[route]]\nhost = \"g14\"\nopen = \"chrome:Work\"\n[default]\nopen = \"ask\"\n";
         assert!(resolve(text, alias("g14")).ask);
@@ -295,7 +340,7 @@ mod tests {
         let r = resolve("[default]\nopen = \"chrome:Work\"\n", alias("db1"));
         assert_eq!(
             r.warnings,
-            ["target `chrome:Work` is not available yet; opened with `system`"]
+            ["target `chrome:Work` is not available (browser `chrome` is not installed); fell back to `system`"]
         );
         let text = "[[route]]\nhost = \"*\"\nopen = \"safari\"\n[default]\nopen = \"firefox\"\n";
         assert_eq!(resolve(text, alias("g14")).warnings.len(), 2);

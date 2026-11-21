@@ -473,7 +473,8 @@ async fn a_browser_target_that_falls_back_shows_opened_with_a_warning() {
     let (_, out, _) = activity(run, false).await;
     assert!(
         out.trim_end().ends_with(
-            "opened  warning: target `chrome:Work` is not available yet; opened with `system`"
+            "opened  warning: target `chrome:Work` is not available \
+             (browser `chrome` is not installed); fell back to [default] `system`"
         ),
         "{out}"
     );

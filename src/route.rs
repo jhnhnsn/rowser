@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use url::Url;
 
+use crate::browsers::{Browsers, Roots};
 use crate::config::{self, Route, Target};
 use crate::control::{self, RequestError};
 use crate::routes::{RequestHost, Routes};
@@ -56,6 +57,8 @@ pub struct RouteArgs {
     /// The runtime directory of the Daemon to reload.
     pub runtime_dir: Result<PathBuf, String>,
     pub action: RouteAction,
+    /// The browsers on the Local machine, for `add` and `test`.
+    pub browsers: Browsers,
 }
 
 /// Runs one `rowser route` command.
@@ -94,8 +97,16 @@ fn list(file: &Path, out: &mut impl Write) -> Result<(), String> {
     writeln!(out, "[default]  {default}").map_err(io)
 }
 
-/// `rowser route test`: the Target and the Route that matched.
-fn test(file: &Path, host: RequestHost, url: &Url, out: &mut impl Write) -> Result<(), String> {
+/// `rowser route test`: the Target and the Route that matched. A browser
+/// Target shows as resolved (profile folder name), or as its fallback with
+/// a `warning:` line.
+fn test(
+    file: &Path,
+    host: RequestHost,
+    url: &Url,
+    browsers: &Browsers,
+    out: &mut impl Write,
+) -> Result<(), String> {
     let routes = Routes::from_config(&config::load(file)?);
     let pick = routes.pick(&host, url);
     let label = match (pick.route, &host) {
@@ -103,8 +114,20 @@ fn test(file: &Path, host: RequestHost, url: &Url, out: &mut impl Write) -> Resu
         (None, RequestHost::Unverified(_)) => "[unverified]".into(),
         (None, RequestHost::Alias(_)) => "[default]".into(),
     };
-    let ask = if pick.ask { "  ask" } else { "" };
-    writeln!(out, "{}  {label}{ask}", pick.target).map_err(io)
+    let (target, ask, warnings) = match pick.target {
+        Target::Browser { .. } => {
+            let r = routes.resolve(&host, url, browsers);
+            (r.target, r.ask, r.warnings)
+        }
+        // `system` and `ask` show as picked, as before.
+        t => (t, pick.ask, vec![]),
+    };
+    let ask = if ask { "  ask" } else { "" };
+    writeln!(out, "{target}  {label}{ask}").map_err(io)?;
+    for w in warnings {
+        writeln!(out, "warning: {w}").map_err(io)?;
+    }
+    Ok(())
 }
 
 fn run_inner(args: RouteArgs, out: &mut impl Write) -> Result<(), String> {
@@ -127,7 +150,7 @@ fn run_inner(args: RouteArgs, out: &mut impl Write) -> Result<(), String> {
             } else {
                 RequestHost::Alias(host)
             };
-            return test(&file, host, &url, out);
+            return test(&file, host, &url, &args.browsers, out);
         }
         RouteAction::Add {
             host,
@@ -135,14 +158,34 @@ fn run_inner(args: RouteArgs, out: &mut impl Write) -> Result<(), String> {
             open,
             ask,
         } => {
-            let target: Target = open.parse()?;
+            let mut target: Target = open.parse()?;
+            let mut comment = None;
+            let mut note = None;
+            if let Target::Browser { .. } = target {
+                match args.browsers.find(&target) {
+                    Ok((_, Some(p))) => {
+                        comment = Some(p.name.clone());
+                        target = args.browsers.normalize(&target)?;
+                    }
+                    Ok((_, None)) => {}
+                    Err(why) => {
+                        note = Some(format!(
+                            "rowser: warning: {why}; the route falls back to [default] until it is found"
+                        ))
+                    }
+                }
+            }
             let route = Route {
                 host,
                 matches,
                 target,
                 ask,
             };
-            let (text, n) = config::add_route(&read()?, &route).map_err(in_file)?;
+            let (text, n) =
+                config::add_route(&read()?, &route, comment.as_deref()).map_err(in_file)?;
+            if let Some(note) = note {
+                writeln!(out, "{note}").map_err(io)?;
+            }
             (text, format!("added route {n}"))
         }
         RouteAction::Remove { n } => (
@@ -183,6 +226,7 @@ pub fn route_main(action: RouteAction) -> ExitCode {
             config_file: config::path(),
             runtime_dir: crate::platform::runtime_dir(),
             action,
+            browsers: Browsers::scan(&Roots::from_env()),
         },
         &mut std::io::stdout(),
         &mut std::io::stderr(),
