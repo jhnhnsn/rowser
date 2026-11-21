@@ -31,6 +31,7 @@ src/
   logging.rs         tracing subscriber on stderr, level from ROWSER_LOG (default warn)
   platform.rs        default paths per OS (runtime dir or ROWSER_RUNTIME_DIR, tunnel dir,
                      browser names)
+  test_support.rs    `#[cfg(test)]` helpers for unit tests; includes tests/common/script.rs
 tests/               level-2 integration tests and the level-3 sshd e2e test
 ```
 
@@ -189,6 +190,9 @@ discovery ─► protocol
 3. E2E (`tests/e2e_sshd.rs`, Linux only; each test returns at once unless `ROWSER_E2E=1`): throwaway
    `sshd`, `rowser ssh`, OAuth-style callback, tmux-style reattach (second session, shim picks
    newest socket), and a `ProxyJump` hop through the same `sshd`.
+
+Every fake script at any level is written with `write_script`/`write_executable` from
+`tests/common/script.rs`, so the test process never holds the write fd (ETXTBSY, #55).
 
 ## v1.0 additions (#38)
 

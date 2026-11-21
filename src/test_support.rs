@@ -11,6 +11,11 @@ mod tests {
     /// Many threads write and run scripts at once, as parallel tests do.
     /// A fork in one thread must not leave another thread's script busy
     /// (ETXTBSY, #55).
+    ///
+    /// This test guards the fix: it calls only `write_script`, so it does
+    /// not show the race by itself. With the old writer (`fs::write` +
+    /// `set_permissions`) in `write_executable`, it failed at once: six of
+    /// eight threads got "Text file busy (os error 26)" in 0.12 s.
     #[test]
     fn scripts_written_while_other_threads_fork_run() {
         let dir = std::env::temp_dir().join(format!("rowser-script-{}", std::process::id()));
