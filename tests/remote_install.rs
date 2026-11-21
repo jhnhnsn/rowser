@@ -1,5 +1,9 @@
 //! The two `BinarySource` adapters, and the install over a fake `ssh`.
 
+#[path = "common/script.rs"]
+mod script;
+
+use script::write_script;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -170,24 +174,17 @@ fn local_build_gives_its_path_and_refuses_a_missing_file() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-fn chmod_755(path: &Path) {
-    let ok = Command::new("chmod").arg("755").arg(path).status().unwrap();
-    assert!(ok.success());
-}
-
 /// A fake `ssh` that runs the remote command locally with `/bin/sh`, with
 /// `PATH` set to `$FAKE_REMOTE_PATH`, and answers `uname -sm` with `$FAKE_UNAME`.
 fn fake_ssh(dir: &Path) -> PathBuf {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let ssh = bin.join("ssh");
-    std::fs::write(
+    write_script(
         &ssh,
-        "#!/bin/sh\nshift 2\nif [ \"$1\" = \"uname -sm\" ]; then echo \"$FAKE_UNAME\"; exit 0; fi\n\
-         export PATH=\"$FAKE_REMOTE_PATH\"\nexec /bin/sh -c \"$1\"\n",
-    )
-    .unwrap();
-    chmod_755(&ssh);
+        "shift 2\nif [ \"$1\" = \"uname -sm\" ]; then echo \"$FAKE_UNAME\"; exit 0; fi\n\
+         export PATH=\"$FAKE_REMOTE_PATH\"\nexec /bin/sh -c \"$1\"",
+    );
     bin
 }
 
@@ -218,12 +215,7 @@ fn fake_xdg_mime(dir: &Path) -> PathBuf {
     std::fs::create_dir_all(&bin).unwrap();
     let tool = bin.join("xdg-mime");
     let args = dir.join("xdg-mime.args");
-    std::fs::write(
-        &tool,
-        format!("#!/bin/sh\necho \"$@\" >>\"{}\"\n", args.display()),
-    )
-    .unwrap();
-    chmod_755(&tool);
+    write_script(&tool, &format!("echo \"$@\" >>\"{}\"", args.display()));
     bin
 }
 
@@ -711,8 +703,7 @@ fn install_warns_and_succeeds_when_xdg_mime_fails() {
     std::fs::write(&local, "LOCAL").unwrap();
     let bin = dir.join("xdg");
     std::fs::create_dir_all(&bin).unwrap();
-    std::fs::write(bin.join("xdg-mime"), "#!/bin/sh\nexit 1\n").unwrap();
-    chmod_755(&bin.join("xdg-mime"));
+    write_script(&bin.join("xdg-mime"), "exit 1");
 
     let args = ["--local-build", local.to_str().unwrap()];
     let out = run_install_remote(&dir, &home, "Linux x86_64", &args, Some(&bin));

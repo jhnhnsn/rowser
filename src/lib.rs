@@ -17,4 +17,6 @@ pub mod route;
 pub mod routes;
 pub mod service;
 pub mod shim;
+#[cfg(test)]
+mod test_support;
 pub mod wrapper;

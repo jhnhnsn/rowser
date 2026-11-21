@@ -856,18 +856,11 @@ mod tests {
     }
 
     /// A `bin` dir in `h` with a fake `xdg-mime` whose body is `body`. The
-    /// file is written and closed before it runs (see #55, ETXTBSY).
+    /// script cannot be busy when it runs (see #55, ETXTBSY).
     fn fake_xdg_mime(h: &Tmp, body: &str) -> OsString {
         let bin = h.0.join("fakebin");
-        let f = bin.join("xdg-mime");
         std::fs::create_dir_all(&bin).unwrap();
-        {
-            let mut file = std::fs::File::create(&f).unwrap();
-            file.write_all(format!("#!/bin/sh\n{body}\n").as_bytes())
-                .unwrap();
-            file.sync_all().unwrap();
-        }
-        std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        crate::test_support::write_script(&bin.join("xdg-mime"), body);
         bin.into_os_string()
     }
 

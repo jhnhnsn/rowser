@@ -4,6 +4,10 @@
 //! have. Tests that run the `rowser` binary find the runtime directory
 //! through `XDG_RUNTIME_DIR`, so they are Linux-only.
 
+#[path = "common/script.rs"]
+mod script;
+
+use script::write_script;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -51,13 +55,12 @@ fn fake_ssh_with(dir: &Path, alias: Option<&str>, pre: &str, tail: &str) -> Path
     };
     let d = dir.display();
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = \"-G\" ]; then {g}; fi\n{pre}\n\
+        "if [ \"$1\" = \"-G\" ]; then {g}; fi\n{pre}\n\
          printf '%s\\n' \"$@\" > {d}/argv.tmp\nmv {d}/argv.tmp {d}/argv\n\
-         while [ ! -e {d}/done ]; do sleep 0.02; done\n{tail}\n"
+         while [ ! -e {d}/done ]; do sleep 0.02; done\n{tail}"
     );
     let path = dir.join("ssh");
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_script(&path, &script);
     path
 }
 

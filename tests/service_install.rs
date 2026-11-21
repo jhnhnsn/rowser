@@ -1,6 +1,10 @@
 //! `rowser daemon install` over a fake `systemctl`, in a temp home.
 #![cfg(not(target_os = "macos"))]
 
+#[path = "common/script.rs"]
+mod script;
+
+use script::write_script;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,15 +21,12 @@ fn fake_systemctl(dir: &Path) -> PathBuf {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let exe = bin.join("systemctl");
-    std::fs::write(
+    write_script(
         &exe,
-        "#!/bin/sh\necho \"$*\" >> \"$FAKE_LOG\"\n\
+        "echo \"$*\" >> \"$FAKE_LOG\"\n\
          if [ \"$2\" = is-active ]; then echo \"$FAKE_ACTIVE\"; [ \"$FAKE_ACTIVE\" = active ]; exit $?; fi\n\
-         exit 0\n",
-    )
-    .unwrap();
-    let ok = Command::new("chmod").arg("755").arg(&exe).status().unwrap();
-    assert!(ok.success());
+         exit 0",
+    );
     bin
 }
 

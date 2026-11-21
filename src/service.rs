@@ -405,7 +405,6 @@ mod tests {
     /// (to stdout when it starts with `stdout:`, else to stderr) and exits
     /// with `code`.
     fn fake_launchctl(tag: &str, fails: &[(&str, &str, i32)]) -> (PathBuf, TmpDir) {
-        use std::os::unix::fs::PermissionsExt;
         let dir =
             std::env::temp_dir().join(format!("rowser-launchctl-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -413,7 +412,7 @@ mod tests {
         let guard = TmpDir(dir.clone());
         let log = dir.join("log");
         let exe = dir.join("launchctl");
-        let mut script = format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display());
+        let mut script = format!("echo \"$*\" >> '{}'\n", log.display());
         for (cmd, text, code) in fails {
             let (text, redirect) = match text.strip_prefix("stdout:") {
                 Some(t) => (t, ""),
@@ -423,11 +422,8 @@ mod tests {
                 "if [ \"$1\" = '{cmd}' ]; then echo '{text}'{redirect}; exit {code}; fi\n"
             ));
         }
-        script.push_str("exit 0\n");
-        // fs::write closes its handle before it returns, so the script is
-        // not busy when it runs.
-        std::fs::write(&exe, script).unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script.push_str("exit 0");
+        crate::test_support::write_script(&exe, &script);
         (exe, guard)
     }
 

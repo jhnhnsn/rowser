@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/script.rs"]
+mod script;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -13,6 +15,7 @@ use rowser::daemon::{
 };
 use rowser::protocol::{Conn, Hello, Msg};
 use rowser::routes::Routes;
+use script::write_script;
 use tokio::net::UnixStream;
 use url::Url;
 
@@ -377,15 +380,13 @@ fn command_opener_runs_the_browser_argv_without_a_shell() {
     let dir = TmpDir::new("bo");
     let log = dir.0.join("argv.log");
     let script = dir.0.join("fake-chrome");
-    std::fs::write(
+    write_script(
         &script,
-        format!(
-            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done\n",
+        &format!(
+            "for a in \"$@\"; do printf '%s\\n' \"$a\" >> {}; done",
             log.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let roots = chrome_roots(&dir.0);
     std::fs::write(
         roots.data_dirs[0].join("applications/google-chrome.desktop"),
@@ -720,12 +721,7 @@ fn command_opener_passes_the_url_as_one_argument() {
     let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     let dir = TmpDir::new("d");
     let script = dir.0.join("rec.sh");
-    std::fs::write(
-        &script,
-        "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$1\" > \"$0.out\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_script(&script, "printf '%s\\n' \"$#\" \"$1\" > \"$0.out\"");
     let pwned = dir.0.join("pwned");
     let raw = format!(
         "https://example.com/a b?x=1&y=$(touch {p});touch {p}|`touch {p}`'\"",
@@ -757,17 +753,15 @@ fn command_opener_returns_without_waiting_for_the_command_to_exit() {
     let go = dir.0.join("go");
     let done = dir.0.join("done");
     // Wait (at most about 10 s) for `go`, then touch `done`.
-    std::fs::write(
+    write_script(
         &script,
-        format!(
-            "#!/bin/sh\ni=0\nwhile [ ! -e '{go}' ] && [ $i -lt 500 ]; do sleep 0.02; i=$((i+1)); done\n\
-             touch '{done}'\n",
+        &format!(
+            "i=0\nwhile [ ! -e '{go}' ] && [ $i -lt 500 ]; do sleep 0.02; i=$((i+1)); done\n\
+             touch '{done}'",
             go = go.display(),
             done = done.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let opener = CommandOpener::new(&format!("{} {{url}}", script.display())).unwrap();
     let start = std::time::Instant::now();
     opener

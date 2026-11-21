@@ -1,3 +1,7 @@
+#[path = "common/script.rs"]
+mod script;
+
+use script::write_script;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -187,19 +191,13 @@ fn env(tunnel_dir: &Path, over: Option<PathBuf>) -> ShimEnv<Vec<u8>> {
 /// Writes an executable fake `xdg-open` into `dir` that records its argument
 /// in `dir/arg` and exits 3.
 fn fake_xdg_open(dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
     let script = dir.join("xdg-open");
     let rec = dir.join("arg");
-    std::fs::write(
+    write_script(
         &script,
-        format!(
-            "#!/bin/sh\nprintf '%s' \"$1\" > '{}'\nexit 3\n",
-            rec.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("printf '%s' \"$1\" > '{}'\nexit 3", rec.display()),
+    );
     script
 }
 
@@ -351,13 +349,11 @@ fn the_binary_with_an_empty_display_prints_the_no_tunnel_message() {
 
 #[test]
 fn a_real_xdg_open_that_runs_browser_rowser_does_not_loop() {
-    use std::os::unix::fs::PermissionsExt;
     let t = TmpDir::new();
     let bin = t.path("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let script = bin.join("xdg-open");
-    std::fs::write(&script, "#!/bin/sh\nexec \"$BROWSER\" \"$1\"\n").unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_script(&script, "exec \"$BROWSER\" \"$1\"");
     let (code, err) = run_bin(
         &t,
         &bin,

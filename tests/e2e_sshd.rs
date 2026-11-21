@@ -13,6 +13,8 @@
 #![cfg(target_os = "linux")]
 
 mod common;
+#[path = "common/script.rs"]
+mod script;
 
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv6Addr, TcpListener, TcpStream};
@@ -25,6 +27,7 @@ use common::TmpDir;
 use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
 use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, NoticeHost, RELAY_SOCKET};
 use rowser::wrapper::{run_ssh, WrapperEnv};
+use script::{write_executable, write_script};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -174,12 +177,10 @@ impl World {
         // The ssh that `rowser ssh` runs: it logs the `-R` spec (the first
         // two arguments), so Drop knows this test's Session sockets.
         let ssh_shim = dir.0.join("ssh-shim");
-        std::fs::write(
+        write_script(
             &ssh_shim,
-            format!("#!/bin/sh\n[ \"$1\" = -R ] && echo \"$2\" >> {d}/forwards\nexec ssh \"$@\"\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&ssh_shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("[ \"$1\" = -R ] && echo \"$2\" >> {d}/forwards\nexec ssh \"$@\""),
+        );
 
         let run_dir = dir.0.join("run");
         let (direct, relay, control) = bind_sockets(&run_dir).unwrap();
@@ -231,12 +232,10 @@ impl World {
     fn waiter(&self, ready: &str, done: &str) -> String {
         let path = self.dir.0.join(format!("wait-{ready}.sh"));
         let (r, d) = (self.path(ready), self.path(done));
-        std::fs::write(
+        write_script(
             &path,
-            format!("#!/bin/sh\ntouch {r}\nwhile [ ! -e {d} ]; do sleep 0.05; done\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("touch {r}\nwhile [ ! -e {d} ]; do sleep 0.05; done"),
+        );
         path.display().to_string()
     }
 
@@ -320,8 +319,7 @@ async fn an_oauth_callback_works_when_sshd_listens_on_a_high_loopback_port() {
 
 async fn oauth_callback(w: World) {
     let script = w.dir.0.join("oauth.py");
-    std::fs::write(&script, OAUTH_PY).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&script, OAUTH_PY);
     let (port_file, request_file) = (w.path("port"), w.path("request"));
     let session = w.ssh(
         "e2e-a",
@@ -453,18 +451,16 @@ async fn remote_install_puts_the_binary_and_links_in_the_remote_home() {
     let wrap = w.dir.0.join("wrap");
     std::fs::create_dir(&wrap).unwrap();
     let ssh = wrap.join("ssh");
-    std::fs::write(
+    write_script(
         &ssh,
-        format!(
-            "#!/bin/sh\n[ \"$1\" = -- ] && [ $# -eq 3 ] || exit 99\n\
-             exec /usr/bin/ssh -F {} -- \"$2\" \"HOME={} PATH={} $3\"\n",
+        &format!(
+            "[ \"$1\" = -- ] && [ $# -eq 3 ] || exit 99\n\
+             exec /usr/bin/ssh -F {} -- \"$2\" \"HOME={} PATH={} $3\"",
             w.path("ssh_config"),
             home.display(),
             tools.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let path = format!("{}:{}", wrap.display(), std::env::var("PATH").unwrap());
 
     let out = Command::new(env!("CARGO_BIN_EXE_rowser"))
