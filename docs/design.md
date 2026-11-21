@@ -235,6 +235,11 @@ src/
 - Dependency direction: `cli ─► config, routes, browsers, control`; `control ─► protocol,
   platform`; `daemon ─► config, routes, browsers, protocol`; `routes ─► config` types only;
   `doctor ─► config, routes, browsers`.
+- `rowser route`: `route::run_route(RouteArgs { config_file, runtime_dir, action }, out, err)`.
+  `config::{add_route, remove_route, move_route}` are text-to-text edits with `toml_edit`
+  (comments stay; a comment above a Route moves with it); each checks the text before and the
+  result after with `config::parse`. `config::write` writes through a temp file and a rename.
+  After a change it calls `control::reload`; `route test` calls `Routes::pick`.
 - `DaemonConfig.config_file` is the config file path the Daemon resolved (`config::path`);
   `rowser status` shows it, with `(no file)` when no file was there at start or at the last
   valid reload. The Daemon keeps that flag with the Routes, behind one lock.

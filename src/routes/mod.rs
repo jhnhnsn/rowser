@@ -80,6 +80,11 @@ impl Routes {
         }
     }
 
+    /// The `[unverified]` and `[default]` Targets, with the spec's defaults.
+    pub fn fallbacks(&self) -> (&Target, &Target) {
+        (&self.unverified, &self.default)
+    }
+
     /// The Target `rowser status` shows for a Session: the first Route of
     /// `alias` without a `match` list, else `[default]`. It is what an
     /// `https` URL that no `match` list names opens in.

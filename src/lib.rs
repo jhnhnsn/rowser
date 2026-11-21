@@ -13,6 +13,7 @@ pub mod logging;
 pub mod platform;
 pub mod protocol;
 pub mod remote_install;
+pub mod route;
 pub mod routes;
 pub mod service;
 pub mod shim;

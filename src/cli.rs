@@ -86,6 +86,11 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List, change and test the Routes in the config file.
+    Route {
+        #[command(subcommand)]
+        action: RouteCmd,
+    },
     /// Manage rowser on a remote host.
     Remote {
         #[command(subcommand)]
@@ -109,6 +114,69 @@ pub enum DaemonAction {
     Install,
     /// Remove the user service.
     Uninstall,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RouteCmd {
+    /// List the Routes in file order, then [unverified] and [default].
+    List,
+    /// Append a Route.
+    Add {
+        /// Glob matched against the Host alias.
+        host: String,
+        /// Glob matched against the URL's host (may repeat).
+        #[arg(long = "match", value_name = "GLOB")]
+        matches: Vec<String>,
+        /// The Target: system, ask, <browser> or <browser>:<profile>.
+        #[arg(long, value_name = "TARGET")]
+        open: String,
+        /// Use the Target only after you approve.
+        #[arg(long)]
+        ask: bool,
+    },
+    /// Remove Route <n> (from `rowser route list`).
+    Remove { n: usize },
+    /// Move Route <n> to place <to>.
+    Move { n: usize, to: usize },
+    /// Print the Target and the Route a URL from <host> takes; opens nothing.
+    Test {
+        host: String,
+        url: Url,
+        /// Treat <host> as a Reported host name (direct socket).
+        #[arg(long)]
+        unverified: bool,
+    },
+}
+
+impl From<RouteCmd> for crate::route::RouteAction {
+    fn from(c: RouteCmd) -> Self {
+        use crate::route::RouteAction as A;
+        match c {
+            RouteCmd::List => A::List,
+            RouteCmd::Add {
+                host,
+                matches,
+                open,
+                ask,
+            } => A::Add {
+                host,
+                matches,
+                open,
+                ask,
+            },
+            RouteCmd::Remove { n } => A::Remove { n },
+            RouteCmd::Move { n, to } => A::Move { n, to },
+            RouteCmd::Test {
+                host,
+                url,
+                unverified,
+            } => A::Test {
+                host,
+                url,
+                unverified,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -146,6 +214,7 @@ impl Command {
             Command::Status { .. } => "status",
             Command::Reload => "reload",
             Command::Activity { .. } => "activity",
+            Command::Route { .. } => "route",
             Command::Remote { .. } => "remote install",
             Command::Keeper { .. } => "__keeper",
         }
@@ -205,6 +274,7 @@ pub fn run(command: Command) -> ExitCode {
         Command::Status { json } => crate::control::status_main(json),
         Command::Reload => crate::control::reload_main(),
         Command::Activity { follow, json } => crate::control::activity_main(follow, json),
+        Command::Route { action } => crate::route::route_main(action.into()),
         Command::Keeper {
             socket,
             forward_id,

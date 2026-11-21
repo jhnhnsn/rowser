@@ -180,6 +180,110 @@ pub fn parse(text: &str) -> Result<Config, String> {
     })
 }
 
+/// Parses `text` for an in-place edit; the text must first be a valid file.
+fn edit_doc(text: &str) -> Result<(toml_edit::DocumentMut, usize), String> {
+    let count = parse(text)?.routes.len();
+    let doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| e.to_string())?;
+    Ok((doc, count))
+}
+
+/// The `[[route]]` array of `doc`, created when missing.
+fn route_array(doc: &mut toml_edit::DocumentMut) -> &mut toml_edit::ArrayOfTables {
+    if doc.get("route").is_none() {
+        doc.insert(
+            "route",
+            toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
+        );
+    }
+    doc["route"]
+        .as_array_of_tables_mut()
+        .expect("a valid file has `route` as [[route]]")
+}
+
+/// Gives the edited text after it checks that it is a valid file.
+fn finish(doc: &toml_edit::DocumentMut) -> Result<String, String> {
+    let text = doc.to_string();
+    parse(&text)?;
+    Ok(text)
+}
+
+fn check_number(n: usize, count: usize) -> Result<usize, String> {
+    if n == 0 || n > count {
+        return Err(format!("no route {n}: the file has {count} routes"));
+    }
+    Ok(n - 1)
+}
+
+/// Appends `route` as a new `[[route]]` to the config text. Comments and
+/// layout stay. Refuses an invalid text or result.
+pub fn add_route(text: &str, route: &Route) -> Result<String, String> {
+    let (mut doc, _) = edit_doc(text)?;
+    let mut t = toml_edit::Table::new();
+    t["host"] = toml_edit::value(route.host.as_str());
+    if !route.matches.is_empty() {
+        let mut a = toml_edit::Array::new();
+        for m in &route.matches {
+            a.push(m.as_str());
+        }
+        t["match"] = toml_edit::value(a);
+    }
+    t["open"] = toml_edit::value(route.target.to_string());
+    if route.ask {
+        t["ask"] = toml_edit::value(true);
+    }
+    route_array(&mut doc).push(t);
+    finish(&doc)
+}
+
+/// Removes Route `n` (from 1) from the config text.
+pub fn remove_route(text: &str, n: usize) -> Result<String, String> {
+    let (mut doc, count) = edit_doc(text)?;
+    let i = check_number(n, count)?;
+    route_array(&mut doc).remove(i);
+    finish(&doc)
+}
+
+/// Moves Route `n` to place `to` (both from 1) in the config text. Each
+/// Route keeps its comments.
+pub fn move_route(text: &str, n: usize, to: usize) -> Result<String, String> {
+    let (mut doc, count) = edit_doc(text)?;
+    let from = check_number(n, count)?;
+    let to = check_number(to, count)?;
+    let routes = route_array(&mut doc);
+    let positions: Vec<Option<usize>> = routes.iter().map(|t| t.position()).collect();
+    let mut tables: Vec<toml_edit::Table> = routes.iter().cloned().collect();
+    let moved = tables.remove(from);
+    tables.insert(to, moved);
+    routes.clear();
+    // A table renders at its position: give the file's slots out in order.
+    for (mut t, pos) in tables.into_iter().zip(positions) {
+        if let Some(p) = pos {
+            t.set_position(p);
+        }
+        routes.push(t);
+    }
+    finish(&doc)
+}
+
+/// Writes `text` to `path` through a temp file and a rename, so the file is
+/// never half written. Creates the directory when missing.
+pub fn write(path: &Path, text: &str) -> Result<(), String> {
+    let fail = |e: std::io::Error| format!("{}: {e}", path.display());
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(fail)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, text).map_err(fail)?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        fail(e)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

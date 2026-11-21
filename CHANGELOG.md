@@ -14,6 +14,13 @@ All notable changes to rowser are listed here. The format follows
   with a graphical session, a real `xdg-open` exists for the fallback. Each failed check prints
   one warning line with its fix (`rowser remote install <host>` on the Local machine).
   ([#52](https://github.com/jhnhnsn/rowser/issues/52))
+- `rowser route list|add|remove|move|test` manages the Routes in the config file.
+  `route add <host> [--match <glob>]… --open <target> [--ask]` appends a Route, `remove <n>` and
+  `move <n> <to>` use the numbers from `route list`, and your comments and layout stay. An
+  invalid Target is refused and the file is not changed. `route test <host> <url>
+  [--unverified]` prints the Target and the Route that matched, and opens nothing. A running
+  Daemon reloads the file after each change; the commands also work when it is stopped.
+  ([#46](https://github.com/jhnhnsn/rowser/issues/46))
 - `rowser activity [--follow] [--json]` shows the Daemon's last 200 Open requests and
   `rowser forward` requests, newest last: time, host (Host alias, or the Reported host name
   marked unverified), URL, the Route that matched, the Target, and the result (opened, denied,
