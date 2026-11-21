@@ -30,12 +30,32 @@ fn good_home(dir: &TmpDir) -> PathBuf {
 fn env(dir: &TmpDir, over: Option<PathBuf>) -> DoctorEnv<Vec<u8>> {
     let home = good_home(dir);
     let bin = home.join(".local/bin");
+    let config = home.join(".config");
+    let data = home.join(".local/share");
+    std::fs::create_dir_all(config.join("environment.d")).unwrap();
+    std::fs::write(
+        config.join("environment.d/rowser.conf"),
+        "BROWSER=rowser\nPATH=$HOME/.local/bin:$PATH\n",
+    )
+    .unwrap();
+    std::fs::write(
+        config.join("mimeapps.list"),
+        "[Default Applications]\nx-scheme-handler/https=rowser.desktop\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(data.join("applications")).unwrap();
+    std::fs::write(data.join("applications/rowser.desktop"), "").unwrap();
     DoctorEnv {
-        path: Some(format!("{}:/usr/bin", bin.display()).into()),
+        // Only the temp bin: no real xdg-mime or xdg-open from /usr/bin runs.
+        path: Some(bin.clone().into_os_string()),
         browser: Some("xdg-open".into()),
         home: Some(home),
         tunnel_dir: dir.0.join("tunnels"),
         socket_override: over,
+        config_home: Some(config),
+        data_home: Some(data),
+        graphical: false,
+        self_exe: Some(bin.join("rowser")),
         stdout: Vec::new(),
     }
 }
@@ -63,13 +83,35 @@ async fn round_trip_against_a_daemon_is_ok_and_exits_0() {
     let mut e = env(&dir, Some(socket.clone()));
     assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
     let out = lines(e);
-    assert_eq!(out.len(), 5, "{out:?}");
-    assert!(out[..3].iter().all(|l| l.starts_with("ok ")), "{out:?}");
+    assert_eq!(out.len(), 9, "{out:?}");
+    assert!(out[..7].iter().all(|l| l.starts_with("ok ")), "{out:?}");
     assert_eq!(
-        out[3],
+        out[7],
         format!("ok   tunnel: {}: daemon protocol 1.1", socket.display())
     );
-    assert_eq!(out[4], "ok   version: daemon and this rowser speak 1.1");
+    assert_eq!(out[8], "ok   version: daemon and this rowser speak 1.1");
+}
+
+#[tokio::test]
+async fn a_missing_default_browser_setup_warns_with_the_fix() {
+    let dir = TmpDir::new("doc");
+    let sock = dir.0.join("ok.sock");
+    fake_daemon(sock.clone(), Version::new(1, 1));
+    let mut e = env(&dir, Some(sock));
+    let home = e.home.clone().unwrap();
+    std::fs::remove_dir_all(home.join(".config")).unwrap();
+    std::fs::remove_dir_all(home.join(".local/share")).unwrap();
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    let fix = "; fix: run `rowser remote install <host>` on the Local machine";
+    for (i, name) in [
+        (3, "environment.d"),
+        (4, "rowser.desktop"),
+        (5, "default browser"),
+    ] {
+        assert!(out[i].starts_with(&format!("warn {name}: ")), "{out:?}");
+        assert!(out[i].ends_with(fix), "{out:?}");
+    }
 }
 
 #[tokio::test]
@@ -145,7 +187,8 @@ async fn warnings_alone_do_not_fail() {
     fake_daemon(sock.clone(), Version::new(1, 0));
     let mut e = env(&dir, Some(sock));
     e.browser = None;
-    e.path = Some("/usr/bin".into());
+    // Not /usr/bin: the real xdg-mime there reads the user's own mimeapps.list.
+    e.path = Some(dir.0.join("empty-bin").into_os_string());
     assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
     let out = lines(e);
     assert!(out[0].starts_with("warn PATH: "), "{out:?}");

@@ -8,6 +8,12 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser doctor` on a Remote host also checks the default-browser setup:
+  `~/.config/environment.d/rowser.conf` sets `BROWSER` and `PATH`, `rowser.desktop` exists and is
+  the default handler for `https` links (from `xdg-mime query default`, else `mimeapps.list`), and,
+  with a graphical session, a real `xdg-open` exists for the fallback. Each failed check prints
+  one warning line with its fix (`rowser remote install <host>` on the Local machine).
+  ([#52](https://github.com/jhnhnsn/rowser/issues/52))
 - `rowser activity [--follow] [--json]` shows the Daemon's last 200 Open requests and
   `rowser forward` requests, newest last: time, host (Host alias, or the Reported host name
   marked unverified), URL, the Route that matched, the Target, and the result (opened, denied,

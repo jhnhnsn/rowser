@@ -134,7 +134,7 @@ const FALLBACK_GUARD: &str = "ROWSER_SHIM_FALLBACK";
 
 /// The first executable `xdg-open` in `search_path` whose canonical path is
 /// not the canonical path of `self_exe`.
-fn real_xdg_open(search_path: &OsStr, self_exe: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn real_xdg_open(search_path: &OsStr, self_exe: Option<&Path>) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let own = self_exe.and_then(|p| std::fs::canonicalize(p).ok());
     std::env::split_paths(search_path)
