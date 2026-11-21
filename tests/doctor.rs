@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use common::TmpDir;
+use rowser::browsers::{Os, Roots};
 use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
 use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET};
 use rowser::doctor::{run_doctor, DoctorEnv, FIX};
@@ -55,8 +56,152 @@ fn env(dir: &TmpDir, over: Option<PathBuf>) -> DoctorEnv<Vec<u8>> {
         socket_override: over,
         graphical: false,
         self_exe: Some(bin.join("rowser")),
+        // Missing: no Local checks unless a test adds them.
+        config_file: Ok(dir.0.join("cfg/rowser/config.toml")),
+        runtime_dir: Ok(dir.0.join("rt")),
+        browser_roots: empty_roots(dir),
+        ssh: false,
         stdout: Vec::new(),
     }
+}
+
+fn empty_roots(dir: &TmpDir) -> Roots {
+    Roots {
+        os: Os::Linux,
+        app_dirs: vec![],
+        data_dirs: vec![dir.0.join("share")],
+        home: dir.0.join("bhome"),
+        config_dir: dir.0.join("bconfig"),
+    }
+}
+
+/// Browser roots with `google-chrome.desktop` and Chrome Profile `Work`.
+fn chrome_roots(dir: &TmpDir) -> Roots {
+    let apps = dir.0.join("share/applications");
+    std::fs::create_dir_all(&apps).unwrap();
+    std::fs::write(
+        apps.join("google-chrome.desktop"),
+        "[Desktop Entry]\nName=Google Chrome\nExec=/fake/chrome %U\n\
+         MimeType=x-scheme-handler/https;\n",
+    )
+    .unwrap();
+    let state = dir.0.join("bconfig/google-chrome");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join("Local State"),
+        r#"{"profile":{"info_cache":{"Profile 2":{"name":"Work"}}}}"#,
+    )
+    .unwrap();
+    empty_roots(dir)
+}
+
+/// A Local-machine env: config file with `text`, no Session socket.
+fn local_env(dir: &TmpDir, text: &str) -> DoctorEnv<Vec<u8>> {
+    let mut e = env(dir, None);
+    let f = dir.0.join("cfg/rowser/config.toml");
+    std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+    std::fs::write(&f, text).unwrap();
+    e.browser_roots = chrome_roots(dir);
+    e
+}
+
+#[tokio::test]
+async fn local_good_config_passes_and_a_stopped_daemon_only_warns() {
+    let dir = TmpDir::new("dl");
+    let mut e = local_env(
+        &dir,
+        "[[route]]\nhost = \"g14\"\nopen = \"chrome:Work\"\n[default]\nopen = \"system\"\n",
+    );
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let f = dir.0.join("cfg/rowser/config.toml");
+    let out = lines(e);
+    assert_eq!(
+        out,
+        vec![
+            format!("ok   config: {} parses; 1 route", f.display()),
+            "ok   routes: every browser Target is found".to_string(),
+            "warn daemon: the daemon is not running; start it with `rowser daemon`".to_string(),
+        ],
+        "no Remote checks without a Session socket or SSH"
+    );
+}
+
+#[tokio::test]
+async fn local_route_to_a_missing_browser_or_profile_warns() {
+    let dir = TmpDir::new("dm");
+    let mut e = local_env(
+        &dir,
+        "[[route]]\nhost = \"a\"\nopen = \"firefox\"\n\
+         [[route]]\nhost = \"b\"\nopen = \"chrome:Nope\"\n\
+         [default]\nopen = \"chrome:Work\"\n",
+    );
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    let warns: Vec<&String> = out
+        .iter()
+        .filter(|l| l.starts_with("warn routes: "))
+        .collect();
+    assert_eq!(warns.len(), 2, "{out:?}");
+    assert!(
+        warns[0].starts_with("warn routes: route 1 (host a): firefox: "),
+        "{out:?}"
+    );
+    assert!(
+        warns[1].starts_with("warn routes: route 2 (host b): chrome:Nope: "),
+        "{out:?}"
+    );
+}
+
+#[tokio::test]
+async fn local_invalid_config_fails_with_the_file_and_line() {
+    let dir = TmpDir::new("di");
+    let mut e = local_env(&dir, "[[route]]\nhost = \"a\"\nopen = \"chrome:\"\n");
+    assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
+    let f = dir.0.join("cfg/rowser/config.toml");
+    let out = lines(e);
+    assert!(
+        out[0].starts_with(&format!("fail config: {}: line 3: ", f.display())),
+        "{out:?}"
+    );
+    assert!(!out.iter().any(|l| l.contains("routes:")), "{out:?}");
+}
+
+#[tokio::test]
+async fn local_daemon_answers_with_its_version() {
+    let dir = TmpDir::new("dd");
+    let run = dir.0.join("rt");
+    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let daemon = Daemon::new(
+        DaemonConfig::default(),
+        RecordingOpener::default(),
+        RecordingNotifier::default(),
+    );
+    tokio::spawn(daemon.serve(direct, relay, control));
+    // No config file: the runtime directory alone makes this the Local machine.
+    let mut e = env(&dir, None);
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    assert_eq!(
+        line(&out, "daemon"),
+        format!(
+            "ok   daemon: rowser {} answers on {} (protocol 1.1)",
+            env!("CARGO_PKG_VERSION"),
+            run.display()
+        )
+    );
+    assert!(line(&out, "config").starts_with("ok   config: no file at "));
+    assert!(!out.iter().any(|l| l.contains("tunnel")), "{out:?}");
+}
+
+#[tokio::test]
+async fn ssh_runs_the_remote_checks_too() {
+    let dir = TmpDir::new("ds");
+    let mut e = local_env(&dir, "");
+    e.ssh = true;
+    assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
+    let out = lines(e);
+    assert!(line(&out, "config").starts_with("ok   "), "{out:?}");
+    assert!(line(&out, "tunnel").starts_with("fail "), "{out:?}");
 }
 
 fn lines(env: DoctorEnv<Vec<u8>>) -> Vec<String> {

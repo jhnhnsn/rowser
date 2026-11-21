@@ -1,10 +1,15 @@
-//! `rowser doctor`: checks the Remote host setup and does a live round trip.
+//! `rowser doctor`: on the Local machine, checks the config file, its
+//! browser Targets and the Daemon; on a Remote host, checks the setup and
+//! does a live round trip.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use crate::browsers::{Browsers, Roots};
+use crate::config::{Config, Target};
+use crate::control::{request_async, RequestError};
 use crate::discovery::find_tunnel_path;
 use crate::platform::{find_on_path, real_xdg_open, BROWSER_NAMES, ENVIRONMENT_D_MARK, TUNNEL_DIR};
 use crate::protocol::{Hello, Msg};
@@ -61,6 +66,14 @@ pub struct DoctorEnv<W: Write> {
     pub graphical: bool,
     /// This rowser, which the fallback `xdg-open` must not be.
     pub self_exe: Option<PathBuf>,
+    /// The config file (`config::path`).
+    pub config_file: Result<PathBuf, String>,
+    /// The Daemon's runtime directory (`platform::runtime_dir`).
+    pub runtime_dir: Result<PathBuf, String>,
+    /// Where to look for the browsers that Route Targets name.
+    pub browser_roots: Roots,
+    /// `SSH_CONNECTION` is set: this is a Remote host.
+    pub ssh: bool,
     pub stdout: W,
 }
 
@@ -82,6 +95,10 @@ impl DoctorEnv<std::io::Stdout> {
             socket_override: std::env::var_os("ROWSER_SOCKET")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
+            config_file: crate::config::path(),
+            runtime_dir: crate::platform::runtime_dir(),
+            browser_roots: Roots::from_env(),
+            ssh: std::env::var_os("SSH_CONNECTION").is_some_and(|v| !v.is_empty()),
             stdout: std::io::stdout(),
         }
     }
@@ -444,9 +461,170 @@ pub async fn check_tunnel(tunnel_dir: &Path, socket_override: Option<PathBuf>) -
     out
 }
 
-/// Runs every check, prints one line each, and exits 1 when any fails.
+/// The config file must parse. Gives the Config (empty when there is no
+/// file) when it does.
+pub fn check_config(file: &Result<PathBuf, String>) -> (Check, Option<Config>) {
+    const NAME: &str = "config";
+    let f = match file {
+        Ok(f) => f,
+        Err(e) => return (Check::new(Status::Fail, NAME, e.clone()), None),
+    };
+    if !f.exists() {
+        return (
+            Check::new(
+                Status::Ok,
+                NAME,
+                format!("no file at {}; every request opens in system", f.display()),
+            ),
+            Some(Config::default()),
+        );
+    }
+    match crate::config::load(f) {
+        Ok(c) => {
+            let n = c.routes.len();
+            let detail = format!(
+                "{} parses; {n} route{}",
+                f.display(),
+                if n == 1 { "" } else { "s" }
+            );
+            (Check::new(Status::Ok, NAME, detail), Some(c))
+        }
+        Err(e) => (Check::new(Status::Fail, NAME, e), None),
+    }
+}
+
+/// Each browser Target in `config` must name a browser and Profile that
+/// `rowser browsers` finds. One warning for each Target that does not.
+pub fn check_routes(config: &Config, roots: &Roots) -> Vec<Check> {
+    const NAME: &str = "routes";
+    let mut targets: Vec<(String, &Target)> = config
+        .routes
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (format!("route {} (host {})", i + 1, r.host), &r.target))
+        .collect();
+    if let Some(t) = &config.unverified {
+        targets.push(("[unverified]".into(), t));
+    }
+    if let Some(t) = &config.default {
+        targets.push(("[default]".into(), t));
+    }
+    targets.retain(|(_, t)| matches!(t, Target::Browser { .. }));
+    if targets.is_empty() {
+        return vec![Check::new(Status::Ok, NAME, "no browser Targets")];
+    }
+    let browsers = Browsers::scan(roots);
+    let warnings: Vec<Check> = targets
+        .iter()
+        .filter_map(|(label, t)| {
+            browsers.normalize(t).err().map(|e| {
+                Check::new(
+                    Status::Warn,
+                    NAME,
+                    format!("{label}: {t}: {e}; the request falls back to [default]"),
+                )
+            })
+        })
+        .collect();
+    if warnings.is_empty() {
+        vec![Check::new(
+            Status::Ok,
+            NAME,
+            "every browser Target is found",
+        )]
+    } else {
+        warnings
+    }
+}
+
+/// The Daemon must answer `status` on the control socket.
+pub async fn check_daemon(runtime_dir: &Result<PathBuf, String>) -> Check {
+    const NAME: &str = "daemon";
+    let dir = match runtime_dir {
+        Ok(d) => d,
+        Err(e) => return Check::new(Status::Warn, NAME, e.clone()),
+    };
+    match request_async(dir, &Msg::Status).await {
+        Ok(Msg::StatusReply {
+            daemon_version,
+            protocol_version,
+            ..
+        }) => Check::new(
+            Status::Ok,
+            NAME,
+            format!(
+                "rowser {daemon_version} answers on {} (protocol {protocol_version})",
+                dir.display()
+            ),
+        ),
+        Ok(other) => Check::new(
+            Status::Fail,
+            NAME,
+            format!("unexpected reply from daemon: {other:?}"),
+        ),
+        Err(RequestError::NotRunning) => Check::new(
+            Status::Warn,
+            NAME,
+            "the daemon is not running; start it with `rowser daemon`",
+        ),
+        Err(RequestError::Other(e)) => Check::new(Status::Fail, NAME, e),
+    }
+}
+
+/// True when a Session socket is here: `ROWSER_SOCKET` exists, or a
+/// `rowser-*.sock` is in the tunnel directory.
+fn has_session_socket(tunnel_dir: &Path, socket_override: Option<&Path>) -> bool {
+    if socket_override.is_some_and(Path::exists) {
+        return true;
+    }
+    std::fs::read_dir(tunnel_dir).is_ok_and(|entries| {
+        entries.flatten().any(|e| {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            n.starts_with("rowser-") && n.ends_with(".sock")
+        })
+    })
+}
+
+/// Runs the Local machine checks, then the Remote host checks, as this
+/// machine needs; prints one line each, and exits 1 when any fails.
+///
+/// Local: a config file or a Daemon runtime directory exists. Remote: a
+/// Session socket exists or `SSH_CONNECTION` is set. Neither: Remote.
 pub async fn run_doctor<W: Write>(env: &mut DoctorEnv<W>) -> ExitCode {
+    let local = env.config_file.as_ref().is_ok_and(|f| f.exists())
+        || env.runtime_dir.as_ref().is_ok_and(|d| d.is_dir());
+    let remote =
+        env.ssh || has_session_socket(&env.tunnel_dir, env.socket_override.as_deref()) || !local;
     let mut checks = vec![];
+    if local {
+        let (c, config) = check_config(&env.config_file);
+        checks.push(c);
+        if let Some(config) = config {
+            checks.extend(check_routes(&config, &env.browser_roots));
+        }
+        checks.push(check_daemon(&env.runtime_dir).await);
+    }
+    if remote {
+        remote_checks(env, &mut checks).await;
+    }
+    for c in &checks {
+        let _ = writeln!(
+            env.stdout,
+            "{:<4} {}: {}",
+            c.status.label(),
+            c.name,
+            c.detail
+        );
+    }
+    if checks.iter().any(|c| c.status == Status::Fail) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+async fn remote_checks<W: Write>(env: &DoctorEnv<W>, checks: &mut Vec<Check>) {
     match &env.home {
         Some(home) => {
             checks.push(check_path(env.path.as_deref(), home));
@@ -477,20 +655,6 @@ pub async fn run_doctor<W: Write>(env: &mut DoctorEnv<W>) -> ExitCode {
         env.self_exe.as_deref(),
     ));
     checks.extend(check_tunnel(&env.tunnel_dir, env.socket_override.clone()).await);
-    for c in &checks {
-        let _ = writeln!(
-            env.stdout,
-            "{:<4} {}: {}",
-            c.status.label(),
-            c.name,
-            c.detail
-        );
-    }
-    if checks.iter().any(|c| c.status == Status::Fail) {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
 }
 
 /// `rowser doctor` for the binary.

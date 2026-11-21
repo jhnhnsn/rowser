@@ -261,6 +261,12 @@ src/
   platform`; `daemon ─► config, routes, browsers, protocol`; `routes ─► config, browsers`
   (types and `Browsers::normalize`); `browsers ─► config` (`Target`);
   `doctor ─► config, routes, browsers`.
+- `rowser doctor` on the Local machine: `DoctorEnv` also carries `config_file`, `runtime_dir`,
+  `browser_roots` and `ssh` (`SSH_CONNECTION` set). `run_doctor` runs the Local checks
+  (`check_config`, `check_routes` over every browser Target with `Browsers::normalize`,
+  `check_daemon` with `control::request_async(&Msg::Status)`) when a config file or the
+  runtime directory exists, and the Remote checks when a Session socket exists or `ssh` is
+  set, or when neither side is found. A Daemon that does not answer is a warning.
 - `rowser route`: `route::run_route(RouteArgs { config_file, runtime_dir, action, browsers },
   out, err)`. Warnings go to `err`.
   `config::{add_route, remove_route, move_route}` are text-to-text edits with `toml_edit`

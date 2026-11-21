@@ -44,19 +44,22 @@ pub fn request(runtime_dir: &Path, msg: &Msg) -> Result<Msg, RequestError> {
         .enable_all()
         .build()
         .map_err(|e| RequestError::Other(e.to_string()))?;
-    runtime.block_on(async {
-        let exchange = async {
-            let mut conn = open_control(runtime_dir).await?;
-            conn.send(msg).await.map_err(|_| RequestError::NotRunning)?;
-            match conn.recv().await {
-                Ok(Some(reply)) => Ok(reply),
-                _ => Err(RequestError::NotRunning),
-            }
-        };
-        tokio::time::timeout(ANSWER_TIMEOUT, exchange)
-            .await
-            .unwrap_or(Err(RequestError::NotRunning))
-    })
+    runtime.block_on(request_async(runtime_dir, msg))
+}
+
+/// `request` for a caller that already runs in a tokio runtime.
+pub async fn request_async(runtime_dir: &Path, msg: &Msg) -> Result<Msg, RequestError> {
+    let exchange = async {
+        let mut conn = open_control(runtime_dir).await?;
+        conn.send(msg).await.map_err(|_| RequestError::NotRunning)?;
+        match conn.recv().await {
+            Ok(Some(reply)) => Ok(reply),
+            _ => Err(RequestError::NotRunning),
+        }
+    };
+    tokio::time::timeout(ANSWER_TIMEOUT, exchange)
+        .await
+        .unwrap_or(Err(RequestError::NotRunning))
 }
 
 /// Connects to the control socket in `runtime_dir` and does the handshake.
