@@ -231,9 +231,11 @@ src/
 - `rowser pause` / `rowser resume`: `Inner.pause` holds the pause in memory (a restart ends
   it), with its end on the tokio clock (so tests use `start_paused`) and in Unix seconds for
   `StatusReply.paused_until`. A pause whose end passed is cleared when next read. `handle`
-  checks it before the rate limit and answers with an `OpenResult` error
-  (`paused; open this URL manually: <url>`), which the Shim prints after `rowser: ` and exits 1,
-  so the Shim needs no change. `control::parse_duration` reads `--for`.
+  checks it before the rate limit, and again after a confirmation the user approved, and
+  answers with an `OpenResult` error (`paused; open this URL manually: <url>`, or for
+  `rowser forward` `paused; port <p> was not forwarded`), which the Shim prints after
+  `rowser: ` and exits 1, so the Shim needs no change. `control::parse_duration` reads
+  `--for`; a duration the clocks cannot hold gets the error `duration too long`.
 - The Wrapper registers its Session with the Daemon (protocol 1.1) and keeps that connection
   open until `ssh` exits, so `rowser status` lists Sessions. On the control socket (local only,
   mode 0600) it sends `Msg::Session{host}` with the `ssh -G` Host alias; the Daemon answers

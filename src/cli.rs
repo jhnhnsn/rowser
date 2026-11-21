@@ -77,7 +77,7 @@ pub enum Command {
     },
     /// Make the running Daemon read the config file again.
     Reload,
-    /// Refuse each URL and `rowser forward` until `rowser resume`.
+    /// Refuse each Open request and `rowser forward` until `rowser resume`.
     Pause {
         /// End the pause by itself after this long, such as 30m, 1h or 2h30m.
         #[arg(long = "for", value_name = "DURATION", value_parser = crate::control::parse_duration)]

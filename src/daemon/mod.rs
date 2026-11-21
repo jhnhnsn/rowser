@@ -233,7 +233,7 @@ impl Inner {
                     callback_ports,
                 } => {
                     let host = notice_host(&stamp, reported_host);
-                    if self.paused().is_some() {
+                    if self.pause_state().is_paused() {
                         let mut e = new_entry(RequestKind::Open, &host, Outcome::Paused);
                         e.url = Some(url.clone());
                         self.record(e, callback_ports);
@@ -252,15 +252,11 @@ impl Inner {
                     callback_ports,
                 } => {
                     let host = notice_host(&stamp, reported_host);
-                    if self.paused().is_some() {
-                        let ports = callback_ports
-                            .iter()
-                            .map(u16::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ");
+                    if self.pause_state().is_paused() {
+                        let text = paused_text(&Subject::Forward(callback_ports.clone()));
                         let e = new_entry(RequestKind::Forward, &host, Outcome::Paused);
                         self.record(e, callback_ports);
-                        open_error(format!("paused; port {ports} was not forwarded"))
+                        open_error(text)
                     } else if limit.allow() {
                         self.manual_forward(host, callback_ports).await
                     } else {
@@ -467,10 +463,13 @@ impl Inner {
             Subject::Url(_) => (NOT_APPROVED, "the URL was not opened"),
             Subject::Forward(_) => (FORWARD_NOT_APPROVED, "the port was not forwarded"),
         };
+        let paused = paused_text(&notice.subject);
         let notifier = self.notifier.clone();
         let answer = tokio::task::spawn_blocking(move || notifier.confirm(notice));
         let timeout = self.config.confirm_timeout;
         match tokio::time::timeout(timeout, answer).await {
+            // A pause that started while the user looked still wins.
+            Ok(Ok(true)) if self.pause_state().is_paused() => Err((paused, Outcome::Paused)),
             Ok(Ok(true)) => Ok(()),
             // `confirm` gives only a bool, so a denial and a confirmation
             // that could not be shown look the same here; the Notifier logs
@@ -484,6 +483,21 @@ impl Inner {
                 ),
                 Outcome::TimedOut,
             )),
+        }
+    }
+}
+
+/// The error for a request that a pause refused.
+fn paused_text(subject: &Subject) -> String {
+    match subject {
+        Subject::Url(url) => format!("paused; open this URL manually: {url}"),
+        Subject::Forward(ports) => {
+            let ports = ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("paused; port {ports} was not forwarded")
         }
     }
 }

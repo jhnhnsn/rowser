@@ -288,7 +288,8 @@ pub fn parse_duration(text: &str) -> Result<Duration, String> {
     Ok(Duration::from_secs(secs))
 }
 
-/// Prints `line`, or reports `e` as `rowser <name>: …`.
+/// Prints the line in `result`, or reports its error: a Daemon error as
+/// `rowser <name>: …`, other errors as they are.
 fn finish(
     name: &str,
     result: Result<String, RequestError>,

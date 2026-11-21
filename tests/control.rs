@@ -376,7 +376,12 @@ async fn control_messages_are_refused_on_the_direct_and_relay_sockets() {
     let dir = TmpDir::new("ctl");
     let run = start(&dir).await;
 
-    for msg in [Msg::Status, Msg::Reload] {
+    for msg in [
+        Msg::Status,
+        Msg::Reload,
+        Msg::Pause { for_secs: None },
+        Msg::Resume,
+    ] {
         let mut direct = connect(run.join(DIRECT_SOCKET)).await;
         direct.send(&msg).await.unwrap();
         match direct.recv().await.unwrap() {

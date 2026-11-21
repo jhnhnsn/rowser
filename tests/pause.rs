@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use common::TmpDir;
 use rowser::control::{parse_duration, run_pause, run_resume, run_status, StatusArgs};
-use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
+use rowser::daemon::testing::{Answer, RecordingNotifier, RecordingOpener, ScriptedNotifier};
 use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET};
 use rowser::protocol::{Conn, Hello, Msg, CONTROL_SOCKET};
 use rowser::shim::{run_forward, run_open, ShimEnv};
@@ -247,6 +247,115 @@ async fn pause_for_ends_by_itself() {
         opener.urls(),
         vec![Url::parse("https://example.com/b").unwrap()]
     );
+}
+
+/// Starts a Daemon that asks the user about every host and waits for
+/// `ScriptedNotifier::release`.
+async fn start_hung(dir: &TmpDir) -> (PathBuf, RecordingOpener, ScriptedNotifier) {
+    let run = dir.0.join("run");
+    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let opener = RecordingOpener::default();
+    let notifier = ScriptedNotifier::new(Answer::Hang);
+    let config = DaemonConfig {
+        confirm_hosts: vec!["*".into()],
+        confirm_unverified: true,
+        ..DaemonConfig::default()
+    };
+    let daemon = Daemon::new(config, opener.clone(), notifier.clone());
+    tokio::spawn(daemon.serve(direct, relay, control));
+    (run, opener, notifier)
+}
+
+async fn wait_for_confirm(notifier: &ScriptedNotifier) {
+    while notifier.confirms().is_empty() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_request_approved_after_pause_starts_is_refused() {
+    let dir = TmpDir::new("pau");
+    let (run, opener, notifier) = start_hung(&dir).await;
+    let open = tokio::spawn({
+        let run = run.clone();
+        async move { shim_open(&run, "https://example.com/a").await }
+    });
+    wait_for_confirm(&notifier).await;
+    command(run.clone(), pause).await;
+    notifier.release(true);
+
+    let (code, err) = open.await.unwrap();
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(
+        err,
+        "rowser: paused; open this URL manually: https://example.com/a\n"
+    );
+    assert!(opener.urls().is_empty());
+    let (_, out, _) = command(run.clone(), activity_json).await;
+    let e: Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+    assert_eq!(e["result"], "paused");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rowser_forward_approved_after_pause_starts_is_refused() {
+    let dir = TmpDir::new("pau");
+    let (run, _, notifier) = start_hung(&dir).await;
+    let forward = tokio::spawn({
+        let run = run.clone();
+        async move {
+            let mut env = shim_env(&run);
+            let code = run_forward(8085, &mut env).await;
+            (code, String::from_utf8(env.stderr).unwrap())
+        }
+    });
+    wait_for_confirm(&notifier).await;
+    command(run.clone(), pause).await;
+    notifier.release(true);
+
+    let (code, err) = forward.await.unwrap();
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(err, "rowser: paused; port 8085 was not forwarded\n");
+    let (_, out, _) = command(run.clone(), activity_json).await;
+    let e: Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+    assert_eq!(e["kind"], "forward");
+    assert_eq!(e["result"], "paused");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pause_too_long_is_refused_and_the_daemon_stays_up() {
+    let dir = TmpDir::new("pau");
+    let (run, _) = start(&dir).await;
+    let mut c = control(&run).await;
+    c.send(&Msg::Pause {
+        for_secs: Some(u64::MAX),
+    })
+    .await
+    .unwrap();
+    match c.recv().await.unwrap() {
+        Some(Msg::OpenResult { error: Some(e), .. }) => assert_eq!(e, "duration too long"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(status(&run).await["paused"], false);
+}
+
+#[test]
+fn a_new_daemon_on_the_same_runtime_directory_starts_not_paused() {
+    let dir = TmpDir::new("pau");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let run = rt.block_on(async {
+        let (run, _) = start(&dir).await;
+        command(run.clone(), pause).await;
+        assert_eq!(status(&run).await["paused"], true);
+        run
+    });
+    drop(rt);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let (again, _) = start(&dir).await;
+        assert_eq!(again, run);
+        assert_eq!(status(&run).await["paused"], false);
+    });
 }
 
 #[test]

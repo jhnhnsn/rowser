@@ -11,7 +11,8 @@ All notable changes to rowser are listed here. The format follows
 - `rowser pause [--for <duration>]` (such as `30m`, `1h`, `2h30m`) stops the Daemon from
   opening URLs and starting `rowser forward`; `rowser resume` ends the pause. While paused,
   `xdg-open` on the remote host prints `rowser: paused; open this URL manually: <url>` and
-  exits 1; nothing is queued. `rowser status` shows the pause and, with `--for`, until when;
+  exits 1, and `rowser forward` prints `rowser: paused; port <p> was not forwarded`; nothing
+  is queued. `rowser status` shows the pause and, with `--for`, until when;
   `rowser activity` shows `paused`. A Daemon restart ends a pause.
   ([#49](https://github.com/jhnhnsn/rowser/issues/49))
 - `rowser doctor` on a Remote host also checks the default-browser setup:

@@ -11,6 +11,29 @@ use crate::routes::Routes;
 
 use super::{open_error, pong, unix_now, Inner, Loaded, Pause};
 
+/// Whether `rowser pause` is in effect now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PauseState {
+    NotPaused,
+    /// `until`: when `rowser pause --for` ends it, in Unix seconds.
+    Paused {
+        until: Option<u64>,
+    },
+}
+
+impl PauseState {
+    pub(super) fn is_paused(self) -> bool {
+        matches!(self, PauseState::Paused { .. })
+    }
+
+    pub(super) fn until(self) -> Option<u64> {
+        match self {
+            PauseState::Paused { until } => until,
+            PauseState::NotPaused => None,
+        }
+    }
+}
+
 impl Inner {
     pub(super) async fn handle_control(&self, stream: UnixStream) -> crate::protocol::Result<()> {
         let (mut conn, _) = Conn::accept(stream).await?;
@@ -19,7 +42,7 @@ impl Inner {
                 Msg::Ping => pong(),
                 Msg::Status => self.status(),
                 Msg::Reload => self.reload(),
-                Msg::Pause { for_secs } => self.pause(for_secs),
+                Msg::Pause { for_secs } => self.start_pause(for_secs),
                 Msg::Resume => self.resume(),
                 Msg::Activity { follow } => {
                     let (entries, mut rx) = self.activity.watch();
@@ -102,13 +125,20 @@ impl Inner {
         }
     }
 
-    /// `rowser pause [--for]`: replaces any pause in effect.
-    fn pause(&self, for_secs: Option<u64>) -> Msg {
-        let end = for_secs.map(|s| {
-            let at = tokio::time::Instant::now() + Duration::from_secs(s);
-            (at, unix_now() + s)
-        });
-        *self.pause.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pause { end });
+    /// `rowser pause [--for]`: replaces any pause in effect. A duration
+    /// past what the clocks can hold is refused.
+    fn start_pause(&self, for_secs: Option<u64>) -> Msg {
+        let end = match for_secs {
+            None => None,
+            Some(s) => {
+                let at = tokio::time::Instant::now().checked_add(Duration::from_secs(s));
+                match at.zip(unix_now().checked_add(s)) {
+                    Some(end) => Some(end),
+                    None => return open_error("duration too long"),
+                }
+            }
+        };
+        *self.lock_pause() = Some(Pause { end });
         tracing::info!(
             "paused{}",
             for_secs.map_or(String::new(), |s| format!(" for {s} seconds"))
@@ -120,29 +150,36 @@ impl Inner {
 
     /// `rowser resume`.
     fn resume(&self) -> Msg {
-        let was_paused = self.paused().is_some();
-        *self.pause.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let was_paused = self.pause_state().is_paused();
+        *self.lock_pause() = None;
         if was_paused {
             tracing::info!("resumed");
         }
         Msg::Resumed { was_paused }
     }
 
-    /// `Some` while a pause is in effect, with when it ends (Unix seconds)
-    /// for `rowser pause --for`. A pause whose time passed ends here.
-    pub(super) fn paused(&self) -> Option<Option<u64>> {
-        let mut pause = self.pause.lock().unwrap_or_else(|e| e.into_inner());
+    /// The pause field; a poisoned lock still holds a usable value.
+    fn lock_pause(&self) -> std::sync::MutexGuard<'_, Option<Pause>> {
+        self.pause.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The pause in effect now. A pause whose time passed ends here.
+    pub(super) fn pause_state(&self) -> PauseState {
+        let mut pause = self.lock_pause();
         match &*pause {
+            None => PauseState::NotPaused,
             Some(Pause { end: Some((at, _)) }) if tokio::time::Instant::now() >= *at => {
                 *pause = None;
-                None
+                PauseState::NotPaused
             }
-            p => p.as_ref().map(|p| p.end.map(|(_, u)| u)),
+            Some(p) => PauseState::Paused {
+                until: p.end.map(|(_, u)| u),
+            },
         }
     }
 
     fn status(&self) -> Msg {
-        let paused = self.paused();
+        let paused = self.pause_state();
         Msg::StatusReply {
             daemon_version: env!("CARGO_PKG_VERSION").into(),
             protocol_version: Hello::current().version(),
@@ -156,8 +193,8 @@ impl Inner {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .config_file_exists,
-            paused: paused.is_some(),
-            paused_until: paused.flatten(),
+            paused: paused.is_paused(),
+            paused_until: paused.until(),
             forwards: self.forwards.list(),
             sessions: self
                 .sessions
