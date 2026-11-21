@@ -377,6 +377,7 @@ async fn a_route_to_a_found_browser_reaches_the_opener_with_the_resolved_target(
 
 #[test]
 fn command_opener_runs_the_browser_argv_without_a_shell() {
+    let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     let dir = TmpDir::new("bo");
     let log = dir.0.join("argv.log");
     let script = dir.0.join("fake-chrome");
@@ -538,6 +539,7 @@ async fn confirm_hosts_asks_first_on_top_of_a_route() {
 /// Runs `rowser daemon` with `XDG_CONFIG_HOME` in `dir` and gives its exit
 /// code and stderr. Only for a config that stops the Daemon.
 fn daemon_with_config(dir: &Path, text: &str) -> (Option<i32>, String) {
+    let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     let conf = dir.join("config");
     std::fs::create_dir_all(conf.join("rowser")).unwrap();
     std::fs::write(conf.join("rowser").join("config.toml"), text).unwrap();
