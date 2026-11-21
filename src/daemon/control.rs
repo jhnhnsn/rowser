@@ -5,10 +5,10 @@ use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::sync::broadcast::error::RecvError;
 
+use crate::protocol::{Conn, Hello, Msg, SessionInfo};
 use crate::routes::Routes;
 
-use super::{open_error, pong, Inner};
-use crate::protocol::{Conn, Hello, Msg, SessionInfo};
+use super::{open_error, pong, Inner, Loaded};
 
 impl Inner {
     pub(super) async fn handle_control(&self, stream: UnixStream) -> crate::protocol::Result<()> {
@@ -67,10 +67,11 @@ impl Inner {
     }
 
     /// The Routes in use now.
-    pub(super) fn routes(&self) -> Arc<Routes> {
-        self.routes
+    pub(super) fn current_routes(&self) -> Arc<Routes> {
+        self.loaded
             .read()
             .unwrap_or_else(|e| e.into_inner())
+            .routes
             .clone()
     }
 
@@ -83,8 +84,11 @@ impl Inner {
         match crate::config::load(path) {
             Ok(file) => {
                 let count = file.routes.len();
-                *self.routes.write().unwrap_or_else(|e| e.into_inner()) =
-                    Arc::new(Routes::from_config(&file));
+                // A valid load means a file is there now.
+                *self.loaded.write().unwrap_or_else(|e| e.into_inner()) = Loaded {
+                    routes: Arc::new(Routes::from_config(&file)),
+                    config_file_exists: true,
+                };
                 tracing::info!("config reloaded from {} ({count} routes)", path.display());
                 Msg::Reloaded { routes: count }
             }
@@ -101,7 +105,11 @@ impl Inner {
                 .config_file
                 .as_ref()
                 .map(|p| p.display().to_string()),
-            config_file_exists: self.config_file_exists,
+            config_file_exists: self
+                .loaded
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .config_file_exists,
             // `rowser pause` (#49) sets this; until then the Daemon never pauses.
             paused: false,
             forwards: self.forwards.list(),
@@ -110,7 +118,7 @@ impl Inner {
                 .list()
                 .into_iter()
                 .map(|(host, start)| SessionInfo {
-                    target: self.routes().session_target(&host).to_string(),
+                    target: self.current_routes().session_target(&host).to_string(),
                     age_secs: start.elapsed().as_secs(),
                     host,
                 })

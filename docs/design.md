@@ -60,8 +60,8 @@ its Session; the reply is an `OpenResult`, and the Session lasts until that conn
 of Routes, or an `OpenResult` error with the file, line and reason, and the old Routes stay).
 The Daemon keeps its Routes behind a lock, so a reload applies to the next Open request.
 `control::reload(runtime_dir)` is the client call `rowser reload` and the `rowser route`
-commands share. The control socket also answers `Ping`. `CONTROL_SOCKET` (the socket's file name) lives in `protocol`, so the client side does
-not depend on `daemon`.
+commands share. The control socket also answers `Ping`. `CONTROL_SOCKET` (the socket's file
+name) lives in `protocol`, so the client side does not depend on `daemon`.
 
 The version is 1.1: 1.1 adds the control messages, `Session` among them. Peers with the same major interoperate, so a
 1.0 Shim or Wrapper still works with a 1.1 Daemon. A Daemon built
@@ -229,4 +229,5 @@ src/
   `Resolved.route` carries the Route index, shown as `route <n>` (from 1), `[unverified]` or
   `[default]`. `control::run_activity(ActivityArgs, out, err)` is the client.
 - `DaemonConfig.config_file` is the config file path the Daemon resolved (`config::path`);
-  `rowser status` shows it, with `(no file)` when no file was there at start.
+  `rowser status` shows it, with `(no file)` when no file was there at start or at the last
+  valid reload. The Daemon keeps that flag with the Routes, behind one lock.

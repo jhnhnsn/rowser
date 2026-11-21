@@ -89,7 +89,17 @@ pub struct Daemon {
     inner: Arc<Inner>,
 }
 
+/// What a valid `rowser reload` replaces, as one value (ADR 0007).
+struct Loaded {
+    routes: Arc<Routes>,
+    /// True when a file was at `config.config_file` at the last load.
+    config_file_exists: bool,
+}
+
 struct Inner {
+    /// The start-up config. `Daemon::new` moves its `routes` into `loaded`
+    /// (leaving the default there), so no reader sees stale Routes: read
+    /// `current_routes()` only.
     config: DaemonConfig,
     opener: Arc<dyn Opener>,
     notifier: Arc<dyn Notifier>,
@@ -97,11 +107,9 @@ struct Inner {
     sessions: Arc<session::Sessions>,
     /// Recent requests, for `rowser activity`.
     activity: Arc<activity::Activity>,
-    /// True when a file was at `config.config_file` at start.
-    config_file_exists: bool,
-    /// The Routes in use: `config.routes` at start, replaced by a valid
-    /// `rowser reload` (ADR 0007).
-    routes: RwLock<Arc<Routes>>,
+    /// The Routes in use and the file state: set at start, replaced by a
+    /// valid `rowser reload`.
+    loaded: RwLock<Loaded>,
 }
 
 impl Daemon {
@@ -111,8 +119,10 @@ impl Daemon {
         let config_file_exists = config.config_file.as_deref().is_some_and(Path::is_file);
         Daemon {
             inner: Arc::new(Inner {
-                config_file_exists,
-                routes: RwLock::new(Arc::new(config.routes.clone())),
+                loaded: RwLock::new(Loaded {
+                    routes: Arc::new(std::mem::take(&mut config.routes)),
+                    config_file_exists,
+                }),
                 config,
                 opener: Arc::new(opener),
                 notifier: Arc::new(notifier),
@@ -343,7 +353,7 @@ impl Inner {
             target,
             ask,
             mut warnings,
-        } = self.routes().resolve(&request_host, &url);
+        } = self.current_routes().resolve(&request_host, &url);
         entry.route = Some(route_label(route, &host));
         entry.target = Some(target.to_string());
         entry.warnings = warnings.clone();

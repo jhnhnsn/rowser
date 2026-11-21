@@ -376,28 +376,30 @@ async fn control_messages_are_refused_on_the_direct_and_relay_sockets() {
     let dir = TmpDir::new("ctl");
     let run = start(&dir).await;
 
-    let mut direct = connect(run.join(DIRECT_SOCKET)).await;
-    direct.send(&Msg::Status).await.unwrap();
-    match direct.recv().await.unwrap() {
-        Some(Msg::OpenResult { error: Some(e), .. }) => {
-            assert!(e.contains("control socket"), "{e}")
+    for msg in [Msg::Status, Msg::Reload] {
+        let mut direct = connect(run.join(DIRECT_SOCKET)).await;
+        direct.send(&msg).await.unwrap();
+        match direct.recv().await.unwrap() {
+            Some(Msg::OpenResult { error: Some(e), .. }) => {
+                assert!(e.contains("control socket"), "{msg:?}: {e}")
+            }
+            other => panic!("unexpected {other:?}"),
         }
-        other => panic!("unexpected {other:?}"),
-    }
 
-    let mut relay = connect(run.join(RELAY_SOCKET)).await;
-    relay
-        .send(&Msg::HostStamp {
-            alias: "g14".into(),
-        })
-        .await
-        .unwrap();
-    relay.send(&Msg::Status).await.unwrap();
-    match relay.recv().await.unwrap() {
-        Some(Msg::OpenResult { error: Some(e), .. }) => {
-            assert!(e.contains("control socket"), "{e}")
+        let mut relay = connect(run.join(RELAY_SOCKET)).await;
+        relay
+            .send(&Msg::HostStamp {
+                alias: "g14".into(),
+            })
+            .await
+            .unwrap();
+        relay.send(&msg).await.unwrap();
+        match relay.recv().await.unwrap() {
+            Some(Msg::OpenResult { error: Some(e), .. }) => {
+                assert!(e.contains("control socket"), "{msg:?}: {e}")
+            }
+            other => panic!("unexpected {other:?}"),
         }
-        other => panic!("unexpected {other:?}"),
     }
 
     // The Daemon keeps serving.
@@ -492,6 +494,11 @@ async fn reload_applies_new_routes_and_refuses_an_invalid_file() {
     assert_eq!(out, "rowser: config reloaded (2 routes)\n");
     let w = open_warnings(&run, &notifier, "g14").await;
     assert!(w.len() == 1 && w[0].contains("safari"), "{w:?}");
+    let _s = session(&run, "g14").await;
+    assert_eq!(
+        json_status(run.clone()).await["sessions"][0]["target"],
+        "safari"
+    );
 
     std::fs::write(&file, "[[route]]\nhost = \"g14\"\nopen = 7\n").unwrap();
     let (code, out, err) = reload(run.clone()).await;
@@ -503,6 +510,28 @@ async fn reload_applies_new_routes_and_refuses_an_invalid_file() {
     // The old Route still applies.
     let w = open_warnings(&run, &notifier, "g14").await;
     assert!(w.len() == 1 && w[0].contains("safari"), "{w:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_says_the_config_file_exists_after_a_reload_loads_a_new_file() {
+    let dir = TmpDir::new("ctl");
+    let file = dir.0.join("config.toml");
+    let config = DaemonConfig {
+        config_file: Some(file.clone()),
+        ..DaemonConfig::default()
+    };
+    let run = start_with(&dir, config).await;
+    assert_eq!(json_status(run.clone()).await["config_file_exists"], false);
+
+    std::fs::write(&file, "[[route]]\nhost = \"g14\"\nopen = \"safari\"\n").unwrap();
+    let (code, _, err) = reload(run.clone()).await;
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    let (_, out, _) = status(run.clone(), false).await;
+    assert!(
+        out.contains(&format!("config file:       {}\n", file.display())),
+        "{out}"
+    );
+    assert_eq!(json_status(run).await["config_file_exists"], true);
 }
 
 #[tokio::test(flavor = "multi_thread")]

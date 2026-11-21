@@ -16,9 +16,9 @@ All notable changes to rowser are listed here. The format follows
   Ctrl-C; `--json` prints one JSON object per line. A Daemon restart clears the list.
   ([#48](https://github.com/jhnhnsn/rowser/issues/48))
 - `rowser reload` makes the running Daemon read the config file again. With a valid file, the
-  new Routes apply to the next URL and it prints `rowser: config reloaded (<n> routes)`. An
-  invalid file is refused with the file, line and reason, the Daemon keeps its old Routes, and
-  the command exits 1. ([#45](https://github.com/jhnhnsn/rowser/issues/45))
+  new Routes apply to the next Open request and it prints
+  `rowser: config reloaded (<n> routes)`. An invalid file is refused with the file, line and
+  reason, the Daemon keeps its old Routes, and the command exits 1. ([#45](https://github.com/jhnhnsn/rowser/issues/45))
 - `rowser status` lists Sessions: each `rowser ssh` that is connected to the Daemon, with its
   Host alias, how long it has run, and the Target its first Route without `match` gives
   (`system` with no Route). A Session ends when `ssh` exits. A newer `rowser ssh` still works
