@@ -8,6 +8,11 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser doctor` now checks the Local machine too: that the config file parses (or the file
+  and line of the error), that each Route's browser and Profile exist (and where the request
+  falls back if not), and whether the Daemon answers, with its version. Doctor runs the Local
+  checks where a config file or Daemon runtime directory exists, and the Remote host checks
+  over SSH. ([#53](https://github.com/jhnhnsn/rowser/issues/53))
 - Routes can open a URL in a given browser and Profile: `open = "chrome:Work"`,
   `"firefox:Dev"` or `"safari"`. A Profile is looked up by its folder name first, then by its
   display name. On macOS rowser runs `open -b <bundle id>` (Chromium browsers get their
