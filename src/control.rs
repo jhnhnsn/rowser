@@ -384,7 +384,8 @@ fn activity_line(e: &ActivityEntry) -> String {
         });
     }
     parts.extend(e.warnings.iter().map(|w| format!("warning: {w}")));
-    parts.join("  ")
+    // Host names, URLs and warnings come from the Remote host.
+    crate::protocol::printable(&parts.join("  "))
 }
 
 /// Unix seconds as local `YYYY-MM-DD HH:MM:SS`.

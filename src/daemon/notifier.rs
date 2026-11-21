@@ -13,6 +13,16 @@ pub enum NoticeHost {
     Reported(String),
 }
 
+impl NoticeHost {
+    /// The host name, and `true` when it is an unverified Reported host name.
+    pub fn parts(&self) -> (&str, bool) {
+        match self {
+            NoticeHost::Alias(a) => (a, false),
+            NoticeHost::Reported(r) => (r, true),
+        }
+    }
+}
+
 /// What a notice is about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Subject {
@@ -97,8 +107,7 @@ impl Notice {
 /// notification markup.
 fn clean(text: &str, escape: bool) -> String {
     let mut out = String::with_capacity(text.len());
-    let bidi = |c: char| matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
-    for c in text.chars().filter(|&c| !c.is_control() && !bidi(c)) {
+    for c in crate::protocol::printable(text).chars() {
         match c {
             '&' if escape => out.push_str("&amp;"),
             '<' if escape => out.push_str("&lt;"),

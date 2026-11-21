@@ -366,6 +366,157 @@ async fn follow_prints_new_entries_as_they_come() {
     assert_eq!(v["id"], 2);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn follow_prints_the_entry_again_when_its_callback_forward_closes() {
+    let dir = TmpDir::new("act");
+    let config = DaemonConfig {
+        forward_timeout: Duration::from_millis(300),
+        ..DaemonConfig::default()
+    };
+    let run = start(&dir, config).await;
+    let (tx, rx) = mpsc::channel();
+    let follow_run = run.clone();
+    std::thread::spawn(move || {
+        run_activity(
+            ActivityArgs {
+                runtime_dir: Ok(follow_run),
+                json: true,
+                follow: true,
+            },
+            &mut Lines(tx),
+            &mut std::io::sink(),
+        )
+    });
+    // Wait until the follow connection is up.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let port = free_port().await;
+    let mut conn = relay(&run, "g14").await;
+    open(&mut conn, "https://example.com/cb", vec![port]).await;
+    let lines = read_lines(&rx, 2);
+    let first: Value = serde_json::from_str(&lines[0]).unwrap();
+    let second: Value = serde_json::from_str(&lines[1]).unwrap();
+    assert_eq!(first["open_secs"], Value::Null);
+    assert_eq!(second["id"], first["id"]);
+    assert_eq!(second["open_secs"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_request_shows_how_long_its_callback_forward_stayed_open() {
+    let dir = TmpDir::new("act");
+    let config = DaemonConfig {
+        forward_timeout: Duration::from_millis(300),
+        ..DaemonConfig::default()
+    };
+    let run = start(&dir, config).await;
+    let port = free_port().await;
+    let mut conn = relay(&run, "g14").await;
+    open(&mut conn, "https://example.com/", vec![port]).await;
+    let (_, out, _) = activity(run.clone(), false).await;
+    assert!(
+        out.trim_end()
+            .ends_with(&format!("callback {port} still open")),
+        "{out}"
+    );
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if entries(run.clone()).await[0]["open_secs"] == 0 {
+            let (_, out, _) = activity(run, false).await;
+            assert!(
+                out.trim_end()
+                    .ends_with(&format!("callback {port} open 0s")),
+                "{out}"
+            );
+            return;
+        }
+    }
+    panic!("the forward has no duration");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_busy_port_records_the_requested_port() {
+    let dir = TmpDir::new("act");
+    let run = start(&dir, DaemonConfig::default()).await;
+    let busy = TcpListener::bind(SocketAddr::new(V6, 0)).await.unwrap();
+    let port = busy.local_addr().unwrap().port();
+    let mut conn = relay(&run, "g14").await;
+    conn.send(&Msg::Forward {
+        reported_host: "devbox".into(),
+        callback_ports: vec![port],
+    })
+    .await
+    .unwrap();
+    conn.recv().await.unwrap();
+    open(&mut conn, "https://example.com/", vec![port]).await;
+
+    let e = entries(run.clone()).await;
+    for entry in &e {
+        assert_eq!(entry["ports"], serde_json::json!([port]));
+        assert!(!entry["warnings"].as_array().unwrap().is_empty(), "{entry}");
+    }
+    let (_, out, _) = activity(run, false).await;
+    assert!(!out.contains("still open"), "{out}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browser_target_that_falls_back_shows_opened_with_a_warning() {
+    let text = "[[route]]\nhost = \"g14\"\nopen = \"chrome:Work\"\n";
+    let config = DaemonConfig {
+        routes: rowser::routes::Routes::from_config(&rowser::config::parse(text).unwrap()),
+        ..DaemonConfig::default()
+    };
+    let dir = TmpDir::new("act");
+    let run = start(&dir, config).await;
+    let mut conn = relay(&run, "g14").await;
+    open(&mut conn, "https://example.com/", vec![]).await;
+    let e = entries(run.clone()).await;
+    assert_eq!(e[0]["result"], "opened");
+    let (_, out, _) = activity(run, false).await;
+    assert!(
+        out.trim_end().ends_with(
+            "opened  warning: target `chrome:Work` is not available yet; opened with `system`"
+        ),
+        "{out}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn control_and_bidi_characters_do_not_reach_the_text_line() {
+    let dir = TmpDir::new("act");
+    let run = start(&dir, DaemonConfig::default()).await;
+    let s = UnixStream::connect(run.join(DIRECT_SOCKET)).await.unwrap();
+    let mut conn = Conn::connect(s, Hello::current()).await.unwrap();
+    conn.send(&Msg::Open {
+        url: "https://example.com/\u{202E}x".into(),
+        reported_host: "ev\u{1b}[2Kil\u{2066}box".into(),
+        callback_ports: vec![],
+    })
+    .await
+    .unwrap();
+    conn.recv().await.unwrap();
+    let (_, out, _) = activity(run, false).await;
+    assert!(out.contains("  ev[2Kilbox (unverified)  "), "{out}");
+    assert!(
+        !out.contains('\u{1b}') && !out.contains('\u{202E}'),
+        "{out:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn activity_is_refused_on_the_relay_and_direct_sockets() {
+    let dir = TmpDir::new("act");
+    let run = start(&dir, DaemonConfig::default()).await;
+    let s = UnixStream::connect(run.join(DIRECT_SOCKET)).await.unwrap();
+    let direct = Conn::connect(s, Hello::current()).await.unwrap();
+    for mut conn in [direct, relay(&run, "g14").await] {
+        conn.send(&Msg::Activity { follow: true }).await.unwrap();
+        match conn.recv().await.unwrap() {
+            Some(Msg::OpenResult { error: Some(_), .. }) => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(conn.recv().await.unwrap_or(None).is_none());
+    }
+}
+
 #[test]
 fn activity_with_no_daemon_says_not_running_and_exits_1() {
     let dir = TmpDir::new("act");

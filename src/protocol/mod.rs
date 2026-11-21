@@ -12,6 +12,15 @@ const MAX_LINE: usize = 64 * 1024;
 /// It is here, not in `daemon`, so that the client side needs only `protocol`.
 pub const CONTROL_SOCKET: &str = "rowserd-control.sock";
 
+/// `text` without control characters and bidi controls, so a forged host
+/// name or URL cannot move or hide text it is shown next to.
+pub fn printable(text: &str) -> String {
+    let bidi = |c: char| matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+    text.chars()
+        .filter(|&c| !c.is_control() && !bidi(c))
+        .collect()
+}
+
 /// The protocol version this build speaks.
 const VERSION: Version = Version { major: 1, minor: 1 };
 
@@ -184,7 +193,6 @@ pub enum Outcome {
     Opened,
     Denied,
     TimedOut,
-    Paused,
     RateLimited,
     SchemeRefused,
     /// The Opener failed.
@@ -198,7 +206,6 @@ impl Outcome {
             Outcome::Opened => "opened",
             Outcome::Denied => "denied",
             Outcome::TimedOut => "timed out",
-            Outcome::Paused => "paused",
             Outcome::RateLimited => "rate limited",
             Outcome::SchemeRefused => "scheme refused",
             Outcome::BrowserMissing => "browser missing",

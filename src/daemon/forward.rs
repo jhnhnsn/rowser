@@ -110,10 +110,8 @@ impl Forwards {
         bound.sort_unstable();
         bound.dedup();
         let ports = bound.clone();
-        let (host, unverified) = match host {
-            NoticeHost::Alias(a) => (a.clone(), false),
-            NoticeHost::Reported(r) => (r.clone(), true),
-        };
+        let (host, unverified) = host.parts();
+        let host = host.to_string();
         self.active.lock().unwrap().insert(
             id.clone(),
             Active {

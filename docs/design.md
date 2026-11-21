@@ -58,6 +58,10 @@ sessions: [SessionInfo{host, age_secs, target}]}`, and `Session{host}` (the Wrap
 its Session; the reply is an `OpenResult`, and the Session lasts until that connection closes),
 `Reload` (the Daemon reads the config file again; the reply is `Reloaded{routes}` with the number
 of Routes, or an `OpenResult` error with the file, line and reason, and the old Routes stay).
+`Activity{follow}` (`rowser activity`; the reply is `ActivityReply{entries: [ActivityEntry]}`,
+oldest first, and with `follow` an `ActivityUpdate{entry}` follows for each new entry and for an
+entry whose Callback forward closed, with the same `id` and now `open_secs`, until the client
+closes the connection).
 The Daemon keeps its Routes behind a lock, so a reload applies to the next Open request.
 `control::reload(runtime_dir)` is the client call `rowser reload` and the `rowser route`
 commands share. The control socket also answers `Ping`. `CONTROL_SOCKET` (the socket's file
@@ -210,6 +214,14 @@ src/
   is the one helper for every control command; `RequestError::NotRunning` prints
   `rowser: the daemon is not running`. `control::run_status(StatusArgs, out, err)` is
   `rowser status`; the runtime directory comes from `platform::runtime_dir`, as for `rowser ssh`.
+  `open_control(runtime_dir)` connects and does the handshake for `request` and for
+  `rowser activity --follow`, which keeps its connection open.
+- `rowser activity`: `daemon/activity.rs` keeps the ring (200 entries) and a broadcast channel
+  for `follow`; `Forwards::create` takes an `on_end` callback that reports how long the forward
+  stayed open. `Resolved.route` carries the Route index, shown as `route <n>` (from 1),
+  `[unverified]` or `[default]`. `control::run_activity(ActivityArgs, out, err)` is the client;
+  its text lines pass through `protocol::printable`, which the Notifier also uses, so a forged
+  host name or URL cannot move text with control or bidi characters.
 - The Wrapper registers its Session with the Daemon (protocol 1.1) and keeps that connection
   open until `ssh` exits, so `rowser status` lists Sessions. On the control socket (local only,
   mode 0600) it sends `Msg::Session{host}` with the `ssh -G` Host alias; the Daemon answers
@@ -221,13 +233,6 @@ src/
 - Dependency direction: `cli ─► config, routes, browsers, control`; `control ─► protocol,
   platform`; `daemon ─► config, routes, browsers, protocol`; `routes ─► config` types only;
   `doctor ─► config, routes, browsers`.
-- `rowser activity`: `Msg::Activity{follow}` on the control socket; the reply is
-  `ActivityReply{entries}` (oldest first), and with `follow` an `ActivityUpdate{entry}` follows
-  for each new entry and for an entry whose Callback forward closed (same `id`, now with
-  `open_secs`). `daemon/activity.rs` keeps the ring (200 entries) and a broadcast channel;
-  `Forwards::create` takes an `on_end` callback that reports how long the forward stayed open.
-  `Resolved.route` carries the Route index, shown as `route <n>` (from 1), `[unverified]` or
-  `[default]`. `control::run_activity(ActivityArgs, out, err)` is the client.
 - `DaemonConfig.config_file` is the config file path the Daemon resolved (`config::path`);
   `rowser status` shows it, with `(no file)` when no file was there at start or at the last
   valid reload. The Daemon keeps that flag with the Routes, behind one lock.

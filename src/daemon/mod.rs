@@ -228,8 +228,7 @@ impl Inner {
                     } else {
                         let mut e = new_entry(RequestKind::Open, &host, Outcome::RateLimited);
                         e.url = Some(url);
-                        e.ports = callback_ports;
-                        self.activity.push(e, None);
+                        self.record(e, callback_ports);
                         self.rate_error()
                     }
                 }
@@ -241,9 +240,8 @@ impl Inner {
                     if limit.allow() {
                         self.manual_forward(host, callback_ports).await
                     } else {
-                        let mut e = new_entry(RequestKind::Forward, &host, Outcome::RateLimited);
-                        e.ports = callback_ports;
-                        self.activity.push(e, None);
+                        let e = new_entry(RequestKind::Forward, &host, Outcome::RateLimited);
+                        self.record(e, callback_ports);
                         self.rate_error()
                     }
                 }
@@ -267,6 +265,27 @@ impl Inner {
             conn.send(&reply).await?;
         }
         Ok(())
+    }
+
+    /// Records a request that started no Callback forward, with the ports
+    /// it asked for.
+    fn record(&self, mut entry: ActivityEntry, ports: Vec<u16>) {
+        entry.ports = ports;
+        self.activity.push(entry, None);
+    }
+
+    /// Records a request that went on to `Forwards::create`. `entry.ports`
+    /// holds the requested ports; the bound ones replace them when any bound.
+    /// When none bound, no forward starts, so the entry is closed at once.
+    fn record_forward(&self, mut entry: ActivityEntry, created: &forward::Created) {
+        entry.warnings.extend(created.warnings.iter().cloned());
+        if !created.ports.is_empty() {
+            entry.ports = created.ports.clone();
+        }
+        if created.forward_id.is_none() && !entry.ports.is_empty() {
+            entry.open_secs = Some(0);
+        }
+        self.activity.push(entry, created.forward_id.clone());
     }
 
     fn rate_error(&self) -> Msg {
@@ -302,17 +321,15 @@ impl Inner {
         };
         if confirm {
             if let Err((error, outcome)) = self.confirm(notice.clone()).await {
-                let mut e = new_entry(RequestKind::Forward, &notice.host, outcome);
-                e.ports = ports;
-                self.activity.push(e, None);
+                let e = new_entry(RequestKind::Forward, &notice.host, outcome);
+                self.record(e, ports);
                 return error;
             }
         }
         let created = self.forward(&ports, &notice.host);
         let mut e = new_entry(RequestKind::Forward, &notice.host, Outcome::Opened);
-        e.ports = created.ports.clone();
-        e.warnings = created.warnings.clone();
-        self.activity.push(e, created.forward_id.clone());
+        e.ports = ports.clone();
+        self.record_forward(e, &created);
         if !confirm || !created.warnings.is_empty() {
             notice.warnings = created.warnings.clone();
             let notifier = self.notifier.clone();
@@ -376,8 +393,6 @@ impl Inner {
         // Bind the Callback forward only after approval, so a denied URL
         // never holds a local port.
         let created = self.forward(ports, &host);
-        entry.ports = created.ports.clone();
-        entry.warnings.extend(created.warnings.iter().cloned());
         let opener = self.opener.clone();
         let notifier = self.notifier.clone();
         let forward_warned = !created.warnings.is_empty();
@@ -400,7 +415,7 @@ impl Inner {
         match result.map_err(io::Error::other).and_then(|r| r) {
             Ok(()) => {
                 entry.result = Outcome::Opened;
-                self.activity.push(entry, created.forward_id.clone());
+                self.record_forward(entry, &created);
                 Msg::OpenResult {
                     forward_id: created.forward_id,
                     warnings: created.warnings,
@@ -409,8 +424,8 @@ impl Inner {
             }
             Err(e) => {
                 entry.result = Outcome::BrowserMissing;
-                entry.ports.clear();
-                self.activity.push(entry, None);
+                entry.warnings.extend(created.warnings.iter().cloned());
+                self.record(entry, vec![]);
                 // No keeper attaches when the Shim gets an error: free the
                 // ports now, not after the forward timeout.
                 if let Some(id) = &created.forward_id {
@@ -455,17 +470,14 @@ impl Inner {
 /// A new `rowser activity` entry, stamped with the time now. The ring
 /// sets its id.
 fn new_entry(kind: RequestKind, host: &NoticeHost, result: Outcome) -> ActivityEntry {
-    let (host, unverified) = match host {
-        NoticeHost::Alias(a) => (a.clone(), false),
-        NoticeHost::Reported(r) => (r.clone(), true),
-    };
+    let (host, unverified) = host.parts();
     ActivityEntry {
         id: 0,
         time: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
         kind,
-        host,
+        host: host.to_string(),
         unverified,
         url: None,
         route: None,

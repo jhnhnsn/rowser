@@ -28,7 +28,10 @@ impl Inner {
                     loop {
                         tokio::select! {
                             r = rx.recv() => match r {
-                                Ok(entry) => conn.send(&Msg::ActivityUpdate { entry: Box::new(entry) }).await?,
+                                Ok(entry) => {
+                                    let entry = Box::new(entry);
+                                    conn.send(&Msg::ActivityUpdate { entry }).await?;
+                                }
                                 Err(RecvError::Lagged(_)) => continue,
                                 Err(RecvError::Closed) => return Ok(()),
                             },
