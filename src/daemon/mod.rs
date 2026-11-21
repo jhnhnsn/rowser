@@ -502,16 +502,16 @@ impl Inner {
         let timeout = self.config.confirm_timeout;
         let waited = tokio::time::timeout(timeout, async {
             tokio::select! {
-                answer = &mut terminal => answer.ok().map(Marked::Terminal),
+                answer = &mut terminal => answer.ok().map(FirstAnswer::Terminal),
                 answer = &mut desktop => {
                     // The desktop answered; the terminal may have taken the
                     // request just before, and then its answer wins.
                     match self.pending.take(guard.id) {
                         Some(_) => Some(match answer {
-                            Ok(a) => Marked::Desktop(a),
-                            Err(e) => Marked::Failed(e.to_string()),
+                            Ok(a) => FirstAnswer::Desktop(a),
+                            Err(e) => FirstAnswer::Failed(e.to_string()),
                         }),
-                        None => terminal.await.ok().map(Marked::Terminal),
+                        None => terminal.await.ok().map(FirstAnswer::Terminal),
                     }
                 }
             }
@@ -533,14 +533,17 @@ impl Inner {
             Ok(a) => a,
         };
         let (approved, target, by) = match answer {
-            Some(Marked::Terminal(pending::TerminalAnswer::Approve(t))) => {
+            Some(FirstAnswer::Terminal(pending::TerminalAnswer::Approve(t))) => {
                 (true, t, AnsweredBy::Terminal)
             }
-            Some(Marked::Terminal(pending::TerminalAnswer::Deny)) | None => {
+            // `None`: the terminal took the request but dropped its sender
+            // without an answer. Not reached today (`Taken::answer` sends
+            // before it dismisses); deny is the safe result if it ever is.
+            Some(FirstAnswer::Terminal(pending::TerminalAnswer::Deny)) | None => {
                 (false, None, AnsweredBy::Terminal)
             }
-            Some(Marked::Desktop(a)) => (a, None, AnsweredBy::Desktop),
-            Some(Marked::Failed(e)) => {
+            Some(FirstAnswer::Desktop(a)) => (a, None, AnsweredBy::Desktop),
+            Some(FirstAnswer::Failed(e)) => {
                 return Err(refused(
                     format!("confirmation failed: {e}"),
                     Outcome::Denied,
@@ -572,7 +575,7 @@ impl Inner {
 }
 
 /// The first answer to a confirmation.
-enum Marked {
+enum FirstAnswer {
     Terminal(pending::TerminalAnswer),
     Desktop(bool),
     /// The Notifier task failed.

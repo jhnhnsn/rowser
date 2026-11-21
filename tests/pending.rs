@@ -11,8 +11,10 @@ use common::TmpDir;
 use rowser::config::Target;
 use rowser::control::{run_activity, run_approve, run_deny, run_pending, ActivityArgs};
 use rowser::daemon::testing::{Answer, RecordingOpener, ScriptedNotifier};
-use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET, NOT_APPROVED};
-use rowser::shim::{run_open, ShimEnv};
+use rowser::daemon::{
+    bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET, FORWARD_NOT_APPROVED, NOT_APPROVED,
+};
+use rowser::shim::{run_forward, run_open, ShimEnv};
 use serde_json::Value;
 use url::Url;
 
@@ -73,22 +75,36 @@ fn shim_open(run: &Path, url: &str) -> tokio::task::JoinHandle<(ExitCode, String
     let run = run.to_path_buf();
     let url = Url::parse(url).unwrap();
     tokio::spawn(async move {
-        let mut env = ShimEnv {
-            tunnel_dir: run.join("no-tunnels"),
-            socket_override: Some(run.join(DIRECT_SOCKET)),
-            reported_host: "devbox".into(),
-            procfs: rowser::detect::Procfs::new("/nonexistent"),
-            caller_pid: 1,
-            keeper_exe: None,
-            graphical: false,
-            search_path: None,
-            self_exe: None,
-            in_fallback: false,
-            stderr: Vec::new(),
-        };
+        let mut env = shim_env(&run);
         let code = run_open(&url, &mut env).await;
         (code, String::from_utf8(env.stderr).unwrap())
     })
+}
+
+/// Starts `rowser forward <port>` in the background; gives (exit, stderr).
+fn shim_forward(run: &Path, port: u16) -> tokio::task::JoinHandle<(ExitCode, String)> {
+    let run = run.to_path_buf();
+    tokio::spawn(async move {
+        let mut env = shim_env(&run);
+        let code = run_forward(port, &mut env).await;
+        (code, String::from_utf8(env.stderr).unwrap())
+    })
+}
+
+fn shim_env(run: &Path) -> ShimEnv<Vec<u8>> {
+    ShimEnv {
+        tunnel_dir: run.join("no-tunnels"),
+        socket_override: Some(run.join(DIRECT_SOCKET)),
+        reported_host: "devbox".into(),
+        procfs: rowser::detect::Procfs::new("/nonexistent"),
+        caller_pid: 1,
+        keeper_exe: None,
+        graphical: false,
+        search_path: None,
+        self_exe: None,
+        in_fallback: false,
+        stderr: Vec::new(),
+    }
 }
 
 /// Runs a control command on a blocking thread; gives (exit, stdout, stderr).
@@ -285,6 +301,38 @@ async fn approve_with_a_missing_browser_is_refused_and_the_request_still_waits()
     wait_pending(&s.run, 1).await;
     assert_eq!(deny(&s.run, 1).await.0, ExitCode::SUCCESS);
     assert_eq!(shim.await.unwrap().0, ExitCode::FAILURE);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deny_refuses_a_rowser_forward_with_the_forward_error() {
+    let dir = TmpDir::new("pnd");
+    let s = start(&dir).await;
+    let forward = shim_forward(&s.run, 8085);
+    wait_pending(&s.run, 1).await;
+    assert_eq!(deny(&s.run, 1).await.0, ExitCode::SUCCESS);
+    let (code, err) = forward.await.unwrap();
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(err, format!("rowser: {FORWARD_NOT_APPROVED}\n"));
+    let e = activity(&s.run).await;
+    assert_eq!(e[0]["result"], "denied");
+    assert_eq!(e[0]["answered_by"], "terminal");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approve_with_open_is_refused_for_a_rowser_forward_and_it_still_waits() {
+    let dir = TmpDir::new("pnd");
+    let s = start(&dir).await;
+    let forward = shim_forward(&s.run, 8085);
+    wait_pending(&s.run, 1).await;
+    let (code, _, err) = approve(&s.run, 1, Some("system")).await;
+    assert_eq!(code, ExitCode::FAILURE);
+    assert_eq!(
+        err,
+        "rowser approve: --open applies only to a URL, not to rowser forward\n"
+    );
+    wait_pending(&s.run, 1).await;
+    assert_eq!(deny(&s.run, 1).await.0, ExitCode::SUCCESS);
+    assert_eq!(forward.await.unwrap().0, ExitCode::FAILURE);
 }
 
 #[tokio::test(flavor = "multi_thread")]

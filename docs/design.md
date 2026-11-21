@@ -201,6 +201,7 @@ src/
   daemon/control.rs  internal: control socket handlers (status, activity, pause, pending, reload)
   daemon/activity.rs internal: in-memory ring of the last 200 requests
   daemon/session.rs  internal: Sessions, one per Wrapper control connection
+  daemon/pending.rs  internal: confirmations that wait, with ids, for `rowser pending|approve|deny`
 ```
 
 - `routes` is pure and has no ports: `Routes::from_config(&Config)`, `Routes::pick(&RequestHost,

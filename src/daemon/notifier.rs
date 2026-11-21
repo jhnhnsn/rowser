@@ -294,25 +294,40 @@ fn confirm_desktop(notice: &Notice, dismiss: &Dismiss) -> Result<bool, String> {
          return button returned of r\n\
          end run"
     );
-    let child = std::process::Command::new("osascript")
+    use std::io::Read;
+    use std::sync::{Arc, Mutex};
+    let mut child = std::process::Command::new("osascript")
         .arg("-e")
         .arg(script)
         .arg(format!("{}\n\n{}", notice.question(), notice.plain_body()))
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| e.to_string())?;
+    let mut stdout = child.stdout.take().ok_or("no osascript stdout")?;
+    // The child is reaped only under this lock, so the dismiss below never
+    // signals a pid that the OS already gave to another process.
+    let child = Arc::new(Mutex::new(child));
     // A terminal answer ends osascript, which closes its dialog.
-    let pid = child.id() as libc::pid_t;
-    dismiss.on_dismiss(move || {
-        // SAFETY: kill has no memory preconditions; the pid is our child,
-        // not yet reaped (wait_with_output below reaps it after the kill).
-        unsafe { libc::kill(pid, libc::SIGTERM) };
+    dismiss.on_dismiss({
+        let child = child.clone();
+        move || {
+            let mut c = child.lock().unwrap_or_else(|e| e.into_inner());
+            if let Ok(None) = c.try_wait() {
+                // SAFETY: kill has no memory preconditions; the pid is our
+                // child, not reaped while we hold the lock.
+                unsafe { libc::kill(c.id() as libc::pid_t, libc::SIGTERM) };
+            }
+        }
     });
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    Ok(!dismiss.is_dismissed()
-        && out.status.success()
-        && String::from_utf8_lossy(&out.stdout).trim() == "Open")
+    let mut text = String::new();
+    let _ = stdout.read_to_string(&mut text);
+    let status = child
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .wait()
+        .map_err(|e| e.to_string())?;
+    Ok(!dismiss.is_dismissed() && status.success() && text.trim() == "Open")
 }
 
 #[cfg(test)]
