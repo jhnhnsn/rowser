@@ -9,7 +9,9 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::protocol::{Conn, Hello, Msg, SessionInfo};
 use crate::routes::Routes;
 
-use super::{open_error, pong, unix_now, Inner, Loaded, Pause};
+use super::pending::TerminalAnswer;
+use super::{open_error, pong, unix_now, Inner, Loaded, Pause, Subject};
+use crate::config::Target;
 
 /// Whether `rowser pause` is in effect now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +46,10 @@ impl Inner {
                 Msg::Reload => self.reload(),
                 Msg::Pause { for_secs } => self.start_pause(for_secs),
                 Msg::Resume => self.resume(),
+                Msg::Pending => Msg::PendingReply {
+                    requests: self.pending.list(),
+                },
+                Msg::AnswerPending { id, approve, open } => self.answer_pending(id, approve, open),
                 Msg::Activity { follow } => {
                     let (entries, mut rx) = self.activity.watch();
                     conn.send(&Msg::ActivityReply { entries }).await?;
@@ -156,6 +162,45 @@ impl Inner {
             tracing::info!("resumed");
         }
         Msg::Resumed { was_paused }
+    }
+
+    /// `rowser approve <id> [--open <target>]` and `rowser deny <id>`. The
+    /// first answer wins; an unknown or answered id is an error. An `open`
+    /// Target that cannot be used is refused, and the request still waits.
+    fn answer_pending(&self, id: u64, approve: bool, open: Option<String>) -> Msg {
+        let no_request = || open_error(format!("no pending request {id}"));
+        let Some(subject) = self.pending.subject(id) else {
+            return no_request();
+        };
+        let answer = match (approve, open) {
+            (false, _) => TerminalAnswer::Deny,
+            (true, None) => TerminalAnswer::Approve(None),
+            (true, Some(text)) => {
+                if matches!(subject, Subject::Forward(_)) {
+                    return open_error("--open applies only to a URL, not to rowser forward");
+                }
+                let target: Target = match text.parse() {
+                    Ok(t) => t,
+                    Err(e) => return open_error(e),
+                };
+                let target = match target {
+                    Target::Ask => return open_error("--open needs system or a browser, not ask"),
+                    Target::System => Target::System,
+                    t => match self.browsers().normalize(&t) {
+                        Ok(found) => found,
+                        Err(why) => return open_error(why),
+                    },
+                };
+                TerminalAnswer::Approve(Some(target))
+            }
+        };
+        match self.pending.take(id) {
+            Some(taken) => {
+                taken.answer(answer);
+                Msg::Answered { id }
+            }
+            None => no_request(),
+        }
     }
 
     /// The pause field; a poisoned lock still holds a usable value.

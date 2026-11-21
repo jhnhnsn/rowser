@@ -5,7 +5,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use url::Url;
 
-use super::{Notice, Notifier, Opener};
+use super::{Dismiss, Notice, Notifier, Opener};
 use crate::config::Target;
 
 /// Records every URL and Target it is asked to open, and never opens a
@@ -54,7 +54,7 @@ impl Notifier for RecordingNotifier {
     }
 
     /// Approves every confirmation (and records it as a notice).
-    fn confirm(&self, notice: Notice) -> bool {
+    fn confirm(&self, notice: Notice, _dismiss: &Dismiss) -> bool {
         self.notices.lock().unwrap().push(notice);
         true
     }
@@ -88,6 +88,7 @@ struct Script {
     notices: Vec<Notice>,
     confirms: Vec<Notice>,
     released: Option<bool>,
+    dismissed: usize,
 }
 
 /// Records notices and answers confirmations from a script. Never shows a
@@ -115,6 +116,12 @@ impl ScriptedNotifier {
         self.state.0.lock().unwrap().confirms.clone()
     }
 
+    /// How many confirmations the Daemon closed because the terminal
+    /// answered first.
+    pub fn dismissed(&self) -> usize {
+        self.state.0.lock().unwrap().dismissed
+    }
+
     /// Lets every hung confirmation return `answer`.
     pub fn release(&self, answer: bool) {
         self.state.0.lock().unwrap().released = Some(answer);
@@ -127,14 +134,23 @@ impl Notifier for ScriptedNotifier {
         self.state.0.lock().unwrap().notices.push(notice);
     }
 
-    fn confirm(&self, notice: Notice) -> bool {
+    fn confirm(&self, notice: Notice, dismiss: &Dismiss) -> bool {
         let (lock, cvar) = &*self.state;
+        lock.lock().unwrap().confirms.push(notice);
+        let state = self.state.clone();
+        dismiss.on_dismiss(move || {
+            state.0.lock().unwrap().dismissed += 1;
+            state.1.notify_all();
+        });
         let mut script = lock.lock().unwrap();
-        script.confirms.push(notice);
         match self.answer {
             Answer::Approve => true,
             Answer::Deny => false,
             Answer::Hang => loop {
+                // A dismissed confirmation closes without an answer.
+                if dismiss.is_dismissed() {
+                    return false;
+                }
                 if let Some(answer) = script.released {
                     return answer;
                 }

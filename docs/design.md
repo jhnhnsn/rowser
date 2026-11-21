@@ -64,6 +64,12 @@ entry whose Callback forward closed, with the same `id` and now `open_secs`, unt
 closes the connection).
 `Pause{for_secs?}` (the reply is `Paused{until?}`, Unix seconds) and `Resume` (the reply is
 `Resumed{was_paused}`).
+`Pending` (`rowser pending`; the reply is `PendingReply{requests: [PendingInfo{id, kind, host,
+unverified, url?, ports, target?, age_secs}]}`, oldest first) and `AnswerPending{id, approve,
+open?}` (`rowser approve <id> [--open <target>]` and `rowser deny <id>`; the reply is
+`Answered{id}`, or an `OpenResult` error `no pending request <id>` for an unknown or already
+answered id, or for an `open` Target that is `ask`, not found, or given for a `rowser forward`
+request; the request then still waits). `ActivityEntry.answered_by` is `terminal` or `desktop`.
 The Daemon keeps its Routes behind a lock, so a reload applies to the next Open request.
 `control::reload(runtime_dir)` is the client call `rowser reload` and the `rowser route`
 commands share. The control socket also answers `Ping`. `CONTROL_SOCKET` (the socket's file
@@ -117,7 +123,7 @@ Ports (each has a production adapter and a test adapter, so both seams are real)
 | Port | Production adapter | Test adapter |
 | --- | --- | --- |
 | `Opener::open(&Url) -> Result<()>` | `CommandOpener` (`--open-command` template; `xdg-open` / `open`) | records URLs |
-| `Notifier::notify(Notice)` / `Notifier::confirm(Notice) -> bool` | `DesktopNotifier` (notify-rust; macOS dialog fallback for confirm) | records notices, scripted answers |
+| `Notifier::notify(Notice)` / `Notifier::confirm(Notice, &Dismiss) -> bool` | `DesktopNotifier` (notify-rust; macOS dialog fallback for confirm) | records notices, scripted answers |
 
 Time is **not** a port: tests use tokio's paused clock (`start_paused`). Paths and ports are
 plain config values.
@@ -248,6 +254,16 @@ src/
   `rowser forward` `paused; port <p> was not forwarded`), which the Shim prints after
   `rowser: ` and exits 1, so the Shim needs no change. `control::parse_duration` reads
   `--for`; a duration the clocks cannot hold gets the error `duration too long`.
+- `rowser pending` / `approve` / `deny`: `daemon/pending.rs` lists each confirmation while it
+  waits, with an id that counts up from 1. `Inner::confirm` races the Notifier against the
+  terminal answer; the first answer takes the request out of the list, so a later one gets
+  `no pending request <id>`. A terminal answer calls `Dismiss::dismiss`, and the Notifier closes
+  what it registered with `Dismiss::on_dismiss`: on Linux a replacement notification with the
+  same id, closed at once (which also ends `wait_for_action`); on macOS a SIGTERM to the
+  `osascript` dialog. A desktop answer after a dismiss is ignored. `approve --open` replaces
+  the request's Target after `Browsers::normalize`; `--open ask` and a missing browser are
+  refused. The test `ScriptedNotifier` counts dismissals (`dismissed()`), and a dismissed hung
+  confirmation returns. `control::{run_pending, run_approve, run_deny}` are the clients.
 - The Wrapper registers its Session with the Daemon (protocol 1.1) and keeps that connection
   open until `ssh` exits, so `rowser status` lists Sessions. On the control socket (local only,
   mode 0600) it sends `Msg::Session{host}` with the `ssh -G` Host alias; the Daemon answers

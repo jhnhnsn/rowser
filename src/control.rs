@@ -10,7 +10,8 @@ use serde::Serialize;
 use tokio::net::UnixStream;
 
 use crate::protocol::{
-    ActivityEntry, Conn, ForwardInfo, Hello, Msg, Outcome, RequestKind, SessionInfo, CONTROL_SOCKET,
+    ActivityEntry, AnsweredBy, Conn, ForwardInfo, Hello, Msg, Outcome, PendingInfo, RequestKind,
+    SessionInfo, CONTROL_SOCKET,
 };
 
 /// The line every control command prints when the Daemon does not answer.
@@ -381,6 +382,127 @@ pub fn resume_main() -> ExitCode {
     )
 }
 
+/// `rowser pending`: one line per request that waits for an answer, oldest
+/// first: id, host, URL (or `forward <ports>`), Target, age.
+pub fn run_pending(
+    runtime_dir: Result<PathBuf, String>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> ExitCode {
+    let result = runtime_dir.map_err(RequestError::Other).and_then(|dir| {
+        match request(&dir, &Msg::Pending)? {
+            Msg::PendingReply { requests } if requests.is_empty() => {
+                Ok("rowser: no pending requests".to_string())
+            }
+            Msg::PendingReply { requests } => Ok(requests
+                .iter()
+                .map(pending_line)
+                .collect::<Vec<_>>()
+                .join("\n")),
+            other => Err(unexpected_reply(other)),
+        }
+    });
+    finish("pending", result, out, err)
+}
+
+/// One `rowser pending` text line.
+fn pending_line(p: &PendingInfo) -> String {
+    let mut parts = vec![p.id.to_string()];
+    parts.push(if p.unverified {
+        format!("{} (unverified)", p.host)
+    } else {
+        p.host.clone()
+    });
+    parts.push(match p.kind {
+        RequestKind::Open => p.url.clone().unwrap_or_default(),
+        RequestKind::Forward => format!(
+            "forward {}",
+            p.ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    });
+    parts.extend(p.target.clone());
+    parts.push(age(p.age_secs));
+    // Host names and URLs come from the Remote host.
+    crate::protocol::printable(&parts.join("  "))
+}
+
+/// `rowser approve <id> [--open <target>]`: prints `rowser: approved <id>`.
+pub fn run_approve(
+    runtime_dir: Result<PathBuf, String>,
+    id: u64,
+    open: Option<String>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> ExitCode {
+    let msg = Msg::AnswerPending {
+        id,
+        approve: true,
+        open,
+    };
+    finish("approve", answer(runtime_dir, &msg, "approved"), out, err)
+}
+
+/// `rowser deny <id>`: prints `rowser: denied <id>`.
+pub fn run_deny(
+    runtime_dir: Result<PathBuf, String>,
+    id: u64,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> ExitCode {
+    let msg = Msg::AnswerPending {
+        id,
+        approve: false,
+        open: None,
+    };
+    finish("deny", answer(runtime_dir, &msg, "denied"), out, err)
+}
+
+fn answer(
+    runtime_dir: Result<PathBuf, String>,
+    msg: &Msg,
+    done: &str,
+) -> Result<String, RequestError> {
+    let dir = runtime_dir.map_err(RequestError::Other)?;
+    match request(&dir, msg)? {
+        Msg::Answered { id } => Ok(format!("rowser: {done} {id}")),
+        other => Err(unexpected_reply(other)),
+    }
+}
+
+/// `rowser pending` from the command line.
+pub fn pending_main() -> ExitCode {
+    run_pending(
+        crate::platform::runtime_dir(),
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+}
+
+/// `rowser approve` from the command line.
+pub fn approve_main(id: u64, open: Option<String>) -> ExitCode {
+    run_approve(
+        crate::platform::runtime_dir(),
+        id,
+        open,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+}
+
+/// `rowser deny` from the command line.
+pub fn deny_main(id: u64) -> ExitCode {
+    run_deny(
+        crate::platform::runtime_dir(),
+        id,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+}
+
 /// `rowser activity` inputs.
 pub struct ActivityArgs {
     /// The runtime directory, found as `rowser ssh` finds it.
@@ -513,6 +635,11 @@ fn activity_line(e: &ActivityEntry) -> String {
     parts.extend(e.route.clone());
     parts.extend(e.target.clone());
     parts.push(e.result.label().to_string());
+    match e.answered_by {
+        Some(AnsweredBy::Terminal) => parts.push("by terminal".into()),
+        Some(AnsweredBy::Desktop) => parts.push("by desktop".into()),
+        None => {}
+    }
     if e.result == Outcome::Opened && !e.ports.is_empty() {
         let open = match e.open_secs {
             None => "still open".to_string(),

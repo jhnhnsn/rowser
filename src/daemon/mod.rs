@@ -8,6 +8,7 @@ mod forward;
 mod limit;
 mod notifier;
 mod opener;
+mod pending;
 mod session;
 #[doc(hidden)]
 pub mod testing;
@@ -24,10 +25,10 @@ use tokio::net::{UnixListener, UnixStream};
 use url::Url;
 
 use crate::browsers::{Browsers, Roots};
-use crate::protocol::{ActivityEntry, Conn, Hello, Msg, Outcome, RequestKind};
+use crate::protocol::{ActivityEntry, AnsweredBy, Conn, Hello, Msg, Outcome, RequestKind};
 use crate::routes::{RequestHost, Resolved, Routes};
 use limit::Limit;
-pub use notifier::{DesktopNotifier, Notice, NoticeHost, Notifier, Subject};
+pub use notifier::{DesktopNotifier, Dismiss, Notice, NoticeHost, Notifier, Subject};
 pub use opener::{CommandOpener, Opener};
 
 /// File name of the direct socket in the runtime directory.
@@ -117,6 +118,8 @@ struct Inner {
     loaded: RwLock<Loaded>,
     /// `rowser pause`: in memory only, so a Daemon restart ends it.
     pause: Mutex<Option<Pause>>,
+    /// Requests that wait for an answer, for `rowser pending`.
+    pending: Arc<pending::Pending>,
 }
 
 /// A pause in effect.
@@ -144,6 +147,7 @@ impl Daemon {
                 sessions: Arc::default(),
                 activity: Arc::default(),
                 pause: Mutex::default(),
+                pending: Arc::default(),
             }),
         }
     }
@@ -344,15 +348,21 @@ impl Inner {
             host,
             warnings: vec![],
         };
+        let mut answered_by = None;
         if confirm {
-            if let Err((error, outcome)) = self.confirm(notice.clone()).await {
-                let e = new_entry(RequestKind::Forward, &notice.host, outcome);
-                self.record(e, ports);
-                return open_error(error);
+            match self.confirm(notice.clone()).await {
+                Ok(c) => answered_by = Some(c.by),
+                Err(refused) => {
+                    let mut e = new_entry(RequestKind::Forward, &notice.host, refused.outcome);
+                    e.answered_by = refused.by;
+                    self.record(e, ports);
+                    return open_error(refused.error);
+                }
             }
         }
         let created = self.forward(&ports, &notice.host);
         let mut e = new_entry(RequestKind::Forward, &notice.host, Outcome::Opened);
+        e.answered_by = answered_by;
         e.ports = ports.clone();
         self.record_forward(e, &created);
         if !confirm || !created.warnings.is_empty() {
@@ -392,25 +402,18 @@ impl Inner {
         };
         let Resolved {
             route,
-            target,
+            mut target,
             ask,
             mut warnings,
-        } = self.current_routes().resolve(
-            &request_host,
-            &url,
-            &self
-                .config
-                .browser_roots
-                .as_ref()
-                .map(Browsers::scan)
-                .unwrap_or_default(),
-        );
+        } = self
+            .current_routes()
+            .resolve(&request_host, &url, &self.browsers());
         entry.route = Some(route_label(route, &host));
         entry.target = Some(target.to_string());
         entry.warnings = warnings.clone();
         let confirm = ask || self.config.needs_confirm(&host);
         if confirm {
-            if let Err((error, outcome)) = self
+            match self
                 .confirm(Notice {
                     subject: Subject::Url(url.clone()),
                     host: host.clone(),
@@ -419,9 +422,19 @@ impl Inner {
                 })
                 .await
             {
-                entry.result = outcome;
-                self.activity.push(entry, None);
-                return open_error(error);
+                Ok(c) => {
+                    entry.answered_by = Some(c.by);
+                    if let Some(t) = c.target {
+                        entry.target = Some(t.to_string());
+                        target = t;
+                    }
+                }
+                Err(refused) => {
+                    entry.result = refused.outcome;
+                    entry.answered_by = refused.by;
+                    self.activity.push(entry, None);
+                    return open_error(refused.error);
+                }
             }
         }
         // Bind the Callback forward only after approval, so a denied URL
@@ -472,33 +485,112 @@ impl Inner {
 
     /// Waits for the user's answer. A denial, a timeout or a failed
     /// Notifier gives the error text for the Shim.
-    async fn confirm(&self, notice: Notice) -> Result<(), (String, Outcome)> {
+    ///
+    /// The request is listed in `rowser pending` while it waits. The first
+    /// answer wins: the Notifier's, or `rowser approve` / `rowser deny`,
+    /// which also closes the notification or dialog.
+    async fn confirm(&self, notice: Notice) -> Result<Confirmed, Refused> {
         let (not_approved, not_done) = match notice.subject {
             Subject::Url(_) => (NOT_APPROVED, "the URL was not opened"),
             Subject::Forward(_) => (FORWARD_NOT_APPROVED, "the port was not forwarded"),
         };
         let paused = paused_text(&notice.subject);
+        let dismiss = Dismiss::default();
+        let (guard, mut terminal) = self.pending.add(notice.clone(), dismiss.clone());
         let notifier = self.notifier.clone();
-        let answer = tokio::task::spawn_blocking(move || notifier.confirm(notice));
+        let mut desktop = tokio::task::spawn_blocking(move || notifier.confirm(notice, &dismiss));
         let timeout = self.config.confirm_timeout;
-        match tokio::time::timeout(timeout, answer).await {
-            // A pause that started while the user looked still wins.
-            Ok(Ok(true)) if self.pause_state().is_paused() => Err((paused, Outcome::Paused)),
-            Ok(Ok(true)) => Ok(()),
+        let waited = tokio::time::timeout(timeout, async {
+            tokio::select! {
+                answer = &mut terminal => answer.ok().map(Marked::Terminal),
+                answer = &mut desktop => {
+                    // The desktop answered; the terminal may have taken the
+                    // request just before, and then its answer wins.
+                    match self.pending.take(guard.id) {
+                        Some(_) => Some(match answer {
+                            Ok(a) => Marked::Desktop(a),
+                            Err(e) => Marked::Failed(e.to_string()),
+                        }),
+                        None => terminal.await.ok().map(Marked::Terminal),
+                    }
+                }
+            }
+        })
+        .await;
+        drop(guard);
+        let refused = |error: String, outcome, by| Refused { error, outcome, by };
+        let answer = match waited {
+            Err(_) => {
+                return Err(refused(
+                    format!(
+                        "no confirmation within {} seconds; {not_done}",
+                        timeout.as_secs()
+                    ),
+                    Outcome::TimedOut,
+                    None,
+                ))
+            }
+            Ok(a) => a,
+        };
+        let (approved, target, by) = match answer {
+            Some(Marked::Terminal(pending::TerminalAnswer::Approve(t))) => {
+                (true, t, AnsweredBy::Terminal)
+            }
+            Some(Marked::Terminal(pending::TerminalAnswer::Deny)) | None => {
+                (false, None, AnsweredBy::Terminal)
+            }
+            Some(Marked::Desktop(a)) => (a, None, AnsweredBy::Desktop),
+            Some(Marked::Failed(e)) => {
+                return Err(refused(
+                    format!("confirmation failed: {e}"),
+                    Outcome::Denied,
+                    None,
+                ))
+            }
+        };
+        if !approved {
             // `confirm` gives only a bool, so a denial and a confirmation
             // that could not be shown look the same here; the Notifier logs
             // the second.
-            Ok(Ok(false)) => Err((not_approved.to_string(), Outcome::Denied)),
-            Ok(Err(e)) => Err((format!("confirmation failed: {e}"), Outcome::Denied)),
-            Err(_) => Err((
-                format!(
-                    "no confirmation within {} seconds; {not_done}",
-                    timeout.as_secs()
-                ),
-                Outcome::TimedOut,
-            )),
+            return Err(refused(not_approved.to_string(), Outcome::Denied, Some(by)));
         }
+        // A pause that started while the user looked still wins.
+        if self.pause_state().is_paused() {
+            return Err(refused(paused, Outcome::Paused, Some(by)));
+        }
+        Ok(Confirmed { target, by })
     }
+
+    /// The browsers the Daemon can open in now.
+    fn browsers(&self) -> Browsers {
+        self.config
+            .browser_roots
+            .as_ref()
+            .map(Browsers::scan)
+            .unwrap_or_default()
+    }
+}
+
+/// The first answer to a confirmation.
+enum Marked {
+    Terminal(pending::TerminalAnswer),
+    Desktop(bool),
+    /// The Notifier task failed.
+    Failed(String),
+}
+
+/// An approved confirmation.
+struct Confirmed {
+    /// The `rowser approve --open` Target, which replaces the request's.
+    target: Option<crate::config::Target>,
+    by: AnsweredBy,
+}
+
+/// A refused confirmation: the error for the Shim, and what activity shows.
+struct Refused {
+    error: String,
+    outcome: Outcome,
+    by: Option<AnsweredBy>,
 }
 
 /// The error for a request that a pause refused.
@@ -540,6 +632,7 @@ fn new_entry(kind: RequestKind, host: &NoticeHost, result: Outcome) -> ActivityE
         ports: vec![],
         open_secs: None,
         warnings: vec![],
+        answered_by: None,
     }
 }
 

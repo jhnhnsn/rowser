@@ -196,6 +196,58 @@ pub enum Msg {
     ActivityUpdate {
         entry: Box<ActivityEntry>,
     },
+    /// Control socket only (1.1): `rowser pending`. The reply is
+    /// `PendingReply`.
+    Pending,
+    /// The Daemon's answer to `Pending`: the requests that wait for an
+    /// answer, oldest first.
+    PendingReply {
+        requests: Vec<PendingInfo>,
+    },
+    /// Control socket only (1.1): `rowser approve <id> [--open <target>]`
+    /// (`approve`) or `rowser deny <id>`. The reply is `Answered`, or an
+    /// `OpenResult` error for an unknown or already answered id, or an
+    /// `open` Target that cannot be used.
+    AnswerPending {
+        id: u64,
+        approve: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open: Option<String>,
+    },
+    /// The Daemon's answer to a valid `AnswerPending`.
+    Answered {
+        id: u64,
+    },
+}
+
+/// One request that waits for an answer, as `rowser pending` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingInfo {
+    pub id: u64,
+    pub kind: RequestKind,
+    /// The Host alias, or the Reported host name when `unverified`.
+    pub host: String,
+    pub unverified: bool,
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The Callback ports of a `rowser forward` request.
+    #[serde(default)]
+    pub ports: Vec<u16>,
+    /// The Target an Open request opens in; `None` for a forward.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Seconds since the request started to wait.
+    pub age_secs: u64,
+}
+
+/// Who answered a request that waited for an answer, in `rowser activity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnsweredBy {
+    /// `rowser approve` or `rowser deny`.
+    Terminal,
+    /// The desktop notification or dialog.
+    Desktop,
 }
 
 /// What a request is, in `rowser activity`.
@@ -268,6 +320,10 @@ pub struct ActivityEntry {
     /// Notice warnings, such as a Target that fell back to `[default]`.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Who answered, for a request that waited for an answer; `None` when
+    /// none answered (no wait, or a timeout).
+    #[serde(default)]
+    pub answered_by: Option<AnsweredBy>,
 }
 
 /// One connected Wrapper, as `rowser status` shows it.
@@ -299,6 +355,10 @@ impl Msg {
                 | Msg::Paused { .. }
                 | Msg::Resume
                 | Msg::Resumed { .. }
+                | Msg::Pending
+                | Msg::PendingReply { .. }
+                | Msg::AnswerPending { .. }
+                | Msg::Answered { .. }
         )
     }
 }

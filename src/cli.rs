@@ -85,6 +85,21 @@ pub enum Command {
     },
     /// End a `rowser pause`.
     Resume,
+    /// List the requests that wait for an answer.
+    Pending,
+    /// Approve a pending request.
+    Approve {
+        /// The id from `rowser pending`.
+        id: u64,
+        /// Open it in this Target: system, <browser> or <browser>:<profile>.
+        #[arg(long, value_name = "TARGET")]
+        open: Option<String>,
+    },
+    /// Deny a pending request.
+    Deny {
+        /// The id from `rowser pending`.
+        id: u64,
+    },
     /// Show the Daemon's last 200 requests, newest last.
     Activity {
         /// Keep printing new requests until Ctrl-C.
@@ -223,6 +238,9 @@ impl Command {
             Command::Reload => "reload",
             Command::Pause { .. } => "pause",
             Command::Resume => "resume",
+            Command::Pending => "pending",
+            Command::Approve { .. } => "approve",
+            Command::Deny { .. } => "deny",
             Command::Activity { .. } => "activity",
             Command::Route { .. } => "route",
             Command::Remote { .. } => "remote install",
@@ -285,6 +303,9 @@ pub fn run(command: Command) -> ExitCode {
         Command::Reload => crate::control::reload_main(),
         Command::Pause { for_ } => crate::control::pause_main(for_),
         Command::Resume => crate::control::resume_main(),
+        Command::Pending => crate::control::pending_main(),
+        Command::Approve { id, open } => crate::control::approve_main(id, open),
+        Command::Deny { id } => crate::control::deny_main(id),
         Command::Activity { follow, json } => crate::control::activity_main(follow, json),
         Command::Route { action } => crate::route::route_main(action.into()),
         Command::Keeper {

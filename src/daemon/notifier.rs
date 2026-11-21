@@ -1,5 +1,7 @@
 //! Notifier port and the `DesktopNotifier` adapter.
 
+use std::sync::{Arc, Mutex};
+
 use url::Url;
 
 use crate::config::Target;
@@ -120,14 +122,59 @@ fn clean(text: &str, escape: bool) -> String {
     out
 }
 
+/// Lets the Daemon close a confirmation that the terminal answered first
+/// (`rowser approve` or `rowser deny`). The Notifier registers how to close
+/// its notification or dialog with `on_dismiss`.
+#[derive(Clone, Default)]
+pub struct Dismiss(Arc<Mutex<DismissState>>);
+
+#[derive(Default)]
+struct DismissState {
+    done: bool,
+    close: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl Dismiss {
+    /// Runs `close` when the Daemon dismisses the confirmation, or now when
+    /// it did already.
+    pub fn on_dismiss(&self, close: impl FnOnce() + Send + 'static) {
+        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if s.done {
+            drop(s);
+            close();
+        } else {
+            s.close = Some(Box::new(close));
+        }
+    }
+
+    /// True after the Daemon dismissed the confirmation.
+    pub fn is_dismissed(&self) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).done
+    }
+
+    /// Closes the confirmation; its later answer is ignored.
+    pub(crate) fn dismiss(&self) {
+        let close = {
+            let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            s.done = true;
+            s.close.take()
+        };
+        if let Some(close) = close {
+            close();
+        }
+    }
+}
+
 /// Shows notices to the user.
 pub trait Notifier: Send + Sync + 'static {
     fn notify(&self, notice: Notice);
 
     /// Asks the user to approve `notice.subject`. Blocks until the user
     /// answers; `true` means "Open". The Daemon applies its own timeout and
-    /// ignores a late answer.
-    fn confirm(&self, notice: Notice) -> bool;
+    /// ignores a late answer. When the terminal answers first, the Daemon
+    /// calls `dismiss`, and the Notifier closes its notification or dialog
+    /// where the platform allows.
+    fn confirm(&self, notice: Notice, dismiss: &Dismiss) -> bool;
 }
 
 /// Seconds the confirmation notification or dialog stays up.
@@ -144,8 +191,8 @@ impl Notifier for DesktopNotifier {
         }
     }
 
-    fn confirm(&self, notice: Notice) -> bool {
-        match confirm_desktop(&notice) {
+    fn confirm(&self, notice: Notice, dismiss: &Dismiss) -> bool {
+        match confirm_desktop(&notice, dismiss) {
             Ok(answer) => answer,
             Err(e) => {
                 tracing::warn!("confirmation failed, request refused: {e}");
@@ -203,7 +250,7 @@ fn notify_desktop(notice: &Notice) -> Result<(), String> {
 
 /// Linux: a notification with an "Open" action.
 #[cfg(not(target_os = "macos"))]
-fn confirm_desktop(notice: &Notice) -> Result<bool, String> {
+fn confirm_desktop(notice: &Notice, dismiss: &Dismiss) -> Result<bool, String> {
     let handle = notify_rust::Notification::new()
         .summary(&format!("rowser: {}", notice.question().to_lowercase()))
         .body(&notice.body())
@@ -214,17 +261,31 @@ fn confirm_desktop(notice: &Notice) -> Result<bool, String> {
         ))
         .show()
         .map_err(|e| e.to_string())?;
+    // The handle waits below, so close the notification by its id: a
+    // replacement with the same id, closed at once. The close also ends the
+    // wait.
+    let id = handle.id();
+    dismiss.on_dismiss(move || {
+        match notify_rust::Notification::new()
+            .id(id)
+            .summary("rowser")
+            .show()
+        {
+            Ok(h) => h.close(),
+            Err(e) => tracing::warn!("could not close the confirmation: {e}"),
+        }
+    });
     // Only the "Open" button approves. A click on the notification body (the
     // "default" action on many servers), a close or "Deny" all deny.
     let mut approved = false;
     handle.wait_for_action(|action| approved = action == "open");
-    Ok(approved)
+    Ok(approved && !dismiss.is_dismissed())
 }
 
 /// macOS: notify-rust has no notification actions here, so ask with a dialog.
 /// The text goes in as an argument, never into the script source.
 #[cfg(target_os = "macos")]
-fn confirm_desktop(notice: &Notice) -> Result<bool, String> {
+fn confirm_desktop(notice: &Notice, dismiss: &Dismiss) -> Result<bool, String> {
     let script = format!(
         "on run argv\n\
          set r to display dialog (item 1 of argv) with title \"rowser\" \
@@ -233,13 +294,25 @@ fn confirm_desktop(notice: &Notice) -> Result<bool, String> {
          return button returned of r\n\
          end run"
     );
-    let out = std::process::Command::new("osascript")
+    let child = std::process::Command::new("osascript")
         .arg("-e")
         .arg(script)
         .arg(format!("{}\n\n{}", notice.question(), notice.plain_body()))
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| e.to_string())?;
-    Ok(out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "Open")
+    // A terminal answer ends osascript, which closes its dialog.
+    let pid = child.id() as libc::pid_t;
+    dismiss.on_dismiss(move || {
+        // SAFETY: kill has no memory preconditions; the pid is our child,
+        // not yet reaped (wait_with_output below reaps it after the kill).
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    });
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    Ok(!dismiss.is_dismissed()
+        && out.status.success()
+        && String::from_utf8_lossy(&out.stdout).trim() == "Open")
 }
 
 #[cfg(test)]
