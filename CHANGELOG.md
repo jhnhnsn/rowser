@@ -8,6 +8,11 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- The README documents v1.0: Routes (`rowser route add|list|test|move|remove`), `rowser
+  browsers`, the commands that control the daemon (`status`, `activity`, `pause`/`resume`,
+  `pending`/`approve`/`deny`, `reload`), and how to make rowser the default browser on a Remote
+  host. `docs/design.md` gives the v1.0 module layout.
+  ([#54](https://github.com/jhnhnsn/rowser/issues/54))
 - `rowser pending` lists the requests that wait for a confirmation (id, host, URL, Target and
   age). `rowser approve <id> [--open <target>]` and `rowser deny <id>` answer one from the
   terminal, and the notification or dialog closes. The first answer wins: a later answer from
