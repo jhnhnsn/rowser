@@ -21,6 +21,8 @@ src/
     notifier.rs      Notifier port + DesktopNotifier adapter
     forward.rs       internal: local listeners, reverse-dial bookkeeping
     limit.rs         internal: per-connection rate limit
+    confirm.rs       internal: `--confirm-hosts` matching and the confirmation timeout
+    testing.rs       test adapters for the Opener and Notifier ports
   shim/              `rowser open`, `rowser forward`, `__keeper`
   wrapper/           `rowser ssh`: destination resolution, relay with Host stamp
   service.rs         `rowser daemon install|uninstall` (systemd unit, launchd plist, their paths)
@@ -201,8 +203,6 @@ src/
   control.rs         client side of the control socket: status, reload, pause, resume,
                      pending, approve, deny, activity
   daemon/control.rs  internal: control socket handlers (status, activity, pause, pending, reload)
-  daemon/confirm.rs  internal: `--confirm-hosts` matching and the confirmation timeout
-  daemon/testing.rs  test adapters for the Opener and Notifier ports
   daemon/activity.rs internal: in-memory ring of the last 200 requests
   daemon/session.rs  internal: Sessions, one per Wrapper control connection
   daemon/pending.rs  internal: confirmations that wait, with ids, for `rowser pending|approve|deny`
@@ -210,8 +210,8 @@ src/
 
 - `routes` is pure and has no ports: `Routes::from_config(&Config)`, `Routes::pick(&RequestHost,
   &Url) -> Pick { route: Option<usize>, target: Target, ask: bool }`. `rowser route test` and the
-  Daemon call it; `rowser doctor` checks Targets with `Browsers::normalize` only. `Target` (`system`, `ask`, `<browser>[:<profile>]`)
-  lives in `config`, which parses it.
+  Daemon call it; `rowser doctor` checks Targets with `Browsers::normalize` only. `Target`
+  (`system`, `ask`, `<browser>[:<profile>]`) lives in `config`, which parses it.
 - `Routes::resolve(&RequestHost, &Url, &Browsers) -> Resolved { route, target, ask, warnings }`
   applies the fallback rules on top of `pick`: an `ask` Target waits, then opens in
   `[default]`; a browser Target that `Browsers::normalize` rejects (browser or profile missing,
@@ -227,7 +227,7 @@ src/
   (records `roots.os` in `Browsers.os`); `Browsers::find(&Target)` looks a profile up by folder
   name, then display name; `Browsers::normalize(&Target) -> Result<Target, String>` gives the
   Target with the profile folder name (Firefox: the `Path` folder from `profiles.ini`), and
-  after a scan also checks that an argv can be built; `browsers.command(Os, &Target, &str) ->
+  after a scan also checks that an argv can be built; `Browsers::command(Os, &Target, &str) ->
   Result<Vec<String>, String>` is a pure argv builder over `browsers::argv(Os, &Browser,
   Option<&Profile>, url)`. It runs nothing. Firefox maps the folder to `-P <name>`. No port:
   there is one adapter.

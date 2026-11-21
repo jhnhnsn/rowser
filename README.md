@@ -30,12 +30,13 @@ changes to `sshd_config`, and give the local machine some control over what gets
 | Drop-in `xdg-open` / `$BROWSER` on the remote host | ✅ both, installed by `rowser remote install` | ✅ shell shims (need `nc`) | ✅ symlink | ⚠️ `$BROWSER` only | ✅ `nssh infect` | ⚠️ `$BROWSER` only |
 | Many concurrent SSH sessions, no root `sshd_config` change | ✅ per-session sockets | ❌ needs `StreamLocalBindUnlink` in `sshd_config` | ⚠️ one fixed port | ⚠️ one fixed port | ✅ | ⚠️ one fixed reverse port |
 | Local control: trusted host name, scheme allowlist, rate limit, per-host confirmation | ✅ | ❌ | ❌ | ⚠️ http/https only | ⚠️ http(s) only; topic secrecy is the only auth | ❌ |
-| Pick the local browser and Profile per remote host or URL | ✅ Routes | ❌ | ❌ | ❌ | ❌ | ❌ |
-| See and control requests from the local terminal (status, activity, pause, approve) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Pick the local browser and Profile per remote host or URL | ✅ Routes | ❓ | ❓ | ❓ | ❓ | ❓ |
+| See and control requests from the local terminal (status, activity, pause, approve) | ✅ | ❓ | ❓ | ❓ | ❓ | ❓ |
 | Last commit | active | Oct 2026 | Apr 2022 ("maintainers wanted") | Nov 2022 | Sep 2026 | Jun 2021 |
 
-✅ yes · ⚠️ partly · ❌ no · ❓ not documented. From each project's README and source, November
-2026. Corrections are welcome.
+✅ yes · ⚠️ partly · ❌ no · ❓ not documented or not checked. From each project's README and
+source, November 2026; the browser-and-Profile and terminal-control rows are not yet checked
+against the other projects. Corrections are welcome.
 
 [opener]: https://github.com/superbrothers/opener
 [lemonade]: https://github.com/lemonade-command/lemonade
@@ -52,7 +53,9 @@ changes to `sshd_config`, and give the local machine some control over what gets
 - **v0.1.0 (the core): built.** The daemon, shim, `rowser ssh` wrapper, callback forwards,
   `rowser daemon install` (systemd and launchd), `rowser remote install` (with checksum
   verification) and `rowser doctor` are built and tested, including an end-to-end test against a
-  real `sshd`.
+  real `sshd`. Still open: the macOS notification fix
+  ([#57](https://github.com/jhnhnsn/rowser/issues/57)) and the manual checks, such as
+  `--confirm-hosts` ([#20](https://github.com/jhnhnsn/rowser/issues/20)).
 - **v1.0 ("CLI-complete"): built, not yet released.** A config file with Routes (open a host's
   URLs in a given browser and Profile), `rowser browsers`, a control socket with terminal
   commands (`status`, `activity`, `pause`/`resume`, `pending`/`approve`/`deny`, `reload`), and
@@ -336,7 +339,8 @@ rowser route list
 [default]  system
 ```
 
-Use the numbers from `route list` to remove or move a Route:
+Use the numbers from `route list` to remove or move a Route. Each example below and in the
+sections that follow starts from the `route list` above; they are not steps in order.
 
 ```sh
 rowser route move 2 1     # rowser: moved route 2 to 1
@@ -361,10 +365,12 @@ rowser browsers
 ```
 
 ```
+safari  Safari
 chrome  Google Chrome  profiles: Personal (Default), Work (Profile 2)
 firefox  Firefox  profiles: default-release (abcd1234.default-release)
-safari  Safari
 ```
+
+On macOS the list follows the order below; on Linux, the order of the desktop files.
 
 - macOS: Safari (`safari`), Google Chrome (`chrome`), Firefox (`firefox`), Microsoft Edge
   (`edge`), Brave (`brave`), Vivaldi (`vivaldi`), Chromium (`chromium`) and Arc (`arc`), from
@@ -378,7 +384,7 @@ safari  Safari
 ## Control the daemon
 
 The daemon has a third socket, `rowserd-control.sock`, for rowser commands on the local machine.
-It is never forwarded to a remote host. Each command below prints
+No Tunnel reaches it from a remote host. Each command below prints
 `rowser: the daemon is not running` and exits 1 when no daemon answers.
 
 ### `rowser status`
@@ -399,7 +405,7 @@ callback forwards:
   8085  g14  41s
 ```
 
-Sessions are the `rowser ssh` connections to the daemon, with how long each has run and the
+A Session is one `rowser ssh` run. The list shows each, with how long each has run and the
 Target of the host's first Route without `match` (`[default]`'s Target with no such Route). A
 Session ends when `ssh` exits.
 
@@ -452,7 +458,9 @@ rowser approve 1 --open chrome:Work # open in another Target
 rowser deny 1                       # rowser: denied 1
 ```
 
-An id that is unknown or already answered gives `no pending request <id>`.
+An id that is unknown or already answered prints `rowser approve: no pending request <id>` (or
+`rowser deny: …`) and exits 1. `--open ask`, an unknown browser, and `--open` on a
+`rowser forward` request are refused the same way, and the request keeps waiting.
 
 ### `rowser reload`
 
@@ -498,7 +506,7 @@ daemon runs with `--confirm-unverified`. Its URLs skip the `[[route]]` entries a
   - `rowserd.sock` — the direct socket, for `ssh_config` tunnels. The host name is what the
     remote host reports, and it is shown as untrusted. It never matches a named Route.
   - `rowserd-control.sock` — the control socket, for rowser commands on the local machine
-    (`status`, `activity`, `pause`, `pending`, `reload`, …). It is never forwarded.
+    (`status`, `activity`, `pause`, `pending`, `reload`, …). No Tunnel reaches it.
 - Rate limit: at most 5 URLs per 10 seconds per connection; more are rejected with an error.
 - By default URLs open immediately with a notification. Use `--confirm-hosts` to require a click
   for hosts you trust less.
