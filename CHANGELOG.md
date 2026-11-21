@@ -200,6 +200,8 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- The control-socket test for a Forward that leaves `rowser status` no longer fails at random on
+  a slow machine. ([#56](https://github.com/jhnhnsn/rowser/issues/56))
 - The tests build without warnings on Rust 1.100, so `cargo clippy --all-targets -- -D warnings`
   passes again for contributors and in CI. ([#61](https://github.com/jhnhnsn/rowser/issues/61))
 - `rowser doctor --help` now says "Check the local and remote setup", because doctor checks
