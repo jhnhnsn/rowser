@@ -200,6 +200,8 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- `rowser doctor --help` now says "Check the local and remote setup", because doctor checks
+  the Local machine too. ([#60](https://github.com/jhnhnsn/rowser/issues/60))
 - On macOS, the notification for an opened URL now shows. It did not show on current macOS. The
   text now also shows as it is, so a URL with `&` no longer shows `&amp;`.
   ([#57](https://github.com/jhnhnsn/rowser/issues/57),
