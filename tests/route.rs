@@ -209,8 +209,10 @@ fn move_and_remove_keep_the_comments() {
     let file = dir.0.join("config.toml");
     std::fs::write(&file, HAND).unwrap();
     let run = dir.0.join("run");
-    route(&file, &run, add("db1", &[], "firefox", false));
-    route(&file, &run, add("db2", &[], "safari", false));
+    let (code, _, err) = route(&file, &run, add("db1", &[], "firefox", false));
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    let (code, _, err) = route(&file, &run, add("db2", &[], "safari", false));
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
 
     let (code, out, err) = route(&file, &run, RouteAction::Move { n: 3, to: 1 });
     assert_eq!(code, ExitCode::SUCCESS, "{err}");
@@ -250,7 +252,8 @@ fn move_keeps_one_blank_line_between_routes_and_none_at_the_top() {
     )
     .unwrap();
     let run = dir.0.join("run");
-    route(&file, &run, add("db1", &[], "firefox", false));
+    let (code, _, err) = route(&file, &run, add("db1", &[], "firefox", false));
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
     let (code, _, err) = route(&file, &run, RouteAction::Move { n: 2, to: 1 });
     assert_eq!(code, ExitCode::SUCCESS, "{err}");
     assert_eq!(

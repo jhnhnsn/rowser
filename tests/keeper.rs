@@ -10,7 +10,7 @@ use std::time::Duration;
 use rowser::protocol::{Conn, Msg};
 use rowser::shim::{run_keeper, KeeperArgs};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpSocket, TcpStream, UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpSocket, UnixListener, UnixStream};
 use tokio::time::Instant;
 
 fn tmp() -> common::TmpDir {
@@ -99,7 +99,7 @@ async fn the_keeper_ends_when_the_remote_port_stops_listening() {
     assert!(!keeper.is_finished(), "alive while the port listens");
     let start = Instant::now();
     drop(remote);
-    keeper.await.unwrap();
+    assert_eq!(keeper.await.unwrap(), ExitCode::SUCCESS);
     assert!(
         start.elapsed() <= Duration::from_secs(3),
         "{:?}",
@@ -127,9 +127,10 @@ async fn the_keeper_ends_when_the_remote_port_stops_listening_after_it_closed_a_
     let remote = plain.listen(1).unwrap();
     let keeper = tokio::spawn(run_keeper(args(sock, port)));
     let _control = attached(&tunnel).await;
-    let mut browser = TcpStream::connect(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port))
-        .await
-        .unwrap();
+    let mut browser =
+        tokio::net::TcpStream::connect(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port))
+            .await
+            .unwrap();
     let (served, _) = remote.accept().await.unwrap();
     drop(served);
     let mut rest = Vec::new();
@@ -139,7 +140,7 @@ async fn the_keeper_ends_when_the_remote_port_stops_listening_after_it_closed_a_
     assert!(!keeper.is_finished(), "alive while the port listens");
     let start = Instant::now();
     drop(remote);
-    keeper.await.unwrap();
+    assert_eq!(keeper.await.unwrap(), ExitCode::SUCCESS);
     assert!(
         start.elapsed() <= Duration::from_secs(3),
         "{:?}",
@@ -156,7 +157,7 @@ async fn the_keeper_ends_after_the_timeout() {
     let start = Instant::now();
     let keeper = tokio::spawn(run_keeper(args(sock, port)));
     let _control = attached(&tunnel).await;
-    keeper.await.unwrap();
+    assert_eq!(keeper.await.unwrap(), ExitCode::SUCCESS);
     let t = start.elapsed();
     assert!(
         t >= Duration::from_secs(600) && t < Duration::from_secs(603),
@@ -181,7 +182,7 @@ async fn the_keeper_ends_when_a_dial_fails() {
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert!(!keeper.is_finished(), "alive while the port is in use");
     control.send(&Msg::Dial { conn_id: 1, port }).await.unwrap();
-    keeper.await.unwrap();
+    assert_eq!(keeper.await.unwrap(), ExitCode::SUCCESS);
     assert_eq!(control.recv().await.unwrap(), None, "the control closes");
 }
 
@@ -208,7 +209,7 @@ async fn the_keeper_ends_when_its_listener_stops_although_the_other_loopback_add
     assert!(!keeper.is_finished(), "alive while the port listens");
     let start = Instant::now();
     drop(remote);
-    keeper.await.unwrap();
+    assert_eq!(keeper.await.unwrap(), ExitCode::SUCCESS);
     assert!(
         start.elapsed() <= Duration::from_secs(3),
         "{:?}",
@@ -234,7 +235,7 @@ async fn the_keeper_waits_for_a_port_that_does_not_listen_yet() {
     assert!(!keeper.is_finished(), "alive while the port listens");
     let start = Instant::now();
     drop(remote);
-    keeper.await.unwrap();
+    assert_eq!(keeper.await.unwrap(), ExitCode::SUCCESS);
     assert!(
         start.elapsed() <= Duration::from_secs(3),
         "{:?}",

@@ -164,7 +164,7 @@ async fn a_paused_daemon_refuses_an_open_request_until_resume() {
 async fn a_paused_daemon_refuses_rowser_forward() {
     let dir = TmpDir::new("pau");
     let (run, _) = start(&dir).await;
-    command(run.clone(), pause).await;
+    assert_eq!(command(run.clone(), pause).await.0, ExitCode::SUCCESS);
     let mut env = shim_env(&run);
     assert_eq!(run_forward(8085, &mut env).await, ExitCode::FAILURE);
     assert_eq!(
@@ -281,7 +281,7 @@ async fn an_open_request_approved_after_pause_starts_is_refused() {
         async move { shim_open(&run, "https://example.com/a").await }
     });
     wait_for_confirm(&notifier).await;
-    command(run.clone(), pause).await;
+    assert_eq!(command(run.clone(), pause).await.0, ExitCode::SUCCESS);
     notifier.release(true);
 
     let (code, err) = open.await.unwrap();
@@ -309,7 +309,7 @@ async fn rowser_forward_approved_after_pause_starts_is_refused() {
         }
     });
     wait_for_confirm(&notifier).await;
-    command(run.clone(), pause).await;
+    assert_eq!(command(run.clone(), pause).await.0, ExitCode::SUCCESS);
     notifier.release(true);
 
     let (code, err) = forward.await.unwrap();
@@ -344,7 +344,7 @@ fn a_new_daemon_on_the_same_runtime_directory_starts_not_paused() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let run = rt.block_on(async {
         let (run, _) = start(&dir).await;
-        command(run.clone(), pause).await;
+        assert_eq!(command(run.clone(), pause).await.0, ExitCode::SUCCESS);
         assert_eq!(status(&run).await["paused"], true);
         run
     });

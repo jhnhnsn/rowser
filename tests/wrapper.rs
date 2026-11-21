@@ -164,7 +164,7 @@ async fn alias_falls_back_to_the_argv_destination() {
     let hosts: Vec<_> = s.notifier.notices().into_iter().map(|n| n.host).collect();
     assert_eq!(hosts, [NoticeHost::Alias("myhost".into())]);
     std::fs::write(s.dir.0.join("done"), "").unwrap();
-    wrapper.join().unwrap();
+    assert_eq!(wrapper.join().unwrap(), ExitCode::SUCCESS);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -268,7 +268,7 @@ async fn a_host_stamp_forged_through_the_tunnel_is_refused() {
     }
     assert!(s.notifier.notices().is_empty());
     std::fs::write(s.dir.0.join("done"), "").unwrap();
-    wrapper.join().unwrap();
+    assert_eq!(wrapper.join().unwrap(), ExitCode::SUCCESS);
 }
 
 /// Runs `rowser ssh h` with no Daemon, sends `sig` to the Wrapper, and

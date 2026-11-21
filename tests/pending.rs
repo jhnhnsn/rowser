@@ -191,8 +191,8 @@ async fn pending_lists_a_waiting_request_with_id_host_url_and_target() {
     assert_eq!(fields[2], "https://example.com/a");
     assert_eq!(fields[3], "system");
     assert!(fields[4].ends_with('s'), "{out}");
-    deny(&s.run, 1).await;
-    shim.await.unwrap();
+    assert_eq!(deny(&s.run, 1).await.0, ExitCode::SUCCESS);
+    assert_eq!(shim.await.unwrap().0, ExitCode::FAILURE);
 }
 
 #[tokio::test(flavor = "multi_thread")]
