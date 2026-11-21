@@ -91,7 +91,9 @@ impl DoctorEnv<std::io::Stdout> {
                 .any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty())),
             self_exe: std::env::current_exe().ok(),
             home,
-            tunnel_dir: PathBuf::from(TUNNEL_DIR),
+            // The same hidden test hook as the Shim reads (shim::ShimEnv).
+            tunnel_dir: std::env::var_os("ROWSER_TEST_TUNNEL_DIR")
+                .map_or_else(|| PathBuf::from(TUNNEL_DIR), PathBuf::from),
             socket_override: std::env::var_os("ROWSER_SOCKET")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
@@ -518,10 +520,16 @@ pub fn check_routes(config: &Config, roots: &Roots) -> Vec<Check> {
         .iter()
         .filter_map(|(label, t)| {
             browsers.normalize(t).err().map(|e| {
+                // A missing [default] opens with `system` (Routes::resolve).
+                let next = if label == "[default]" {
+                    "`system`"
+                } else {
+                    "[default]"
+                };
                 Check::new(
                     Status::Warn,
                     NAME,
-                    format!("{label}: {t}: {e}; the request falls back to [default]"),
+                    format!("{label}: {t}: {e}; the request falls back to {next}"),
                 )
             })
         })
@@ -589,7 +597,7 @@ fn has_session_socket(tunnel_dir: &Path, socket_override: Option<&Path>) -> bool
 /// Runs the Local machine checks, then the Remote host checks, as this
 /// machine needs; prints one line each, and exits 1 when any fails.
 ///
-/// Local: a config file or a Daemon runtime directory exists. Remote: a
+/// Local: a config file exists, or the Daemon runtime directory exists. Remote: a
 /// Session socket exists or `SSH_CONNECTION` is set. Neither: Remote.
 pub async fn run_doctor<W: Write>(env: &mut DoctorEnv<W>) -> ExitCode {
     let local = env.config_file.as_ref().is_ok_and(|f| f.exists())
@@ -624,6 +632,7 @@ pub async fn run_doctor<W: Write>(env: &mut DoctorEnv<W>) -> ExitCode {
     }
 }
 
+/// Runs the Remote host checks: PATH, Shim symlinks, `BROWSER` and the rest.
 async fn remote_checks<W: Write>(env: &DoctorEnv<W>, checks: &mut Vec<Check>) {
     match &env.home {
         Some(home) => {

@@ -153,6 +153,32 @@ async fn local_route_to_a_missing_browser_or_profile_warns() {
 }
 
 #[tokio::test]
+async fn local_missing_fallback_targets_say_what_they_fall_back_to() {
+    let dir = TmpDir::new("df");
+    let mut e = local_env(
+        &dir,
+        "[unverified]\nopen = \"firefox\"\n\
+         [default]\nopen = \"chrome:Nope\"\n",
+    );
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    let warns: Vec<&String> = out
+        .iter()
+        .filter(|l| l.starts_with("warn routes: "))
+        .collect();
+    assert_eq!(
+        warns,
+        vec![
+            "warn routes: [unverified]: firefox: browser `firefox` is not installed; \
+             the request falls back to [default]",
+            "warn routes: [default]: chrome:Nope: browser `chrome` has no profile `Nope`; \
+             the request falls back to `system`",
+        ],
+        "{out:?}"
+    );
+}
+
+#[tokio::test]
 async fn local_invalid_config_fails_with_the_file_and_line() {
     let dir = TmpDir::new("di");
     let mut e = local_env(&dir, "[[route]]\nhost = \"a\"\nopen = \"chrome:\"\n");
