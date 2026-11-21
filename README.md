@@ -1,5 +1,9 @@
 # rowser
 
+> [!WARNING]
+> rowser is under active development and has no release yet. Expect rough edges and breaking
+> changes until `v0.1.0`.
+
 Open URLs from headless SSH hosts in your local browser — including OAuth logins that call back
 to `localhost` on the remote host.
 
@@ -42,10 +46,6 @@ changes to `sshd_config`, and give the local machine some control over what gets
 [local-open]: https://github.com/suan/local-open
 
 ## Status
-
-> [!WARNING]
-> rowser is under active development and has no release yet. Expect rough edges and breaking
-> changes until `v0.1.0`.
 
 - **Proof of concept: done.** From a Mac as the local machine to a Linux remote host over
   `rowser ssh`, a URL opened on the remote host opens in the Mac's browser, and a `localhost`
