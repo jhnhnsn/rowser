@@ -117,7 +117,7 @@ plus its fix commit.
 
 ## Concurrency
 
-Parallel worktrees: at most 3 at once.
+Parallel worktrees: at most 2 at once.
 
 ## Daily cap
 
@@ -125,7 +125,7 @@ Rolling: 14.3% of the plan's weekly usage per day.
 
 ## Ticket budget
 
-6
+4
 
 ## Writing
 
