@@ -200,6 +200,9 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- Builds from source and CI now use the same pinned Rust toolchain (1.100.0, from
+  `rust-toolchain.toml`), so a new stable clippy no longer breaks CI for code that passes
+  locally. The README says how to bump it. ([#66](https://github.com/jhnhnsn/rowser/issues/66))
 - The Stale socket tests (daemon bind, Shim discovery and `rowser status`) no longer fail at
   random when another test starts a process at the same time.
   ([#58](https://github.com/jhnhnsn/rowser/issues/58))
