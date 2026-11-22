@@ -720,8 +720,12 @@ mod tests {
     }
 
     /// A home with `~/.local/bin/rowser` and, when `links`, its symlinks.
+    /// A counter makes each path unique, so tags that differ only in case
+    /// (which a case-insensitive file system folds) never share a folder.
     fn home(tag: &str, links: bool) -> Tmp {
-        let dir = PathBuf::from(format!("/tmp/rw.doc{tag}.{}", std::process::id()));
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = PathBuf::from(format!("/tmp/rw.doc{tag}-{n}.{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let bin = dir.join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -737,6 +741,15 @@ mod tests {
             }
         }
         Tmp(dir)
+    }
+
+    #[test]
+    fn homes_do_not_collide_on_a_case_insensitive_fs() {
+        // macOS folds case: "/tmp/rw.docE.1" and "/tmp/rw.doce.1" are one folder.
+        let a = home("q", false);
+        let b = home("Q", false);
+        let fold = |t: &Tmp| t.0.to_string_lossy().to_lowercase();
+        assert_ne!(fold(&a), fold(&b));
     }
 
     #[test]
