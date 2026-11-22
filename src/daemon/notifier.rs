@@ -180,7 +180,7 @@ pub trait Notifier: Send + Sync + 'static {
 /// Seconds the confirmation notification or dialog stays up.
 const CONFIRM_SECS: u64 = super::confirm::CONFIRM_TIMEOUT.as_secs();
 
-/// Desktop notifications through notify-rust.
+/// Desktop notifications: notify-rust off macOS; osascript notices and dialog on macOS.
 #[derive(Debug, Clone, Default)]
 pub struct DesktopNotifier;
 
