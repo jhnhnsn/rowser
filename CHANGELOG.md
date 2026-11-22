@@ -200,6 +200,8 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- The activity test for how long a Callback forward stayed open no longer fails at random on a
+  slow machine. ([#65](https://github.com/jhnhnsn/rowser/issues/65))
 - The spec and README now describe all of `rowser doctor`'s checks, on the Remote host and on
   the Local machine, and say when each side runs. ([#67](https://github.com/jhnhnsn/rowser/issues/67),
   [#63](https://github.com/jhnhnsn/rowser/issues/63))
