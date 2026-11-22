@@ -225,8 +225,9 @@ async fn a_confirmation_without_an_answer_shows_as_timed_out() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_callback_forward_shows_how_long_it_stayed_open_after_it_closes() {
     let dir = TmpDir::new("act");
-    // The default (long) timeout: the forward cannot end before the first
-    // activity read. The keeper's disconnect ends it, at a time the test picks.
+    // The default (long) timeout: the callback forward cannot end before the
+    // first activity read. The keeper's disconnect ends it, at a time the test
+    // picks.
     let run = start(&dir, DaemonConfig::default()).await;
     let port = free_port().await;
     let mut conn = relay(&run, "g14").await;
@@ -256,7 +257,7 @@ async fn a_callback_forward_shows_how_long_it_stayed_open_after_it_closes() {
         "{out}"
     );
 
-    // A keeper attaches and disconnects, so the forward ends.
+    // A keeper attaches and disconnects, so the callback forward ends.
     let s = UnixStream::connect(run.join(DIRECT_SOCKET)).await.unwrap();
     let mut keeper = Conn::connect(s, Hello::current()).await.unwrap();
     keeper
@@ -266,13 +267,17 @@ async fn a_callback_forward_shows_how_long_it_stayed_open_after_it_closes() {
     drop(keeper);
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if entries(run.clone()).await[0]["open_secs"] == 0 {
+        // Any whole number of seconds: the test does not depend on time.
+        if let Some(secs) = entries(run.clone()).await[0]["open_secs"].as_u64() {
             let (_, out, _) = activity(run, false).await;
-            assert!(out.trim_end().ends_with("opened  open 0s"), "{out}");
+            assert!(
+                out.trim_end().ends_with(&format!("opened  open {secs}s")),
+                "{out}"
+            );
             return;
         }
     }
-    panic!("the forward has no duration");
+    panic!("the callback forward has no duration");
 }
 
 #[tokio::test(flavor = "multi_thread")]
