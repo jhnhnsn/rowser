@@ -225,11 +225,9 @@ async fn a_confirmation_without_an_answer_shows_as_timed_out() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_callback_forward_shows_how_long_it_stayed_open_after_it_closes() {
     let dir = TmpDir::new("act");
-    let config = DaemonConfig {
-        forward_timeout: Duration::from_millis(300),
-        ..DaemonConfig::default()
-    };
-    let run = start(&dir, config).await;
+    // The default (long) timeout: the forward cannot end before the first
+    // activity read. The keeper's disconnect ends it, at a time the test picks.
+    let run = start(&dir, DaemonConfig::default()).await;
     let port = free_port().await;
     let mut conn = relay(&run, "g14").await;
     conn.send(&Msg::Forward {
@@ -238,7 +236,13 @@ async fn a_callback_forward_shows_how_long_it_stayed_open_after_it_closes() {
     })
     .await
     .unwrap();
-    conn.recv().await.unwrap();
+    let forward_id = match conn.recv().await.unwrap() {
+        Some(Msg::OpenResult {
+            forward_id: Some(id),
+            ..
+        }) => id,
+        other => panic!("unexpected {other:?}"),
+    };
 
     let e = entries(run.clone()).await;
     assert_eq!(e[0]["kind"], "forward");
@@ -252,7 +256,14 @@ async fn a_callback_forward_shows_how_long_it_stayed_open_after_it_closes() {
         "{out}"
     );
 
-    // No keeper attaches, so the forward ends at its timeout.
+    // A keeper attaches and disconnects, so the forward ends.
+    let s = UnixStream::connect(run.join(DIRECT_SOCKET)).await.unwrap();
+    let mut keeper = Conn::connect(s, Hello::current()).await.unwrap();
+    keeper
+        .send(&Msg::AttachForward { forward_id })
+        .await
+        .unwrap();
+    drop(keeper);
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if entries(run.clone()).await[0]["open_secs"] == 0 {
