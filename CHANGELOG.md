@@ -200,6 +200,8 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- The doctor tests no longer share a home folder on macOS, where the file system ignores letter
+  case, so they pass there again. ([#64](https://github.com/jhnhnsn/rowser/issues/64))
 - Builds from source and CI now use the same pinned Rust toolchain (1.100.0, from
   `rust-toolchain.toml`), so a new stable clippy no longer breaks CI for code that passes
   locally. The README says how to bump it. ([#66](https://github.com/jhnhnsn/rowser/issues/66))
