@@ -77,20 +77,63 @@ impl Harness {
         }
     }
 
-    /// Opens a Forward on a free port and returns the port and forward_id.
-    /// `free_port` closes its listener before the Daemon binds the port, so
-    /// another test or process can take the port in that window. A busy port
-    /// gives no forward_id; then this tries again with a new port.
-    async fn open_on_free_port(&self) -> (u16, String) {
-        for _ in 0..20 {
-            let port = free_port().await;
-            match self.open(vec![port]).await {
-                (Some(id), warnings, None) if warnings.is_empty() => return (port, id),
-                (None, warnings, None) if warnings.iter().any(|w| w.contains("busy")) => {}
-                other => panic!("unexpected {other:?}"),
-            }
+    /// Sends a manual Forward request with `ports` and returns the reply's fields.
+    async fn forward(&self, ports: Vec<u16>) -> (Option<String>, Vec<String>, Option<String>) {
+        let mut c = self.connect().await;
+        c.send(&Msg::Forward {
+            reported_host: "devbox".into(),
+            callback_ports: ports,
+        })
+        .await
+        .unwrap();
+        match c.recv().await.unwrap() {
+            Some(Msg::OpenResult {
+                forward_id,
+                warnings,
+                error,
+            }) => (forward_id, warnings, error),
+            other => panic!("unexpected {other:?}"),
         }
-        panic!("no free port after 20 tries");
+    }
+
+    /// Opens a Forward on a free port and returns the port, the forward_id
+    /// and the number of tries (each try opens the URL once).
+    async fn open_on_free_port(&self) -> (u16, String, usize) {
+        let mut tries = 0;
+        let (port, id) = retry_busy(|port| {
+            tries += 1;
+            self.open(vec![port])
+        })
+        .await;
+        (port, id, tries)
+    }
+}
+
+/// Sends `request` with a free port until the reply is not "busy", and
+/// returns the port and forward_id. `free_port` closes its listener before
+/// the Daemon binds the port, so another test or process can take the port
+/// in that window. A busy port gives no forward_id; then this tries again
+/// with a new port.
+async fn retry_busy<F, Fut>(mut request: F) -> (u16, String)
+where
+    F: FnMut(u16) -> Fut,
+    Fut: std::future::Future<Output = (Option<String>, Vec<String>, Option<String>)>,
+{
+    for _ in 0..20 {
+        let port = free_port().await;
+        match request(port).await {
+            (Some(id), warnings, None) if warnings.is_empty() => return (port, id),
+            (None, warnings, None) if warnings.iter().any(|w| w.contains("busy")) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    panic!("no free port after 20 tries");
+}
+
+impl Harness {
+    /// The `open_on_free_port` of a manual Forward.
+    async fn forward_on_free_port(&self) -> (u16, String) {
+        retry_busy(|port| self.forward(vec![port])).await
     }
 }
 
@@ -104,8 +147,12 @@ fn v6_config() -> DaemonConfig {
 #[tokio::test]
 async fn a_browser_connection_waits_for_the_keeper_and_is_spliced() {
     let h = Harness::start(v6_config()).await;
-    let (port, id) = h.open_on_free_port().await;
-    assert!(!h.opener.urls().is_empty());
+    let (port, id, tries) = h.open_on_free_port().await;
+    let urls = h.opener.urls();
+    assert_eq!(urls.len(), tries);
+    assert!(urls
+        .iter()
+        .all(|u| u.as_str() == "https://example.com/auth"));
 
     // The browser connects before the keeper attaches: it is queued.
     let mut browser = TcpStream::connect(SocketAddr::new(V6, port)).await.unwrap();
@@ -166,8 +213,8 @@ async fn data_conn_refused(h: &Harness, forward_id: &str, conn_id: u64) {
 #[tokio::test]
 async fn a_data_conn_of_another_forward_or_a_wrong_id_gets_no_connection() {
     let h = Harness::start(v6_config()).await;
-    let (port, id) = h.open_on_free_port().await;
-    let (_, other) = h.open_on_free_port().await;
+    let (port, id, _) = h.open_on_free_port().await;
+    let (_, other, _) = h.open_on_free_port().await;
     let mut control = h.connect().await;
     control
         .send(&Msg::AttachForward {
@@ -261,7 +308,7 @@ async fn until_closed(port: u16) {
 #[tokio::test]
 async fn the_forward_closes_when_the_keeper_disconnects() {
     let h = Harness::start(v6_config()).await;
-    let (port, id) = h.open_on_free_port().await;
+    let (port, id, _) = h.open_on_free_port().await;
     let mut control = h.connect().await;
     control
         .send(&Msg::AttachForward { forward_id: id })
@@ -281,7 +328,7 @@ async fn the_forward_closes_after_the_timeout() {
         ..v6_config()
     })
     .await;
-    let (port, id) = h.open_on_free_port().await;
+    let (port, id, _) = h.open_on_free_port().await;
     let mut control = h.connect().await;
     control
         .send(&Msg::AttachForward { forward_id: id })
@@ -312,10 +359,18 @@ fn shim_env(h: &Harness) -> ShimEnv<Vec<u8>> {
 
 /// A fake remote HTTP server on 127.0.0.1 (the Daemon binds only [::1] here,
 /// so both fit on one machine). Answers each request with its path.
-async fn fake_remote_http() -> (u16, tokio::task::JoinHandle<()>) {
-    let l = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .await
-        .unwrap();
+/// The port is also free on [::1]: the returned listener holds [::1]:port;
+/// drop it just before the Daemon binds the port.
+async fn fake_remote_http() -> (u16, tokio::task::JoinHandle<()>, TcpListener) {
+    let (l, hold) = loop {
+        let l = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = l.local_addr().unwrap().port();
+        if let Ok(hold) = TcpListener::bind(SocketAddr::new(V6, port)).await {
+            break (l, hold);
+        }
+    };
     let port = l.local_addr().unwrap().port();
     let task = tokio::spawn(async move {
         loop {
@@ -341,7 +396,12 @@ async fn fake_remote_http() -> (u16, tokio::task::JoinHandle<()>) {
             });
         }
     });
-    (port, task)
+    (port, task, hold)
+}
+
+/// The busy-port warning that the Shim prints for `port`.
+fn busy_warning(port: u16) -> String {
+    format!("rowser: warning: local port {port} is busy; the callback cannot be forwarded\n")
 }
 
 /// One HTTP request to [::1]:`port`, as a browser makes it; returns the body.
@@ -359,19 +419,32 @@ async fn browser_get(port: u16, path: &str) -> String {
 
 #[tokio::test]
 async fn an_oauth_callback_reaches_the_remote_listener_through_the_keeper() {
-    let h = Harness::start(v6_config()).await;
-    let (port, _remote) = fake_remote_http().await;
-    let url = Url::parse(&format!(
-        "https://auth.example.com/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A{port}%2Fcb"
-    ))
-    .unwrap();
-    let mut env = shim_env(&h);
-    let started = std::time::Instant::now();
-    assert_eq!(run_open(&url, &mut env).await, ExitCode::SUCCESS);
-    // The Shim returns before any callback happens.
-    assert!(started.elapsed() < Duration::from_secs(2));
-    assert_eq!(String::from_utf8(env.stderr).unwrap(), "");
-    assert_eq!(h.opener.urls(), [url]);
+    // Another socket can take [::1]:port after `hold` drops; then the Shim
+    // warns "busy" and this tries again with a new port and a new Daemon.
+    let mut found = None;
+    for _ in 0..20 {
+        let h = Harness::start(v6_config()).await;
+        let (port, remote, hold) = fake_remote_http().await;
+        let url = Url::parse(&format!(
+            "https://auth.example.com/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A{port}%2Fcb"
+        ))
+        .unwrap();
+        let mut env = shim_env(&h);
+        drop(hold);
+        let started = std::time::Instant::now();
+        assert_eq!(run_open(&url, &mut env).await, ExitCode::SUCCESS);
+        // The Shim returns before any callback happens.
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let stderr = String::from_utf8(env.stderr).unwrap();
+        if stderr == busy_warning(port) {
+            continue;
+        }
+        assert_eq!(stderr, "");
+        assert_eq!(h.opener.urls(), [url]);
+        found = Some((h, port, remote));
+        break;
+    }
+    let (_h, port, _remote) = found.expect("no free port after 20 tries");
 
     assert_eq!(
         browser_get(port, "/cb?code=1").await,
@@ -391,24 +464,34 @@ async fn the_shim_prints_the_busy_port_warning_and_exits_0() {
     let url = Url::parse(&format!("http://localhost:{port}/start")).unwrap();
     let mut env = shim_env(&h);
     assert_eq!(run_open(&url, &mut env).await, ExitCode::SUCCESS);
-    assert_eq!(
-        String::from_utf8(env.stderr).unwrap(),
-        format!("rowser: warning: local port {port} is busy; the callback cannot be forwarded\n")
-    );
+    assert_eq!(String::from_utf8(env.stderr).unwrap(), busy_warning(port));
     assert_eq!(h.opener.urls(), [url]);
 }
 
 #[tokio::test]
 async fn rowser_forward_carries_connections_to_the_remote_port() {
-    let h = Harness::start(v6_config()).await;
-    let (port, _remote) = fake_remote_http().await;
-    let mut env = shim_env(&h);
-    assert_eq!(run_forward(port, &mut env).await, ExitCode::SUCCESS);
-    assert_eq!(
-        String::from_utf8(env.stderr).unwrap(),
-        format!("rowser: forwarding local port {port} to port {port} on this host\n")
-    );
-    assert!(h.opener.urls().is_empty());
+    // A busy port means another socket took it; try again (see the test above).
+    let mut found = None;
+    for _ in 0..20 {
+        let h = Harness::start(v6_config()).await;
+        let (port, remote, hold) = fake_remote_http().await;
+        let mut env = shim_env(&h);
+        drop(hold);
+        let code = run_forward(port, &mut env).await;
+        let stderr = String::from_utf8(env.stderr).unwrap();
+        if code == ExitCode::FAILURE && stderr == busy_warning(port) {
+            continue;
+        }
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(
+            stderr,
+            format!("rowser: forwarding local port {port} to port {port} on this host\n")
+        );
+        assert!(h.opener.urls().is_empty());
+        found = Some((h, port, remote));
+        break;
+    }
+    let (_h, port, _remote) = found.expect("no free port after 20 tries");
     assert_eq!(browser_get(port, "/x").await, "remote got /x");
 }
 
@@ -419,40 +502,13 @@ async fn rowser_forward_on_a_busy_port_exits_1() {
     let port = busy.local_addr().unwrap().port();
     let mut env = shim_env(&h);
     assert_eq!(run_forward(port, &mut env).await, ExitCode::FAILURE);
-    assert_eq!(
-        String::from_utf8(env.stderr).unwrap(),
-        format!("rowser: warning: local port {port} is busy; the callback cannot be forwarded\n")
-    );
+    assert_eq!(String::from_utf8(env.stderr).unwrap(), busy_warning(port));
 }
 
 #[tokio::test]
 async fn a_manual_forward_binds_the_port_without_a_url() {
     let h = Harness::start(v6_config()).await;
-    // A busy port means another test took it; try again (see `open_on_free_port`).
-    let mut port = 0;
-    for _ in 0..20 {
-        port = free_port().await;
-        let mut c = h.connect().await;
-        c.send(&Msg::Forward {
-            reported_host: "devbox".into(),
-            callback_ports: vec![port],
-        })
-        .await
-        .unwrap();
-        match c.recv().await.unwrap() {
-            Some(Msg::OpenResult {
-                forward_id: Some(_),
-                error: None,
-                ..
-            }) => break,
-            Some(Msg::OpenResult {
-                forward_id: None,
-                warnings,
-                error: None,
-            }) if warnings.iter().any(|w| w.contains("busy")) => {}
-            other => panic!("unexpected {other:?}"),
-        }
-    }
+    let (port, _) = h.forward_on_free_port().await;
     assert!(h.opener.urls().is_empty());
     TcpStream::connect(SocketAddr::new(V6, port)).await.unwrap();
 }
