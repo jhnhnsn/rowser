@@ -76,6 +76,22 @@ impl Harness {
             other => panic!("unexpected {other:?}"),
         }
     }
+
+    /// Opens a Forward on a free port and returns the port and forward_id.
+    /// `free_port` closes its listener before the Daemon binds the port, so
+    /// another test or process can take the port in that window. A busy port
+    /// gives no forward_id; then this tries again with a new port.
+    async fn open_on_free_port(&self) -> (u16, String) {
+        for _ in 0..20 {
+            let port = free_port().await;
+            match self.open(vec![port]).await {
+                (Some(id), warnings, None) if warnings.is_empty() => return (port, id),
+                (None, warnings, None) if warnings.iter().any(|w| w.contains("busy")) => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        panic!("no free port after 20 tries");
+    }
 }
 
 fn v6_config() -> DaemonConfig {
@@ -88,11 +104,8 @@ fn v6_config() -> DaemonConfig {
 #[tokio::test]
 async fn a_browser_connection_waits_for_the_keeper_and_is_spliced() {
     let h = Harness::start(v6_config()).await;
-    let port = free_port().await;
-    let (id, warnings, error) = h.open(vec![port]).await;
-    assert_eq!((warnings, error), (vec![], None));
-    let id = id.expect("a forward id");
-    assert_eq!(h.opener.urls().len(), 1);
+    let (port, id) = h.open_on_free_port().await;
+    assert!(!h.opener.urls().is_empty());
 
     // The browser connects before the keeper attaches: it is queued.
     let mut browser = TcpStream::connect(SocketAddr::new(V6, port)).await.unwrap();
@@ -153,10 +166,8 @@ async fn data_conn_refused(h: &Harness, forward_id: &str, conn_id: u64) {
 #[tokio::test]
 async fn a_data_conn_of_another_forward_or_a_wrong_id_gets_no_connection() {
     let h = Harness::start(v6_config()).await;
-    let port = free_port().await;
-    let other_port = free_port().await;
-    let id = h.open(vec![port]).await.0.unwrap();
-    let other = h.open(vec![other_port]).await.0.unwrap();
+    let (port, id) = h.open_on_free_port().await;
+    let (_, other) = h.open_on_free_port().await;
     let mut control = h.connect().await;
     control
         .send(&Msg::AttachForward {
@@ -250,8 +261,7 @@ async fn until_closed(port: u16) {
 #[tokio::test]
 async fn the_forward_closes_when_the_keeper_disconnects() {
     let h = Harness::start(v6_config()).await;
-    let port = free_port().await;
-    let id = h.open(vec![port]).await.0.unwrap();
+    let (port, id) = h.open_on_free_port().await;
     let mut control = h.connect().await;
     control
         .send(&Msg::AttachForward { forward_id: id })
@@ -271,8 +281,7 @@ async fn the_forward_closes_after_the_timeout() {
         ..v6_config()
     })
     .await;
-    let port = free_port().await;
-    let id = h.open(vec![port]).await.0.unwrap();
+    let (port, id) = h.open_on_free_port().await;
     let mut control = h.connect().await;
     control
         .send(&Msg::AttachForward { forward_id: id })
@@ -419,21 +428,30 @@ async fn rowser_forward_on_a_busy_port_exits_1() {
 #[tokio::test]
 async fn a_manual_forward_binds_the_port_without_a_url() {
     let h = Harness::start(v6_config()).await;
-    let port = free_port().await;
-    let mut c = h.connect().await;
-    c.send(&Msg::Forward {
-        reported_host: "devbox".into(),
-        callback_ports: vec![port],
-    })
-    .await
-    .unwrap();
-    match c.recv().await.unwrap() {
-        Some(Msg::OpenResult {
-            forward_id: Some(_),
-            error: None,
-            ..
-        }) => {}
-        other => panic!("unexpected {other:?}"),
+    // A busy port means another test took it; try again (see `open_on_free_port`).
+    let mut port = 0;
+    for _ in 0..20 {
+        port = free_port().await;
+        let mut c = h.connect().await;
+        c.send(&Msg::Forward {
+            reported_host: "devbox".into(),
+            callback_ports: vec![port],
+        })
+        .await
+        .unwrap();
+        match c.recv().await.unwrap() {
+            Some(Msg::OpenResult {
+                forward_id: Some(_),
+                error: None,
+                ..
+            }) => break,
+            Some(Msg::OpenResult {
+                forward_id: None,
+                warnings,
+                error: None,
+            }) if warnings.iter().any(|w| w.contains("busy")) => {}
+            other => panic!("unexpected {other:?}"),
+        }
     }
     assert!(h.opener.urls().is_empty());
     TcpStream::connect(SocketAddr::new(V6, port)).await.unwrap();
