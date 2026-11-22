@@ -40,6 +40,12 @@ impl Drop for TmpDir {
     }
 }
 
+/// Held by tests that start child processes, and by the Stale socket test: a
+/// fork in another test thread holds a copy of a closed listener until exec,
+/// so the Stale socket can look live for a moment. A tokio Mutex, as some
+/// holders keep it across an await.
+static SPAWN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A fake Tunnel end: completes the handshake, then sends a HostStamp naming it.
 fn serve_named(path: &Path, name: &str) {
     let listener = UnixListener::bind(path).unwrap();
@@ -107,6 +113,7 @@ async fn discovery_ignores_files_that_do_not_match_the_pattern() {
 
 #[tokio::test]
 async fn discovery_removes_a_stale_socket_and_uses_the_next() {
+    let _spawn = SPAWN.lock().await;
     let dir = TmpDir::new();
     let stale = dir.path("rowser-stale.sock");
     drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
@@ -203,6 +210,7 @@ fn fake_xdg_open(dir: &Path) -> PathBuf {
 
 #[tokio::test]
 async fn no_tunnel_in_a_graphical_session_runs_the_real_xdg_open() {
+    let _spawn = SPAWN.lock().await;
     let t = TmpDir::new();
     let bin = t.path("bin");
     fake_xdg_open(&bin);
@@ -221,6 +229,7 @@ async fn no_tunnel_in_a_graphical_session_runs_the_real_xdg_open() {
 
 #[tokio::test]
 async fn no_tunnel_without_a_graphical_session_does_not_run_xdg_open() {
+    let _spawn = SPAWN.lock().await;
     let t = TmpDir::new();
     let bin = t.path("bin");
     fake_xdg_open(&bin);
@@ -257,6 +266,7 @@ async fn an_xdg_open_that_links_to_rowser_is_skipped() {
 
 #[tokio::test]
 async fn the_first_xdg_open_that_is_not_rowser_runs() {
+    let _spawn = SPAWN.lock().await;
     let t = TmpDir::new();
     let link = t.path("link");
     std::fs::create_dir_all(&link).unwrap();
@@ -322,6 +332,7 @@ fn run_bin(t: &TmpDir, path: &Path, display: &str, extra: &[(&str, &str)]) -> (i
 
 #[test]
 fn the_binary_reads_display_and_runs_the_real_xdg_open() {
+    let _spawn = SPAWN.blocking_lock();
     let t = TmpDir::new();
     let bin = t.path("bin");
     fake_xdg_open(&bin);
@@ -335,6 +346,7 @@ fn the_binary_reads_display_and_runs_the_real_xdg_open() {
 
 #[test]
 fn the_binary_with_an_empty_display_prints_the_no_tunnel_message() {
+    let _spawn = SPAWN.blocking_lock();
     let t = TmpDir::new();
     let bin = t.path("bin");
     fake_xdg_open(&bin);
@@ -349,6 +361,7 @@ fn the_binary_with_an_empty_display_prints_the_no_tunnel_message() {
 
 #[test]
 fn a_real_xdg_open_that_runs_browser_rowser_does_not_loop() {
+    let _spawn = SPAWN.blocking_lock();
     let t = TmpDir::new();
     let bin = t.path("bin");
     std::fs::create_dir_all(&bin).unwrap();

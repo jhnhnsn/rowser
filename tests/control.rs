@@ -569,6 +569,7 @@ async fn status_with_no_daemon_says_not_running_and_exits_1() {
 
 #[test]
 fn status_with_a_stale_control_socket_says_not_running() {
+    let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     let dir = TmpDir::new("ctl");
     let run = dir.0.join("run");
     std::fs::create_dir(&run).unwrap();
@@ -615,9 +616,15 @@ async fn the_control_socket_is_mode_0600() {
     assert_eq!(mode & 0o777, 0o600);
 }
 
+/// Held by tests that start child processes, and by the Stale socket test: a
+/// fork in another test thread holds a copy of a closed listener until exec,
+/// so the Stale socket can look live for a moment.
+static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Starts `rowser daemon` with `XDG_CONFIG_HOME=conf` in `run`, runs
 /// `rowser status --json` against it, and stops it.
 fn binary_status(run: &Path, conf: &Path) -> serde_json::Value {
+    let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     let mut daemon = Command::new(EXE)
         .args(["daemon", "--open-command", "true {url}", "--runtime-dir"])
         .arg(run)
