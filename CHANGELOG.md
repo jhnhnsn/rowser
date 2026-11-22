@@ -200,6 +200,9 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- macOS builds no longer compile notify-rust, which only Linux uses (macOS shows notifications
+  with `osascript`), so the macOS build has no `unused dependency` warning.
+  ([#70](https://github.com/jhnhnsn/rowser/issues/70))
 - The activity test for how long a Callback forward stayed open no longer fails at random on a
   slow machine. ([#65](https://github.com/jhnhnsn/rowser/issues/65))
 - The spec and README now describe all of `rowser doctor`'s checks, on the Remote host and on
