@@ -200,6 +200,9 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- The Stale socket tests (daemon bind, Shim discovery and `rowser status`) no longer fail at
+  random when another test starts a process at the same time.
+  ([#58](https://github.com/jhnhnsn/rowser/issues/58))
 - Tests that run a fake script no longer fail at random with "Text file busy" (ETXTBSY) when
   other tests start processes at the same time. ([#55](https://github.com/jhnhnsn/rowser/issues/55))
 - The control-socket test for a Forward that leaves `rowser status` no longer fails at random on
