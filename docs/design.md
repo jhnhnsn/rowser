@@ -174,7 +174,7 @@ route ─► config, routes, control
 daemon ─► protocol
 shim ─► protocol, discovery, detect
 wrapper ─► protocol
-doctor ─► discovery, protocol, platform
+doctor ─► config, browsers, control, discovery, protocol, platform
 remote_install ─► platform
 discovery ─► protocol
 ```
@@ -285,7 +285,7 @@ src/
   `route ─► config, routes, browsers, control`; `control ─► protocol,
   platform`; `daemon ─► config, routes, browsers, protocol`; `routes ─► config, browsers`
   (types and `Browsers::normalize`); `browsers ─► config` (`Target`);
-  `doctor ─► config, browsers, control`.
+  `doctor ─► config, browsers, control` (added to the list in Dependency direction).
 - `rowser doctor` on the Local machine: `DoctorEnv` also carries `config_file`, `runtime_dir`,
   `browser_roots` and `ssh` (`SSH_CONNECTION` set). `run_doctor` runs the Local checks
   (`check_config`, `check_routes` over every browser Target with `Browsers::normalize`,

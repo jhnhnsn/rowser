@@ -128,11 +128,12 @@ is invoked through a symlink named `xdg-open`, `sensible-browser` or `www-browse
   `~/.local/bin/rowser`, creates the symlinks, and prints the shell line for `BROWSER`.
   *v1.0*: it also makes rowser the default browser for the whole remote user session (see
   Default browser on a Remote host).
-- `rowser doctor` (remote): warns when `~/.local/bin` is not before `/usr/bin` on `PATH`, when
-  `BROWSER` is not set, and does a live round trip through the tunnel (ping → daemon version).
-  *v1.0*: it also checks each part of Default browser on a Remote host, and on the Local machine
-  it checks the config file, Routes whose Target names a missing browser or profile, and that
-  the Daemon answers on the control socket.
+- `rowser doctor`: checks the local and remote setup.
+  - On a Remote host: warns when `~/.local/bin` is not before `/usr/bin` on `PATH`, when
+    `BROWSER` is not set, and does a live round trip through the tunnel (ping → daemon
+    version). *v1.0*: it also checks each part of Default browser on a Remote host.
+  - On the Local machine (*v1.0*): checks the config file, Routes whose Target names a missing
+    browser or profile, and that the Daemon answers on the control socket.
 - rowser never changes files outside the user's home directory (and its own sockets in `/tmp` and in its
   runtime directory, and its service file, which follows `XDG_CONFIG_HOME`).
 

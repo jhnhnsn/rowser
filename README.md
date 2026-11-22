@@ -181,7 +181,7 @@ export BROWSER=rowser
 `rowser <url>` acts as `rowser open <url>`, so programs that use `$BROWSER` work. Make sure
 `~/.local/bin` comes before `/usr/bin` on `PATH`, so the `xdg-open` symlink wins.
 
-Check the setup from the remote host (inside a `rowser ssh` session):
+Check the setup on the remote host (inside a `rowser ssh` session) and on the local machine:
 
 ```sh
 rowser doctor
