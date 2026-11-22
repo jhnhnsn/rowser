@@ -181,13 +181,16 @@ export BROWSER=rowser
 `rowser <url>` acts as `rowser open <url>`, so programs that use `$BROWSER` work. Make sure
 `~/.local/bin` comes before `/usr/bin` on `PATH`, so the `xdg-open` symlink wins.
 
-Check the setup on the remote host (inside a `rowser ssh` session) and on the local machine:
+Check the setup on the remote host (inside a `rowser ssh` session) and on the local machine.
+`rowser doctor` runs the local checks when a config file or the runtime directory exists, and
+the remote checks inside an SSH session or when neither side is found:
 
 ```sh
 rowser doctor
 ```
 
-It warns when `~/.local/bin` is not before `/usr/bin` on `PATH` or `BROWSER` is not rowser, and
+It warns when the browser symlinks in `~/.local/bin` do not resolve to rowser, when
+`~/.local/bin` is not before `/usr/bin` on `PATH` or `BROWSER` is not set or does not resolve to rowser, and
 does a live round trip to the daemon. It also checks the default-browser setup: that
 `rowser.conf` sets `BROWSER=rowser` and `PATH`, that `rowser.desktop` exists and is the default
 for `http` and `https` (from `xdg-mime query default`, else `mimeapps.list`), and, with a
@@ -195,7 +198,8 @@ graphical session, that a real `xdg-open` exists for the fallback (see Usage). E
 check prints one warning with its fix.
 
 On the local machine, `rowser doctor` checks that the config file parses (or prints the file and
-line of the error), that each Route's browser and Profile exist (and where the request falls
+line of the error), that the browser and Profile of each Route, of `[unverified]` and of
+`[default]` exist (and where the request falls
 back if not), and that the daemon answers, with its version.
 
 ## Usage
