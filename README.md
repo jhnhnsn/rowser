@@ -83,6 +83,10 @@ on your `PATH`, or build it:
 cargo install --git https://github.com/jhnhnsn/rowser
 ```
 
+The Rust toolchain is pinned in `rust-toolchain.toml` (currently 1.100.0); rustup picks it up
+in a checkout. To bump it, change `channel` there and the `dtolnay/rust-toolchain@<version>`
+refs in `.github/workflows/ci.yml` (two steps) and `.github/workflows/release.yml`.
+
 ## Local setup
 
 Install the daemon as a user service and start it:

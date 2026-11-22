@@ -1,0 +1,5 @@
+# The pinned Rust toolchain. On a bump, also change the
+# `dtolnay/rust-toolchain@<version>` refs in .github/workflows/ci.yml and release.yml.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]
