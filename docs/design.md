@@ -126,7 +126,7 @@ Ports (each has a production adapter and a test adapter, so both seams are real)
 | Port | Production adapter | Test adapter |
 | --- | --- | --- |
 | `Opener::open(&Url) -> Result<()>` | `CommandOpener` (`--open-command` template; `xdg-open` / `open`) | records URLs |
-| `Notifier::notify(Notice)` / `Notifier::confirm(Notice, &Dismiss) -> bool` | `DesktopNotifier` (notify-rust; macOS dialog fallback for confirm) | records notices, scripted answers |
+| `Notifier::notify(Notice)` / `Notifier::confirm(Notice, &Dismiss) -> bool` | `DesktopNotifier` (notify-rust off macOS; osascript notices and dialog on macOS) | records notices, scripted answers |
 
 Time is **not** a port: tests use tokio's paused clock (`start_paused`). Paths and ports are
 plain config values.

@@ -259,7 +259,7 @@ open = "system"
 
 ## Stack
 
-tokio, clap, serde / serde_json, url, notify-rust, tracing, tracing-subscriber (features
+tokio, clap, serde / serde_json, url, notify-rust (not on macOS, which uses osascript), tracing, tracing-subscriber (features
 `env-filter`, `fmt`, `ansi`, `std`), sha2. *v1.0*: toml, toml_edit.
 
 ## Tests
