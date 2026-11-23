@@ -78,6 +78,7 @@ async fn end_forward(run: &Path, forward_id: String) {
         .send(&Msg::AttachForward { forward_id })
         .await
         .unwrap();
+    drop(keeper);
 }
 
 async fn free_port() -> u16 {
@@ -259,13 +260,7 @@ async fn a_callback_forward_shows_how_long_it_stayed_open_after_it_closes() {
     })
     .await
     .unwrap();
-    let forward_id = match conn.recv().await.unwrap() {
-        Some(Msg::OpenResult {
-            forward_id: Some(id),
-            ..
-        }) => id,
-        other => panic!("unexpected {other:?}"),
-    };
+    let forward_id = forward_id(conn.recv().await.unwrap().unwrap());
 
     let e = entries(run.clone()).await;
     assert_eq!(e[0]["kind"], "forward");
