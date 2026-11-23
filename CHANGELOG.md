@@ -200,6 +200,8 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- The activity tests no longer fail at random when another test or process takes a free port
+  before the Daemon binds it. ([#72](https://github.com/jhnhnsn/rowser/issues/72))
 - Two more activity tests (an open request's Callback forward duration, and `--follow` when a
   Callback forward closes) no longer fail at random on a slow machine.
   ([#69](https://github.com/jhnhnsn/rowser/issues/69))
