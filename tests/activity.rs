@@ -58,17 +58,6 @@ async fn open(conn: &mut Conn<UnixStream>, url: &str, ports: Vec<u16>) -> Msg {
     conn.recv().await.unwrap().unwrap()
 }
 
-/// The forward id in an `OpenResult`.
-fn forward_id(msg: Msg) -> String {
-    match msg {
-        Msg::OpenResult {
-            forward_id: Some(id),
-            ..
-        } => id,
-        other => panic!("unexpected {other:?}"),
-    }
-}
-
 /// Ends a callback forward at a time the test picks: a keeper attaches on the
 /// direct socket and disconnects.
 async fn end_forward(run: &Path, forward_id: String) {
@@ -88,6 +77,57 @@ async fn free_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
+}
+
+/// The warning of a busy local `port`.
+fn busy_warning(port: u16) -> String {
+    format!("local port {port} is busy; the callback cannot be forwarded")
+}
+
+/// Sends `msg(port)` with a free port until the Daemon binds the port, and
+/// returns the port, the forward_id and the number of tries. `free_port`
+/// closes its listener before the Daemon binds the port, so another test or
+/// process can take the port in that window. A busy port gives no
+/// forward_id and one busy warning; then this tries again with a new port.
+/// Each try adds one Activity entry, so the entry of the forward is the last.
+/// Any other reply panics, as `request_on_free_port` in tests/daemon.rs does.
+async fn request_on_free_port(
+    conn: &mut Conn<UnixStream>,
+    msg: impl Fn(u16) -> Msg,
+) -> (u16, String, usize) {
+    for tries in 1..=20 {
+        let port = free_port().await;
+        conn.send(&msg(port)).await.unwrap();
+        match conn.recv().await.unwrap().unwrap() {
+            Msg::OpenResult {
+                forward_id: Some(id),
+                warnings,
+                error: None,
+            } if warnings.is_empty() => return (port, id, tries),
+            Msg::OpenResult {
+                forward_id: None,
+                warnings,
+                error: None,
+            } if warnings == [busy_warning(port)] => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    panic!("no free port after 20 tries");
+}
+
+fn forward_msg(port: u16) -> Msg {
+    Msg::Forward {
+        reported_host: "devbox".into(),
+        callback_ports: vec![port],
+    }
+}
+
+fn open_msg(url: &str, port: u16) -> Msg {
+    Msg::Open {
+        url: url.into(),
+        reported_host: "devbox".into(),
+        callback_ports: vec![port],
+    }
 }
 
 fn activity_blocking(run: PathBuf, json: bool) -> (ExitCode, String, String) {
@@ -252,21 +292,17 @@ async fn a_callback_forward_shows_how_long_it_stayed_open_after_it_closes() {
     // first activity read. The keeper's disconnect ends it, at a time the test
     // picks.
     let run = start(&dir, DaemonConfig::default()).await;
-    let port = free_port().await;
     let mut conn = relay(&run, "g14").await;
-    conn.send(&Msg::Forward {
-        reported_host: "devbox".into(),
-        callback_ports: vec![port],
-    })
-    .await
-    .unwrap();
-    let forward_id = forward_id(conn.recv().await.unwrap().unwrap());
+    let (port, forward_id, tries) = request_on_free_port(&mut conn, forward_msg).await;
 
+    // One entry per try; the try that binds the port is the last.
     let e = entries(run.clone()).await;
-    assert_eq!(e[0]["kind"], "forward");
-    assert_eq!(e[0]["result"], "opened");
-    assert_eq!(e[0]["ports"], serde_json::json!([port]));
-    assert_eq!(e[0]["open_secs"], Value::Null);
+    assert_eq!(e.len(), tries);
+    let last = tries - 1;
+    assert_eq!(e[last]["kind"], "forward");
+    assert_eq!(e[last]["result"], "opened");
+    assert_eq!(e[last]["ports"], serde_json::json!([port]));
+    assert_eq!(e[last]["open_secs"], Value::Null);
     let (_, out, _) = activity(run.clone(), false).await;
     assert!(
         out.trim_end()
@@ -278,7 +314,7 @@ async fn a_callback_forward_shows_how_long_it_stayed_open_after_it_closes() {
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         // Any whole number of seconds: the test does not depend on time.
-        if let Some(secs) = entries(run.clone()).await[0]["open_secs"].as_u64() {
+        if let Some(secs) = entries(run.clone()).await[last]["open_secs"].as_u64() {
             let (_, out, _) = activity(run, false).await;
             assert!(
                 out.trim_end().ends_with(&format!("opened  open {secs}s")),
@@ -411,13 +447,14 @@ async fn follow_prints_the_entry_again_when_its_callback_forward_closes() {
             &mut std::io::sink(),
         )
     });
-    let port = free_port().await;
     let mut conn = relay(&run, "g14").await;
-    let id = forward_id(open(&mut conn, "https://example.com/cb", vec![port]).await);
-    // The follow connection prints the entry as a new or an existing entry, so
-    // its first line shows the connection is up.
-    let lines = read_lines(&rx, 1);
-    let first: Value = serde_json::from_str(&lines[0]).unwrap();
+    let (_, id, tries) =
+        request_on_free_port(&mut conn, |p| open_msg("https://example.com/cb", p)).await;
+    // The follow connection prints each entry as a new or an existing entry, so
+    // its lines show the connection is up. One entry per try; the try that
+    // binds the port is the last.
+    let lines = read_lines(&rx, tries);
+    let first: Value = serde_json::from_str(&lines[tries - 1]).unwrap();
     assert_eq!(first["open_secs"], Value::Null);
 
     end_forward(&run, id).await;
@@ -434,9 +471,10 @@ async fn an_open_request_shows_how_long_its_callback_forward_stayed_open() {
     // The default (long) timeout: the callback forward cannot end before the
     // first activity read. The test ends it after that read.
     let run = start(&dir, DaemonConfig::default()).await;
-    let port = free_port().await;
     let mut conn = relay(&run, "g14").await;
-    let id = forward_id(open(&mut conn, "https://example.com/", vec![port]).await);
+    let (port, id, tries) =
+        request_on_free_port(&mut conn, |p| open_msg("https://example.com/", p)).await;
+    let last = tries - 1;
     let (_, out, _) = activity(run.clone(), false).await;
     assert!(
         out.trim_end()
@@ -447,7 +485,7 @@ async fn an_open_request_shows_how_long_its_callback_forward_stayed_open() {
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         // Any whole number of seconds: the test does not depend on time.
-        if let Some(secs) = entries(run.clone()).await[0]["open_secs"].as_u64() {
+        if let Some(secs) = entries(run.clone()).await[last]["open_secs"].as_u64() {
             let (_, out, _) = activity(run, false).await;
             assert!(
                 out.trim_end()
