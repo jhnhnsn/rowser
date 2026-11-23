@@ -13,7 +13,7 @@ use rowser::daemon::{
     bind_sockets, CommandOpener, Daemon, DaemonConfig, NoticeHost, Notifier, Opener, DIRECT_SOCKET,
     FORWARD_NOT_APPROVED, NOT_APPROVED, RELAY_SOCKET,
 };
-use rowser::protocol::{Conn, Hello, Msg};
+use rowser::protocol::{Conn, Hello, Msg, CONTROL_SOCKET};
 use rowser::routes::Routes;
 use script::write_script;
 use tokio::net::UnixStream;
@@ -63,6 +63,10 @@ impl<N: Notifier + Clone> Harness<N> {
         .await
         .unwrap();
         conn
+    }
+
+    fn run(&self) -> std::path::PathBuf {
+        self.dir.0.join("run")
     }
 
     fn opened(&self) -> Vec<String> {
@@ -811,20 +815,58 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// Sends `msg(port)` with a free port until the reply has no "busy" warning,
-/// and returns the port and the reply. `free_port` closes its listener before
-/// the Daemon binds the port, so another test or process can take the port in
-/// that window; then this tries again with a new port.
-async fn request_on_free_port(conn: &mut Conn<UnixStream>, msg: impl Fn(u16) -> Msg) -> (u16, Msg) {
-    for _ in 0..20 {
+/// The warning of a busy local `port`.
+fn busy_warning(port: u16) -> String {
+    format!("local port {port} is busy; the callback cannot be forwarded")
+}
+
+/// Sends `msg(port)` with a free port until the Daemon binds the port, and
+/// returns the port, the forward_id and the number of tries. `free_port`
+/// closes its listener before the Daemon binds the port, so another test or
+/// process can take the port in that window. A busy port gives no
+/// forward_id and one busy warning; then this tries again with a new port.
+/// Any other reply panics, as `retry_busy` in tests/forward.rs does.
+async fn request_on_free_port(
+    conn: &mut Conn<UnixStream>,
+    msg: impl Fn(u16) -> Msg,
+) -> (u16, String, usize) {
+    for tries in 1..=20 {
         let port = free_port();
-        let reply = request(conn, msg(port)).await;
-        match &reply {
-            Msg::OpenResult { warnings, .. } if warnings.iter().any(|w| w.contains("busy")) => {}
-            _ => return (port, reply),
+        match request(conn, msg(port)).await {
+            Msg::OpenResult {
+                forward_id: Some(id),
+                warnings,
+                error: None,
+            } if warnings.is_empty() => return (port, id, tries),
+            Msg::OpenResult {
+                forward_id: None,
+                warnings,
+                error: None,
+            } if warnings == [busy_warning(port)] => {}
+            other => panic!("unexpected {other:?}"),
         }
     }
     panic!("no free port after 20 tries");
+}
+
+/// The local ports of the running forwards, from `rowser status`.
+async fn forward_ports(run: &Path) -> Vec<u16> {
+    let stream = UnixStream::connect(run.join(CONTROL_SOCKET)).await.unwrap();
+    let mut control = Conn::connect(stream, Hello::current()).await.unwrap();
+    match request(&mut control, Msg::Status).await {
+        Msg::StatusReply { forwards, .. } => forwards.iter().map(|f| f.port).collect(),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+/// The warnings of the newest entry in `rowser activity`.
+async fn last_activity_warnings(run: &Path) -> Vec<String> {
+    let stream = UnixStream::connect(run.join(CONTROL_SOCKET)).await.unwrap();
+    let mut control = Conn::connect(stream, Hello::current()).await.unwrap();
+    match request(&mut control, Msg::Activity { follow: false }).await {
+        Msg::ActivityReply { entries } => entries.last().expect("an entry").warnings.clone(),
+        other => panic!("unexpected {other:?}"),
+    }
 }
 
 fn open_with_port(url: &str, port: u16) -> Msg {
@@ -858,24 +900,17 @@ async fn denied_url_with_callback_port_binds_no_forward() {
             ..
         }
     ));
-    // The local port is still free: no forward holds it.
-    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+    // No forward holds the local port. (A bind check of the port can fail
+    // when another socket takes the port, so ask `rowser status`.)
+    assert_eq!(forward_ports(&h.run()).await, [] as [u16; 0], "port {port}");
 }
 
 #[tokio::test]
 async fn approved_url_with_callback_port_gets_a_forward() {
     let h = forward_confirm_harness(Answer::Approve).await;
     let mut conn = h.connect_relay("db.prod").await;
-    let (port, reply) =
+    let (port, _, _) =
         request_on_free_port(&mut conn, |p| open_with_port("https://example.com/", p)).await;
-    assert_eq!(error_of(&reply), None);
-    assert!(matches!(
-        reply,
-        Msg::OpenResult {
-            forward_id: Some(_),
-            ..
-        }
-    ));
     assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err());
 }
 
@@ -893,7 +928,7 @@ async fn denied_manual_forward_binds_nothing() {
     let mut conn = h.connect_relay("db.prod").await;
     let reply = request(&mut conn, manual_forward(port)).await;
     assert_eq!(error_of(&reply), Some(FORWARD_NOT_APPROVED));
-    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+    assert_eq!(forward_ports(&h.run()).await, [] as [u16; 0]);
     let asked = h.notifier.confirms();
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0].host, NoticeHost::Alias("db.prod".into()));
@@ -908,12 +943,20 @@ async fn denied_manual_forward_binds_nothing() {
 async fn approved_manual_forward_binds_the_port() {
     let h = forward_confirm_harness(Answer::Approve).await;
     let mut conn = h.connect_relay("db.prod").await;
-    let (port, reply) = request_on_free_port(&mut conn, manual_forward).await;
-    assert_eq!(error_of(&reply), None);
+    let (port, _, tries) = request_on_free_port(&mut conn, manual_forward).await;
     assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err());
-    // One confirmation per try: a busy port was asked about too.
-    assert!(!h.notifier.confirms().is_empty());
-    assert!(h.notifier.notices().is_empty());
+    // One confirmation per try. A busy try also gives a notice with the
+    // busy warning; the try that binds the port gives no notice.
+    assert_eq!(h.notifier.confirms().len(), tries);
+    for _ in 0..100 {
+        if h.notifier.notices().len() >= tries - 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let notices = h.notifier.notices();
+    assert_eq!(notices.len(), tries - 1);
+    assert!(notices.iter().all(|n| n.warnings.len() == 1), "{notices:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -934,26 +977,28 @@ async fn manual_forward_binds_nothing_after_the_confirmation_timeout() {
         Some("no confirmation within 60 seconds; the port was not forwarded")
     );
     h.notifier.release(true);
-    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
+    assert_eq!(forward_ports(&h.run()).await, [] as [u16; 0], "port {port}");
 }
 
 #[tokio::test]
 async fn manual_forward_from_a_non_matching_host_shows_a_notice_with_the_port() {
     let h = forward_confirm_harness(Answer::Deny).await;
     let mut conn = h.connect_relay("devbox").await;
-    let (port, reply) = request_on_free_port(&mut conn, manual_forward).await;
-    assert_eq!(error_of(&reply), None);
+    let (port, _, tries) = request_on_free_port(&mut conn, manual_forward).await;
     assert!(h.notifier.confirms().is_empty());
-    // The notice is sent off the request path.
+    // The notice is sent off the request path, one per try. Only the try
+    // that binds the port gives a notice without a busy warning.
     for _ in 0..100 {
-        if !h.notifier.notices().is_empty() {
+        if h.notifier.notices().len() >= tries {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let notices = h.notifier.notices();
-    assert_eq!(notices.len(), 1);
-    let body = notices[0].body();
+    assert_eq!(notices.len(), tries);
+    let bound: Vec<_> = notices.iter().filter(|n| n.warnings.is_empty()).collect();
+    assert_eq!(bound.len(), 1, "{notices:?}");
+    let body = bound[0].body();
     assert!(
         body.contains("devbox") && body.contains(&port.to_string()),
         "{body}"
@@ -1000,16 +1045,33 @@ async fn a_failed_open_closes_the_forward() {
     tokio::spawn(daemon.serve(direct, relay, control));
     let stream = UnixStream::connect(run.join(DIRECT_SOCKET)).await.unwrap();
     let mut conn = Conn::connect(stream, Hello::current()).await.unwrap();
-    let (port, reply) =
-        request_on_free_port(&mut conn, |p| open_with_port("https://example.com/", p)).await;
-    assert!(error_of(&reply).is_some());
-    // The forward task can drop its listeners after the reply, so
-    // wait (with a deadline) for the port to come free.
+    // The error reply has no warnings, so read a busy port from the
+    // Activity entry, and try again with a new port.
+    let mut found = None;
+    for _ in 0..20 {
+        let port = free_port();
+        let reply = request(&mut conn, open_with_port("https://example.com/", port)).await;
+        assert_eq!(
+            error_of(&reply),
+            Some("could not open the URL: no browser"),
+            "{reply:?}"
+        );
+        let warnings = last_activity_warnings(&run).await;
+        if warnings == [busy_warning(port)] {
+            continue;
+        }
+        assert_eq!(warnings, [] as [String; 0]);
+        found = Some(port);
+        break;
+    }
+    let port = found.expect("no free port after 20 tries");
+    // The forward task can end after the reply, so wait (with a deadline)
+    // until `rowser status` shows no forward.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+    while !forward_ports(&run).await.is_empty() {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the failed open did not free local port {port}"
+            "the failed open did not close the forward on local port {port}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
