@@ -53,6 +53,37 @@ async fn free_port() -> u16 {
         .port()
 }
 
+/// Sends a manual Forward on `conn` with a free port until the reply is not
+/// "busy", and returns the port and forward_id. `free_port` closes its
+/// listener before the Daemon binds the port, so another test or process can
+/// take the port in that window. A busy port gives no forward_id; then this
+/// tries again with a new port.
+async fn forward_on_free_port(conn: &mut Conn<UnixStream>) -> (u16, String) {
+    for _ in 0..20 {
+        let port = free_port().await;
+        conn.send(&Msg::Forward {
+            reported_host: "devbox".into(),
+            callback_ports: vec![port],
+        })
+        .await
+        .unwrap();
+        match conn.recv().await.unwrap() {
+            Some(Msg::OpenResult {
+                forward_id: Some(id),
+                warnings,
+                error: None,
+            }) if warnings.is_empty() => return (port, id),
+            Some(Msg::OpenResult {
+                forward_id: None,
+                warnings,
+                error: None,
+            }) if warnings.iter().any(|w| w.contains("busy")) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    panic!("no free port after 20 tries");
+}
+
 /// Runs `rowser status` on a blocking thread; gives (exit, stdout, stderr).
 async fn status(run: PathBuf, json: bool) -> (ExitCode, String, String) {
     tokio::task::spawn_blocking(move || status_blocking(run, json))
@@ -88,7 +119,6 @@ async fn json_status(run: PathBuf) -> serde_json::Value {
 async fn status_shows_the_daemon_version_and_an_open_callback_forward() {
     let dir = TmpDir::new("ctl");
     let run = start(&dir).await;
-    let port = free_port().await;
     let mut relay = connect(run.join(RELAY_SOCKET)).await;
     relay
         .send(&Msg::HostStamp {
@@ -96,17 +126,7 @@ async fn status_shows_the_daemon_version_and_an_open_callback_forward() {
         })
         .await
         .unwrap();
-    relay
-        .send(&Msg::Forward {
-            reported_host: "devbox".into(),
-            callback_ports: vec![port],
-        })
-        .await
-        .unwrap();
-    assert!(matches!(
-        relay.recv().await.unwrap(),
-        Some(Msg::OpenResult { error: None, .. })
-    ));
+    let (port, _) = forward_on_free_port(&mut relay).await;
 
     let (code, out, err) = status(run.clone(), false).await;
     assert_eq!(code, ExitCode::SUCCESS, "{err}");
@@ -145,19 +165,8 @@ async fn status_shows_the_daemon_version_and_an_open_callback_forward() {
 async fn a_forward_from_the_direct_socket_shows_its_reported_host_as_unverified() {
     let dir = TmpDir::new("ctl");
     let run = start(&dir).await;
-    let port = free_port().await;
     let mut direct = connect(run.join(DIRECT_SOCKET)).await;
-    direct
-        .send(&Msg::Forward {
-            reported_host: "devbox".into(),
-            callback_ports: vec![port],
-        })
-        .await
-        .unwrap();
-    assert!(matches!(
-        direct.recv().await.unwrap(),
-        Some(Msg::OpenResult { error: None, .. })
-    ));
+    let (port, _) = forward_on_free_port(&mut direct).await;
 
     let (_, out, _) = status(run.clone(), false).await;
     let line = out.lines().nth(7).unwrap_or_default().to_string();
@@ -184,20 +193,7 @@ async fn a_forward_leaves_status_when_it_ends() {
         })
         .await
         .unwrap();
-    relay
-        .send(&Msg::Forward {
-            reported_host: "devbox".into(),
-            callback_ports: vec![free_port().await],
-        })
-        .await
-        .unwrap();
-    let forward_id = match relay.recv().await.unwrap() {
-        Some(Msg::OpenResult {
-            forward_id: Some(id),
-            ..
-        }) => id,
-        other => panic!("unexpected {other:?}"),
-    };
+    let (_, forward_id) = forward_on_free_port(&mut relay).await;
     assert_eq!(
         json_status(run.clone()).await["forwards"]
             .as_array()
