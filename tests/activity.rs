@@ -91,11 +91,13 @@ fn busy_warning(port: u16) -> String {
 /// forward_id and one busy warning; then this tries again with a new port.
 /// Each try adds one Activity entry, so the entry of the forward is the last.
 /// Any other reply panics, as `request_on_free_port` in tests/daemon.rs does.
+/// It stops at 5 tries, the default `rate_max`: a 6th request on the
+/// connection gets a rate-limit error.
 async fn request_on_free_port(
     conn: &mut Conn<UnixStream>,
     msg: impl Fn(u16) -> Msg,
 ) -> (u16, String, usize) {
-    for tries in 1..=20 {
+    for tries in 1..=5 {
         let port = free_port().await;
         conn.send(&msg(port)).await.unwrap();
         match conn.recv().await.unwrap().unwrap() {
@@ -112,9 +114,10 @@ async fn request_on_free_port(
             other => panic!("unexpected {other:?}"),
         }
     }
-    panic!("no free port after 20 tries");
+    panic!("no free port after 5 tries");
 }
 
+/// A manual callback forward of `port` from `devbox`.
 fn forward_msg(port: u16) -> Msg {
     Msg::Forward {
         reported_host: "devbox".into(),
@@ -122,6 +125,7 @@ fn forward_msg(port: u16) -> Msg {
     }
 }
 
+/// An open request for `url` from `devbox` with the callback port `port`.
 fn open_msg(url: &str, port: u16) -> Msg {
     Msg::Open {
         url: url.into(),
@@ -505,12 +509,7 @@ async fn a_busy_port_records_the_requested_port() {
     let busy = TcpListener::bind(SocketAddr::new(V6, 0)).await.unwrap();
     let port = busy.local_addr().unwrap().port();
     let mut conn = relay(&run, "g14").await;
-    conn.send(&Msg::Forward {
-        reported_host: "devbox".into(),
-        callback_ports: vec![port],
-    })
-    .await
-    .unwrap();
+    conn.send(&forward_msg(port)).await.unwrap();
     conn.recv().await.unwrap();
     open(&mut conn, "https://example.com/", vec![port]).await;
 
