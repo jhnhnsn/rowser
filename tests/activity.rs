@@ -58,6 +58,28 @@ async fn open(conn: &mut Conn<UnixStream>, url: &str, ports: Vec<u16>) -> Msg {
     conn.recv().await.unwrap().unwrap()
 }
 
+/// The forward id in an `OpenResult`.
+fn forward_id(msg: Msg) -> String {
+    match msg {
+        Msg::OpenResult {
+            forward_id: Some(id),
+            ..
+        } => id,
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+/// Ends a callback forward at a time the test picks: a keeper attaches on the
+/// direct socket and disconnects.
+async fn end_forward(run: &Path, forward_id: String) {
+    let s = UnixStream::connect(run.join(DIRECT_SOCKET)).await.unwrap();
+    let mut keeper = Conn::connect(s, Hello::current()).await.unwrap();
+    keeper
+        .send(&Msg::AttachForward { forward_id })
+        .await
+        .unwrap();
+}
+
 async fn free_port() -> u16 {
     TcpListener::bind(SocketAddr::new(V6, 0))
         .await
@@ -257,14 +279,7 @@ async fn a_callback_forward_shows_how_long_it_stayed_open_after_it_closes() {
         "{out}"
     );
 
-    // A keeper attaches and disconnects, so the callback forward ends.
-    let s = UnixStream::connect(run.join(DIRECT_SOCKET)).await.unwrap();
-    let mut keeper = Conn::connect(s, Hello::current()).await.unwrap();
-    keeper
-        .send(&Msg::AttachForward { forward_id })
-        .await
-        .unwrap();
-    drop(keeper);
+    end_forward(&run, forward_id).await;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         // Any whole number of seconds: the test does not depend on time.
@@ -385,11 +400,9 @@ async fn follow_prints_new_entries_as_they_come() {
 #[tokio::test(flavor = "multi_thread")]
 async fn follow_prints_the_entry_again_when_its_callback_forward_closes() {
     let dir = TmpDir::new("act");
-    let config = DaemonConfig {
-        forward_timeout: Duration::from_millis(300),
-        ..DaemonConfig::default()
-    };
-    let run = start(&dir, config).await;
+    // The default (long) timeout: the callback forward ends only when the test
+    // ends it, after the follow connection printed the first line.
+    let run = start(&dir, DaemonConfig::default()).await;
     let (tx, rx) = mpsc::channel();
     let follow_run = run.clone();
     std::thread::spawn(move || {
@@ -403,49 +416,53 @@ async fn follow_prints_the_entry_again_when_its_callback_forward_closes() {
             &mut std::io::sink(),
         )
     });
-    // Wait until the follow connection is up.
-    tokio::time::sleep(Duration::from_millis(300)).await;
     let port = free_port().await;
     let mut conn = relay(&run, "g14").await;
-    open(&mut conn, "https://example.com/cb", vec![port]).await;
-    let lines = read_lines(&rx, 2);
+    let id = forward_id(open(&mut conn, "https://example.com/cb", vec![port]).await);
+    // The follow connection prints the entry as a new or an existing entry, so
+    // its first line shows the connection is up.
+    let lines = read_lines(&rx, 1);
     let first: Value = serde_json::from_str(&lines[0]).unwrap();
-    let second: Value = serde_json::from_str(&lines[1]).unwrap();
     assert_eq!(first["open_secs"], Value::Null);
+
+    end_forward(&run, id).await;
+    let lines = read_lines(&rx, 1);
+    let second: Value = serde_json::from_str(&lines[0]).unwrap();
     assert_eq!(second["id"], first["id"]);
-    assert_eq!(second["open_secs"], 0);
+    // Any whole number of seconds: the test does not depend on time.
+    assert!(second["open_secs"].as_u64().is_some(), "{second}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_open_request_shows_how_long_its_callback_forward_stayed_open() {
     let dir = TmpDir::new("act");
-    let config = DaemonConfig {
-        forward_timeout: Duration::from_millis(300),
-        ..DaemonConfig::default()
-    };
-    let run = start(&dir, config).await;
+    // The default (long) timeout: the callback forward cannot end before the
+    // first activity read. The test ends it after that read.
+    let run = start(&dir, DaemonConfig::default()).await;
     let port = free_port().await;
     let mut conn = relay(&run, "g14").await;
-    open(&mut conn, "https://example.com/", vec![port]).await;
+    let id = forward_id(open(&mut conn, "https://example.com/", vec![port]).await);
     let (_, out, _) = activity(run.clone(), false).await;
     assert!(
         out.trim_end()
             .ends_with(&format!("callback {port} still open")),
         "{out}"
     );
+    end_forward(&run, id).await;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if entries(run.clone()).await[0]["open_secs"] == 0 {
+        // Any whole number of seconds: the test does not depend on time.
+        if let Some(secs) = entries(run.clone()).await[0]["open_secs"].as_u64() {
             let (_, out, _) = activity(run, false).await;
             assert!(
                 out.trim_end()
-                    .ends_with(&format!("callback {port} open 0s")),
+                    .ends_with(&format!("callback {port} open {secs}s")),
                 "{out}"
             );
             return;
         }
     }
-    panic!("the forward has no duration");
+    panic!("the callback forward has no duration");
 }
 
 #[tokio::test(flavor = "multi_thread")]
