@@ -200,6 +200,8 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- The control and Daemon tests no longer fail at random when another test or process takes a
+  free port before the Daemon binds it. ([#71](https://github.com/jhnhnsn/rowser/issues/71))
 - The Callback forward tests no longer fail at random when another test or process takes a
   free port before the Daemon binds it. ([#68](https://github.com/jhnhnsn/rowser/issues/68))
 - macOS builds no longer compile notify-rust, which only Linux uses (macOS shows notifications
