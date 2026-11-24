@@ -826,11 +826,13 @@ fn busy_warning(port: u16) -> String {
 /// process can take the port in that window. A busy port gives no
 /// forward_id and one busy warning; then this tries again with a new port.
 /// Any other reply panics, as `retry_busy` in tests/forward.rs does.
+/// It stops at 5 tries, the default `rate_max`: a 6th request on the
+/// connection gets a rate-limit error.
 async fn request_on_free_port(
     conn: &mut Conn<UnixStream>,
     msg: impl Fn(u16) -> Msg,
 ) -> (u16, String, usize) {
-    for tries in 1..=20 {
+    for tries in 1..=5 {
         let port = free_port();
         match request(conn, msg(port)).await {
             Msg::OpenResult {
@@ -846,7 +848,7 @@ async fn request_on_free_port(
             other => panic!("unexpected {other:?}"),
         }
     }
-    panic!("no free port after 20 tries");
+    panic!("no free port after 5 tries");
 }
 
 /// The local ports of the running forwards, from `rowser status`.
@@ -1046,9 +1048,10 @@ async fn a_failed_open_closes_the_forward() {
     let stream = UnixStream::connect(run.join(DIRECT_SOCKET)).await.unwrap();
     let mut conn = Conn::connect(stream, Hello::current()).await.unwrap();
     // The error reply has no warnings, so read a busy port from the
-    // Activity entry, and try again with a new port.
+    // Activity entry, and try again with a new port. Stop at 5 tries, the
+    // default `rate_max`: a 6th request gets a rate-limit error.
     let mut found = None;
-    for _ in 0..20 {
+    for _ in 0..5 {
         let port = free_port();
         let reply = request(&mut conn, open_with_port("https://example.com/", port)).await;
         assert_eq!(
@@ -1064,7 +1067,7 @@ async fn a_failed_open_closes_the_forward() {
         found = Some(port);
         break;
     }
-    let port = found.expect("no free port after 20 tries");
+    let port = found.expect("no free port after 5 tries");
     // The forward task can end after the reply, so wait (with a deadline)
     // until `rowser status` shows no forward.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
