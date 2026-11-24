@@ -200,6 +200,9 @@ All notable changes to rowser are listed here. The format follows
 
 ### Fixed
 
+- The daemon tests that retry on a busy port now stop at the rate limit (5 tries), so a run of
+  busy ports gives a clear "no free port" error, not an unexpected rate-limit reply.
+  ([#73](https://github.com/jhnhnsn/rowser/issues/73))
 - The activity tests no longer fail at random when another test or process takes a free port
   before the Daemon binds it. ([#72](https://github.com/jhnhnsn/rowser/issues/72))
 - Two more activity tests (an open request's Callback forward duration, and `--follow` when a
