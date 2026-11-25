@@ -58,8 +58,10 @@ async fn free_port() -> u16 {
 /// listener before the Daemon binds the port, so another test or process can
 /// take the port in that window. A busy port gives no forward_id; then this
 /// tries again with a new port.
+/// It stops at 5 tries, the default `rate_max`: a 6th request on the
+/// connection gets a rate-limit error.
 async fn forward_on_free_port(conn: &mut Conn<UnixStream>) -> (u16, String) {
-    for _ in 0..20 {
+    for _ in 0..5 {
         let port = free_port().await;
         conn.send(&Msg::Forward {
             reported_host: "devbox".into(),
@@ -81,7 +83,7 @@ async fn forward_on_free_port(conn: &mut Conn<UnixStream>) -> (u16, String) {
             other => panic!("unexpected {other:?}"),
         }
     }
-    panic!("no free port after 20 tries");
+    panic!("no free port after 5 tries");
 }
 
 /// Runs `rowser status` on a blocking thread; gives (exit, stdout, stderr).
