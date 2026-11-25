@@ -1,8 +1,8 @@
 # rowser
 
 > [!WARNING]
-> rowser is under active development and has no release yet. Expect rough edges and breaking
-> changes until the first release.
+> rowser is under active development. The first release, v1.0.0-rc.1, is a release candidate.
+> Expect rough edges and breaking changes until v1.0.0.
 >
 > rowser runs on Linux and macOS for now. Other platforms come later.
 
@@ -58,14 +58,15 @@ against the other projects. Corrections are welcome.
   real `sshd`. Still open: the macOS notification fix
   ([#57](https://github.com/jhnhnsn/rowser/issues/57)) and the manual checks, such as
   `--confirm-hosts` ([#20](https://github.com/jhnhnsn/rowser/issues/20)).
-- **v1.0 ("CLI-complete"): built, not yet released.** A config file with Routes (open a host's
-  URLs in a given browser and Profile), `rowser browsers`, a control socket with terminal
+- **v1.0 ("CLI-complete"): built, released as v1.0.0-rc.1.** A config file with Routes (open a
+  host's URLs in a given browser and Profile), `rowser browsers`, a control socket with terminal
   commands (`status`, `activity`, `pause`/`resume`, `pending`/`approve`/`deny`, `reload`), and
-  rowser as the default browser for the whole user session on a remote host. Before the
-  release: manual checks on macOS and Linux desktops.
-- **No release binaries yet.** Until a release is tagged, install with `cargo install --git` on
-  both machines; `rowser remote install` needs a release to download from (or use
-  `--local-build`).
+  rowser as the default browser for the whole user session on a remote host. Before v1.0.0:
+  manual checks on macOS and Linux desktops.
+- **Release binaries:** v1.0.0-rc.1 is on
+  [GitHub Releases](https://github.com/jhnhnsn/rowser/releases). `rowser remote install`
+  downloads the release that matches the local `rowser` version; `--local-build` installs your
+  own build instead.
 - **After v1.0:** a menu bar / tray app that uses the control socket
   ([#35](https://github.com/jhnhnsn/rowser/issues/35)).
 

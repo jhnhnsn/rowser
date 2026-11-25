@@ -1,6 +1,6 @@
 [package]
 name = "rowser"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 edition = "2021"
 description = "Open URLs from SSH sessions in the local browser, and forward OAuth callbacks back"
 license-file = "LICENSE"

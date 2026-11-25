@@ -6,6 +6,17 @@ All notable changes to rowser are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.0.0-rc.1] - 2026-11-25
+
+The first release, a release candidate for v1.0.0. It has all of v0.1.0 (the daemon, the shim,
+`rowser ssh`, OAuth callback forwards, `rowser daemon install`, `rowser remote install` and
+`rowser doctor`) and all of v1.0 (a config file with Routes to a browser and Profile,
+`rowser browsers`, the control commands `status`, `activity`, `pause`/`resume`,
+`pending`/`approve`/`deny` and `reload`, and rowser as the default browser on a remote host).
+Release binaries are on the GitHub Release. Before v1.0.0: the manual checks of the macOS
+notification fix ([#57](https://github.com/jhnhnsn/rowser/issues/57)) and of `--confirm-hosts`
+on Linux ([#20](https://github.com/jhnhnsn/rowser/issues/20)).
+
 ### Added
 
 - The README documents v1.0: Routes (`rowser route add|list|test|move|remove`), `rowser
