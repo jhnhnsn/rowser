@@ -6,6 +6,16 @@ All notable changes to rowser are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Install rowser on a Local machine or a Remote host with one line:
+  `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jhnhnsn/rowser/releases/latest/download/rowser-installer.sh | sh`.
+  Each Release after v1.0.0-rc.1 has `rowser-installer.sh` attached; put `download/v<version>`
+  in the URL for a pre-release. The script picks the binary for your system, checks it against
+  the Release's `SHA256SUMS`, and installs only `rowser` to `~/.local/bin`
+  (`ROWSER_INSTALL_DIR` changes the folder). It needs no `sudo`, and prints the next steps.
+  ([#75](https://github.com/jhnhnsn/rowser/issues/75))
+
 ## [1.0.0-rc.1] - 2026-11-25
 
 The first release, a release candidate for v1.0.0. It has all of v0.1.0 (the daemon, the shim,
