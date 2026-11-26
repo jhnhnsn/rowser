@@ -6,6 +6,13 @@ All notable changes to rowser are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.0.0-rc.2] - 2026-11-26
+
+The second release candidate for v1.0.0, and the first Release with `rowser-installer.sh`.
+Before v1.0.0: the manual checks of the macOS
+notification fix ([#57](https://github.com/jhnhnsn/rowser/issues/57)) and of `--confirm-hosts`
+on Linux ([#20](https://github.com/jhnhnsn/rowser/issues/20)).
+
 ### Added
 
 - Install rowser on a Local machine or a Remote host with one line:

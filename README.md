@@ -1,7 +1,7 @@
 # rowser
 
 > [!WARNING]
-> rowser is under active development. The first release, v1.0.0-rc.1, is a release candidate.
+> rowser is under active development. The latest release, v1.0.0-rc.2, is a release candidate.
 > Expect rough edges and breaking changes until v1.0.0.
 >
 > rowser runs on Linux and macOS for now. Other platforms come later.
@@ -58,12 +58,12 @@ against the other projects. Corrections are welcome.
   real `sshd`. Still open: the macOS notification fix
   ([#57](https://github.com/jhnhnsn/rowser/issues/57)) and the manual checks, such as
   `--confirm-hosts` ([#20](https://github.com/jhnhnsn/rowser/issues/20)).
-- **v1.0 ("CLI-complete"): built, released as v1.0.0-rc.1.** A config file with Routes (open a
+- **v1.0 ("CLI-complete"): built, released as v1.0.0-rc.2.** A config file with Routes (open a
   host's URLs in a given browser and Profile), `rowser browsers`, a control socket with terminal
   commands (`status`, `activity`, `pause`/`resume`, `pending`/`approve`/`deny`, `reload`), and
   rowser as the default browser for the whole user session on a remote host. Before v1.0.0:
   manual checks on macOS and Linux desktops.
-- **Release binaries:** v1.0.0-rc.1 is on
+- **Release binaries:** v1.0.0-rc.2 is on
   [GitHub Releases](https://github.com/jhnhnsn/rowser/releases). `rowser remote install`
   downloads the release that matches the local `rowser` version; `--local-build` installs your
   own build instead.
@@ -88,6 +88,13 @@ its version in the URL:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jhnhnsn/rowser/releases/download/v<version>/rowser-installer.sh | sh
+```
+
+Until v1.0.0, every release is a pre-release, so `latest` finds none. Install the current
+release candidate with:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jhnhnsn/rowser/releases/download/v1.0.0-rc.2/rowser-installer.sh | sh
 ```
 
 The script checks the download against the Release's `SHA256SUMS` and installs only the
