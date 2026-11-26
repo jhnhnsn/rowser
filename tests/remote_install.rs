@@ -1,11 +1,12 @@
 //! The two `BinarySource` adapters, and the install over a fake `ssh`.
 
+#[path = "common/release.rs"]
+mod release;
 #[path = "common/script.rs"]
 mod script;
 
+use release::sums_line;
 use script::write_script;
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -23,32 +24,9 @@ fn serve(path: &'static str, body: Vec<u8>) -> String {
     serve_all(vec![(path, body)])
 }
 
-/// Serves each `(path, body)` for `GET <path>` and 404 for any other path.
+/// Serves each `(path, body)` under the `/v0.1.0` base.
 fn serve_all(routes: Vec<(&'static str, Vec<u8>)>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
-            let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).unwrap();
-            let req = String::from_utf8_lossy(&buf[..n]);
-            let hit = routes
-                .iter()
-                .find(|(path, _)| req.starts_with(&format!("GET {path} ")));
-            let (status, body) = match hit {
-                Some((_, body)) => ("200 OK", body.clone()),
-                None => ("404 Not Found", Vec::new()),
-            };
-            let head = format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            stream.write_all(head.as_bytes()).unwrap();
-            stream.write_all(&body).unwrap();
-        }
-    });
-    format!("http://{addr}/v0.1.0")
+    release::serve_all("/v0.1.0", routes)
 }
 
 /// A release-style tarball holding `rowser` with `content`.
@@ -67,17 +45,6 @@ fn tarball(dir: &Path, content: &str) -> Vec<u8> {
         .unwrap();
     assert!(ok.success());
     std::fs::read(out).unwrap()
-}
-
-/// The `sha256sum` line for `body` named `name`, as the release workflow writes it.
-/// Computed with `sha2`, so the tests need no `sha256sum` (macOS has none).
-fn sums_line(name: &str, body: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let hash: String = Sha256::digest(body)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    format!("{hash}  {name}\n")
 }
 
 const X86_TGZ: &str = "/v0.1.0/rowser-x86_64-unknown-linux-musl.tar.gz";

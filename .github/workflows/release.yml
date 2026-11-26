@@ -66,12 +66,18 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Read the Cargo.toml version
+        id: version
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rowser") | .version')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Check the tag matches the Cargo.toml version
         if: github.event_name == 'push'
         env:
           TAG: ${{ github.ref_name }}
+          version: ${{ steps.version.outputs.version }}
         run: |
-          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rowser") | .version')"
           if [ "$TAG" != "v$version" ]; then
             echo "tag $TAG does not match Cargo.toml version v$version" >&2
             exit 1
@@ -94,8 +100,9 @@ jobs:
       - name: Installer
         # install.sh with the Cargo.toml version written in, so each Release's
         # rowser-installer.sh installs that Release.
+        env:
+          version: ${{ steps.version.outputs.version }}
         run: |
-          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rowser") | .version')"
           sed "s/__ROWSER_VERSION__/$version/" install.sh > dist/rowser-installer.sh
           grep -q "^ROWSER_VERSION=\"$version\"\$" dist/rowser-installer.sh
           sh -n dist/rowser-installer.sh

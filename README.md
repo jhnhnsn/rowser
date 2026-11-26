@@ -75,16 +75,19 @@ Progress is tracked in [#1](https://github.com/jhnhnsn/rowser/issues/1) (v0.1.0)
 
 ## Install
 
-Install the latest release (Linux and macOS, x86_64 and arm64):
+Each Release after v1.0.0-rc.1 has `rowser-installer.sh` attached (v1.0.0-rc.1 shipped
+before the installer; download its binaries from the Release page). Install the latest
+release (Linux and macOS, x86_64 and arm64):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jhnhnsn/rowser/releases/latest/download/rowser-installer.sh | sh
 ```
 
-A pre-release is not `latest` on GitHub. Until v1.0.0, name the version:
+A pre-release is not `latest` on GitHub. To install a pre-release or any given version, put
+its version in the URL:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jhnhnsn/rowser/releases/download/v1.0.0-rc.1/rowser-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jhnhnsn/rowser/releases/download/v<version>/rowser-installer.sh | sh
 ```
 
 The script checks the download against the Release's `SHA256SUMS` and installs only the

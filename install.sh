@@ -37,7 +37,11 @@ esac
 install_dir="${ROWSER_INSTALL_DIR:-$HOME/.local/bin}"
 
 if command -v curl >/dev/null 2>&1; then
-    fetch() { curl -fsSL -o "$2" "$1"; }
+    if [ -n "${ROWSER_INSTALL_BASE_URL:-}" ]; then
+        fetch() { curl -fsSL -o "$2" "$1"; }
+    else
+        fetch() { curl --proto '=https' --tlsv1.2 -fsSL -o "$2" "$1"; }
+    fi
 elif command -v wget >/dev/null 2>&1; then
     fetch() { wget -q -O "$2" "$1"; }
 else
@@ -53,15 +57,19 @@ else
 fi
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+part=""
+cleanup() { rm -rf "$tmp" ${part:+"$part"}; }
+trap cleanup EXIT
+# dash runs no EXIT trap on a signal, so exit and let the EXIT trap clean up.
+trap 'exit 1' INT TERM HUP
 
 asset="rowser-$target.tar.gz"
 fetch "$base/$asset" "$tmp/$asset" || err "cannot download $base/$asset"
 fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" || err "cannot download $base/SHA256SUMS"
 
-want="$(awk -v name="$asset" '$2 == name || $2 == "*" name {print $1; exit}' "$tmp/SHA256SUMS")"
+want="$(awk -v name="$asset" '$2 == name || $2 == "*" name {print $1; exit}' "$tmp/SHA256SUMS" | tr 'A-F' 'a-f')"
 [ -n "$want" ] || err "SHA256SUMS has no entry for $asset"
-got="$(sha256 "$tmp/$asset")"
+got="$(sha256 "$tmp/$asset" | tr 'A-F' 'a-f')"
 [ "$want" = "$got" ] || err "$asset does not match SHA256SUMS"
 
 mkdir "$tmp/x"
@@ -70,9 +78,10 @@ tar -xzf "$tmp/$asset" -C "$tmp/x" rowser || err "cannot unpack $asset"
 mkdir -p "$install_dir"
 # Replace an existing binary in one step: temp file in the same folder, then mv.
 part="$install_dir/.rowser.part.$$"
-cp "$tmp/x/rowser" "$part"
-chmod 755 "$part"
-mv -f "$part" "$install_dir/rowser"
+cp "$tmp/x/rowser" "$part" || err "cannot write $part"
+chmod 755 "$part" || err "cannot make $part executable"
+mv -f "$part" "$install_dir/rowser" || err "cannot write $install_dir/rowser"
+part=""
 
 version="$("$install_dir/rowser" --version 2>/dev/null || echo rowser)"
 echo "Installed $version to $install_dir/rowser"

@@ -33,6 +33,7 @@ src/
                      browser names)
   test_support.rs    `#[cfg(test)]` helpers for unit tests; includes tests/common/script.rs
 tests/               level-2 integration tests and the level-3 sshd e2e test
+install.sh           Release installer (rowser-installer.sh); hidden test seam ROWSER_INSTALL_BASE_URL
 ```
 
 ## Modules and their interfaces

@@ -1,17 +1,23 @@
 //! The `install.sh` installer, run against a local HTTP server with a temp HOME.
 
+#[path = "common/release.rs"]
+mod release;
 #[path = "common/script.rs"]
 mod script;
 
+use release::sums_line;
 use script::write_script;
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const TGZ: &str = "/rel/rowser-x86_64-unknown-linux-musl.tar.gz";
-const SUMS: &str = "/rel/SHA256SUMS";
 const ASSET: &str = "rowser-x86_64-unknown-linux-musl.tar.gz";
+const SUMS: &str = "/rel/SHA256SUMS";
+const ALL_ASSETS: [&str; 4] = [
+    "rowser-x86_64-unknown-linux-musl.tar.gz",
+    "rowser-aarch64-unknown-linux-musl.tar.gz",
+    "rowser-aarch64-apple-darwin.tar.gz",
+    "rowser-x86_64-apple-darwin.tar.gz",
+];
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rowser-inst-{tag}-{}", std::process::id()));
@@ -20,32 +26,13 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// Serves each `(path, body)` for `GET <path>` and 404 for any other path.
+/// The server path of `asset`.
+fn route(asset: &str) -> &'static str {
+    Box::leak(format!("/rel/{asset}").into_boxed_str())
+}
+
 fn serve_all(routes: Vec<(&'static str, Vec<u8>)>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut stream = stream.unwrap();
-            let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]);
-            let hit = routes
-                .iter()
-                .find(|(path, _)| req.starts_with(&format!("GET {path} ")));
-            let (status, body) = match hit {
-                Some((_, body)) => ("200 OK", body.clone()),
-                None => ("404 Not Found", Vec::new()),
-            };
-            let head = format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(head.as_bytes());
-            let _ = stream.write_all(&body);
-        }
-    });
-    format!("http://{addr}/rel")
+    release::serve_all("/rel", routes)
 }
 
 /// A release-style tarball holding a fake `rowser` that prints `version`.
@@ -66,26 +53,26 @@ fn tarball(dir: &Path, version: &str) -> Vec<u8> {
     std::fs::read(out).unwrap()
 }
 
-fn sums_line(name: &str, body: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let hash: String = Sha256::digest(body)
+/// A Release that serves only `asset` (a real tarball) plus a four-line
+/// SHA256SUMS in which the other entries hash junk.
+fn release_with(dir: &Path, version: &str, asset: &str) -> String {
+    let body = tarball(dir, version);
+    let sums: String = ALL_ASSETS
         .iter()
-        .map(|b| format!("{b:02x}"))
+        .map(|name| {
+            if *name == asset {
+                sums_line(name, &body)
+            } else {
+                sums_line(name, name.as_bytes())
+            }
+        })
         .collect();
-    format!("{hash}  {name}\n")
+    serve_all(vec![(route(asset), body), (SUMS, sums.into_bytes())])
 }
 
-/// A good Release: the tarball plus four-line SHA256SUMS.
+/// A good Release for Linux x86_64.
 fn good_release(dir: &Path, version: &str) -> String {
-    let body = tarball(dir, version);
-    let sums = format!(
-        "{}{}{}{}",
-        sums_line("rowser-aarch64-unknown-linux-musl.tar.gz", b"a"),
-        sums_line(ASSET, &body),
-        sums_line("rowser-aarch64-apple-darwin.tar.gz", b"b"),
-        sums_line("rowser-x86_64-apple-darwin.tar.gz", b"c"),
-    );
-    serve_all(vec![(TGZ, body), (SUMS, sums.into_bytes())])
+    release_with(dir, version, ASSET)
 }
 
 /// Runs install.sh with HOME and XDG_CONFIG_HOME under `dir`, a fake `uname`
@@ -118,6 +105,15 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
 #[test]
 fn installs_the_binary_and_prints_next_steps() {
     let dir = temp_dir("good");
@@ -132,9 +128,27 @@ fn installs_the_binary_and_prints_next_steps() {
     assert!(stdout.contains("rowser daemon install"), "{stdout}");
     assert!(stdout.contains("rowser remote install <host>"), "{stdout}");
     assert!(stdout.contains("is not on your PATH"), "{stdout}");
-    let entries: Vec<_> = std::fs::read_dir(bin.parent().unwrap()).unwrap().collect();
-    assert_eq!(entries.len(), 1, "only the binary is installed");
+    assert_eq!(entries(bin.parent().unwrap()), ["rowser"]);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn each_system_gets_its_own_asset() {
+    let cases = [
+        ("Linux x86_64", "rowser-x86_64-unknown-linux-musl.tar.gz"),
+        ("Linux aarch64", "rowser-aarch64-unknown-linux-musl.tar.gz"),
+        ("Linux arm64", "rowser-aarch64-unknown-linux-musl.tar.gz"),
+        ("Darwin arm64", "rowser-aarch64-apple-darwin.tar.gz"),
+        ("Darwin x86_64", "rowser-x86_64-apple-darwin.tar.gz"),
+    ];
+    for (n, (system, asset)) in cases.iter().enumerate() {
+        let dir = temp_dir(&format!("map{n}"));
+        let base = release_with(&dir, "9.9.9", asset);
+        let out = run(&dir, &base, system, &[]);
+        assert!(out.status.success(), "{system}: {}", stderr(&out));
+        assert!(installed(&dir).exists(), "{system}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[test]
@@ -158,25 +172,26 @@ fn rowser_install_dir_overrides_the_folder() {
     let out = run(
         &dir,
         &base,
-        "Darwin arm64",
-        &[("ROWSER_INSTALL_DIR", &target)],
-    );
-    // Darwin arm64 asks for the Apple asset, which this server lacks.
-    assert!(!out.status.success());
-    assert!(
-        stderr(&out).contains("rowser-aarch64-apple-darwin.tar.gz"),
-        "{}",
-        stderr(&out)
-    );
-    let out = run(
-        &dir,
-        &base,
         "Linux x86_64",
         &[("ROWSER_INSTALL_DIR", &target)],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(target.join("rowser").exists());
     assert!(!installed(&dir).exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn an_uppercase_hash_in_sha256sums_is_accepted() {
+    let dir = temp_dir("upper");
+    let body = tarball(&dir, "9.9.9");
+    let line = sums_line(ASSET, &body);
+    let (hash, name) = line.split_once("  ").unwrap();
+    let sums = format!("{}  {name}", hash.to_uppercase());
+    let base = serve_all(vec![(route(ASSET), body), (SUMS, sums.into_bytes())]);
+    let out = run(&dir, &base, "Linux x86_64", &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(installed(&dir).exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -189,12 +204,9 @@ fn assert_refused(tag: &str, routes: Vec<(&'static str, Vec<u8>)>, want: &str) {
     let base = serve_all(routes);
     let out = run(&dir, &base, "Linux x86_64", &[]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains(want), "{}", stderr(&out));
+    assert_eq!(stderr(&out), format!("rowser-installer: {want}\n"));
     assert_eq!(std::fs::read(installed(&dir)).unwrap(), before);
-    let entries: Vec<_> = std::fs::read_dir(installed(&dir).parent().unwrap())
-        .unwrap()
-        .collect();
-    assert_eq!(entries.len(), 1, "the install folder is unchanged");
+    assert_eq!(entries(installed(&dir).parent().unwrap()), ["rowser"]);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -205,7 +217,7 @@ fn a_checksum_mismatch_stops_the_install() {
     let sums = sums_line(ASSET, b"tampered").into_bytes();
     assert_refused(
         "bad",
-        vec![(TGZ, body), (SUMS, sums)],
+        vec![(route(ASSET), body), (SUMS, sums)],
         &format!("{ASSET} does not match SHA256SUMS"),
     );
     std::fs::remove_dir_all(dir).unwrap();
@@ -218,7 +230,7 @@ fn a_missing_entry_stops_the_install() {
     let sums = sums_line("rowser-x86_64-apple-darwin.tar.gz", &body).into_bytes();
     assert_refused(
         "noent",
-        vec![(TGZ, body), (SUMS, sums)],
+        vec![(route(ASSET), body), (SUMS, sums)],
         &format!("SHA256SUMS has no entry for {ASSET}"),
     );
     std::fs::remove_dir_all(dir).unwrap();
@@ -226,9 +238,38 @@ fn a_missing_entry_stops_the_install() {
 
 #[test]
 fn a_missing_sha256sums_stops_the_install() {
-    let dir = temp_dir("nosums-src");
-    let body = tarball(&dir, "6.6.6");
-    assert_refused("nosums", vec![(TGZ, body)], "/rel/SHA256SUMS");
+    // The message names the server URL, so this test does not use assert_refused.
+    let dir = temp_dir("nosums");
+    let good = good_release(&dir.join("r0"), "1.0.0");
+    assert!(run(&dir, &good, "Linux x86_64", &[]).status.success());
+    let body = tarball(&dir.join("r1"), "6.6.6");
+    let base = serve_all(vec![(route(ASSET), body)]);
+    let out = run(&dir, &base, "Linux x86_64", &[]);
+    assert!(!out.status.success());
+    // curl prints its own error line first.
+    let want = format!("rowser-installer: cannot download {base}/SHA256SUMS\n");
+    assert!(stderr(&out).ends_with(&want), "{}", stderr(&out));
+    assert_eq!(entries(installed(&dir).parent().unwrap()), ["rowser"]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_failed_copy_leaves_no_part_file() {
+    let dir = temp_dir("part");
+    let good = good_release(&dir.join("r0"), "1.0.0");
+    assert!(run(&dir, &good, "Linux x86_64", &[]).status.success());
+    let before = std::fs::read(installed(&dir)).unwrap();
+    // A fake chmod that fails, after cp has written the part file.
+    write_script(&dir.join("tools/chmod"), "exit 1");
+    let base = good_release(&dir.join("r1"), "2.0.0");
+    let out = run(&dir, &base, "Linux x86_64", &[]);
+    assert!(!out.status.success());
+    let part = installed(&dir).with_file_name(".rowser.part.");
+    let want = format!("rowser-installer: cannot make {}", part.display());
+    assert!(stderr(&out).starts_with(&want), "{}", stderr(&out));
+    assert!(stderr(&out).ends_with(" executable\n"), "{}", stderr(&out));
+    assert_eq!(std::fs::read(installed(&dir)).unwrap(), before);
+    assert_eq!(entries(installed(&dir).parent().unwrap()), ["rowser"]);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -238,10 +279,9 @@ fn an_unknown_system_stops_the_install() {
     let base = good_release(&dir, "9.9.9");
     let out = run(&dir, &base, "FreeBSD amd64", &[]);
     assert!(!out.status.success());
-    assert!(
-        stderr(&out).contains("unsupported system: FreeBSD amd64"),
-        "{}",
-        stderr(&out)
+    assert_eq!(
+        stderr(&out),
+        "rowser-installer: unsupported system: FreeBSD amd64\n"
     );
     assert!(!dir.join("home/.local").exists());
     std::fs::remove_dir_all(dir).unwrap();
