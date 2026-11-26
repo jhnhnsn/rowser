@@ -275,6 +275,10 @@ macOS CI runs levels 1 and 2.
 
 - GitHub Release binaries: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
   `aarch64-apple-darwin`, `x86_64-apple-darwin`, built in GitHub Actions.
+- An installer script, `rowser-installer.sh`, attached to each GitHub Release:
+  `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jhnhnsn/rowser/releases/latest/download/rowser-installer.sh | sh`.
+  It checks the tarball against `SHA256SUMS` as `rowser remote install` does, and installs only
+  the `rowser` binary to `~/.local/bin` (`ROWSER_INSTALL_DIR` overrides it).
 - `cargo install --git https://github.com/jhnhnsn/rowser`.
 - Reserve the `rowser` crate name on crates.io with the first release. Full crates.io publishing
   and a Homebrew tap come after v1.0.

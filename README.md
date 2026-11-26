@@ -75,7 +75,24 @@ Progress is tracked in [#1](https://github.com/jhnhnsn/rowser/issues/1) (v0.1.0)
 
 ## Install
 
-On your local machine, either download a binary from
+Install the latest release (Linux and macOS, x86_64 and arm64):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jhnhnsn/rowser/releases/latest/download/rowser-installer.sh | sh
+```
+
+A pre-release is not `latest` on GitHub. Until v1.0.0, name the version:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jhnhnsn/rowser/releases/download/v1.0.0-rc.1/rowser-installer.sh | sh
+```
+
+The script checks the download against the Release's `SHA256SUMS` and installs only the
+`rowser` binary to `~/.local/bin` (set `ROWSER_INSTALL_DIR` to pick another folder). It uses
+no `sudo` and writes nothing outside your home directory. Then run `rowser daemon install` on
+the local machine, or `rowser remote install <host>` for a remote host.
+
+Or download a binary from
 [GitHub Releases](https://github.com/jhnhnsn/rowser/releases) (`x86_64-unknown-linux-musl`,
 `aarch64-unknown-linux-musl`, `aarch64-apple-darwin`, `x86_64-apple-darwin`) and put `rowser`
 on your `PATH`, or build it:

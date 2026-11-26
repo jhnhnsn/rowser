@@ -91,6 +91,19 @@ jobs:
         with:
           name: SHA256SUMS
           path: dist/SHA256SUMS
+      - name: Installer
+        # install.sh with the Cargo.toml version written in, so each Release's
+        # rowser-installer.sh installs that Release.
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rowser") | .version')"
+          sed "s/__ROWSER_VERSION__/$version/" install.sh > dist/rowser-installer.sh
+          grep -q "^ROWSER_VERSION=\"$version\"\$" dist/rowser-installer.sh
+          sh -n dist/rowser-installer.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rowser-installer.sh
+          path: dist/rowser-installer.sh
+          if-no-files-found: error
       - name: Publish the GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
@@ -100,5 +113,5 @@ jobs:
         run: |
           prerelease=""
           case "$TAG" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "$TAG" dist/rowser-*.tar.gz dist/SHA256SUMS \
+          gh release create "$TAG" dist/rowser-*.tar.gz dist/SHA256SUMS dist/rowser-installer.sh \
             --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag $prerelease

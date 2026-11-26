@@ -64,6 +64,11 @@ rowser is a CLI; test it from the terminal.
   download at a local HTTP server serving `rowser-<target>.tar.gz` and `SHA256SUMS`
   (`sha256sum` output; the download is refused without a matching entry). The sshd e2e test
   puts `HOME=<tmp> PATH=<toolbox>` in front of the remote command, never through `SetEnv`.
+- `install.sh` (the Release's `rowser-installer.sh`): run `sh install.sh` with `HOME`,
+  `ROWSER_INSTALL_DIR` and `XDG_CONFIG_HOME` set to temp dirs, and the hidden
+  `ROWSER_INSTALL_BASE_URL=<base>` pointing at a local HTTP server serving
+  `rowser-<target>.tar.gz` and `SHA256SUMS`. Put a fake `uname` first on `PATH` to pick the
+  system. Never run it against the real GitHub Release.
 - `rowser browsers [--json]` reads `HOME`, `XDG_DATA_HOME`, `XDG_DATA_DIRS` and
   `XDG_CONFIG_HOME` on Linux: set all four to a temp tree with fake `.desktop` files,
   `Local State` and `~/.mozilla/firefox/profiles.ini` files. It only reads; it opens nothing.
