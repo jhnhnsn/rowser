@@ -11,8 +11,9 @@ All notable changes to rowser are listed here. The format follows
 - Saved hosts and Links: each `[[host]]` in the config file gets one Link, an `ssh` connection
   that the Daemon keeps open and runs `rowser __outpost` on the host. Programs on that host
   open URLs through the Outpost socket `/tmp/rowser-<uid>/outpost.sock`, without `rowser ssh`.
-  The Shim uses that socket only when its folder belongs to the user with mode 0700. A dropped Link reconnects after 1 s, then up to 60 s. A failed login shows one
-  notification and stops the retries. `rowser reload` adds or removes Links.
+  The Shim uses that socket only when its folder belongs to the user with mode 0700. A dropped
+  Link reconnects after 1 s, then up to 60 s. A failed login shows one notification and stops
+  the retries. `rowser reload` adds or removes Links.
   ([#77](https://github.com/jhnhnsn/rowser/issues/77))
 
 ### Changed
