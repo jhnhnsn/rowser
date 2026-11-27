@@ -30,6 +30,10 @@ pub const OUTPOST_SOCKET: &str = "outpost.sock";
 /// `/tmp/rowser-<uid>`, so a test never touches the real one.
 pub const TEST_DIR_VAR: &str = "ROWSER_TEST_OUTPOST_DIR";
 
+/// Hidden test hook: the rowser version the Outpost gives in its `Pong`,
+/// so a test can play an older Outpost.
+pub const TEST_VERSION_VAR: &str = "ROWSER_TEST_OUTPOST_VERSION";
+
 fn euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() }
@@ -390,7 +394,10 @@ async fn answer_control(stream: mux::Stream) -> crate::protocol::Result<()> {
         let reply = match msg {
             Msg::Ping => Msg::Pong {
                 version: Hello::current().version(),
-                rowser_version: crate::protocol::rowser_version(),
+                rowser_version: std::env::var(TEST_VERSION_VAR)
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .or_else(crate::protocol::rowser_version),
             },
             Msg::Watch { ports } => return watch(conn, &ports).await,
             Msg::Dial { port } => return dial(conn, port).await,

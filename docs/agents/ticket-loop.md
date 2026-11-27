@@ -63,6 +63,14 @@ rowser is a CLI; test it from the terminal.
   rowser), exits 0 for `-N -f` (the master), and never runs the real `ssh`. Set `HOME`,
   `XDG_CONFIG_HOME` and `ROWSER_RUNTIME_DIR` to short temp dirs. For a running Daemon, start one
   in that runtime dir as `tests/link.rs` does. See `tests/host.rs`.
+- Installs from `host add` and the Daemon's automatic update (#81): the hidden
+  `ROWSER_TEST_LOCAL_BUILD=<path>` replaces the release download (for `rowser host add` and
+  `rowser daemon`). The fake `ssh` must answer `-- <host> uname -sm` and run the last argument of
+  `-- <host> sh -c '…'` with `/bin/sh -c` under a temp HOME and a toolbox `PATH`, as in the
+  remote install item. `host add` reads `rowser <version>` on the line after the path. The hidden
+  `ROWSER_TEST_OUTPOST_VERSION=<v>` makes `rowser __outpost` give `<v>` in its `Pong`: a fake
+  older Outpost is a script `~/.local/bin/rowser` (temp HOME) that sets it and execs the real
+  build. See `tests/update.rs`.
 - `rowser ssh` uses the `ssh` on `PATH` and the Daemon in `$ROWSER_RUNTIME_DIR` (absolute) or
   else `$XDG_RUNTIME_DIR/rowser/`: put a fake `ssh` script first on `PATH` and set one of them to
   a short temp dir to test it. Unset `ROWSER_RUNTIME_DIR` when a test relies on the default.

@@ -140,6 +140,10 @@ pub(super) async fn supervise(inner: Arc<Inner>, host: SavedHost, link: LinkStat
         inner.config.rate_window,
     )));
     let mut backoff = Backoff::default();
+    // One notification and one update attempt per version mismatch; a
+    // connection to an Outpost of this major version ends the mismatch.
+    let mut mismatch_notified = false;
+    let mut update_tried = false;
     loop {
         tracing::debug!("link {}: {:?}", host.name, LinkState::Connecting);
         let mismatch =
@@ -158,19 +162,42 @@ pub(super) async fn supervise(inner: Arc<Inner>, host: SavedHost, link: LinkStat
         match state {
             LinkState::NeedsLogin => {
                 tracing::warn!("link {}: needs login: {}", host.name, stderr.trim());
-                let notifier = inner.notifier.clone();
-                let notice = Notice {
-                    subject: Subject::NeedsLogin,
-                    host: NoticeHost::Alias(host.name.clone()),
-                    target: None,
-                    warnings: vec![],
-                };
-                tokio::task::spawn_blocking(move || notifier.notify(notice));
+                notify(&inner, &host, Subject::NeedsLogin);
                 return;
             }
             _ => {
                 if !stderr.trim().is_empty() {
                     tracing::warn!("link {}: {}", host.name, stderr.trim());
+                }
+                if connected {
+                    mismatch_notified = false;
+                    update_tried = false;
+                }
+                let (state, outpost) = {
+                    let s = link.lock().unwrap_or_else(|e| e.into_inner());
+                    (s.state, s.outpost_rowser_version.clone())
+                };
+                if state == LinkState::VersionMismatch {
+                    if host.auto_update && !update_tried {
+                        update_tried = true;
+                        match update(&inner, &host).await {
+                            Ok(()) => {
+                                let version = env!("CARGO_PKG_VERSION").to_string();
+                                tracing::info!("link {}: updated rowser to {version}", host.name);
+                                notify(&inner, &host, Subject::Updated { version });
+                                set_state(&link, LinkState::Connecting);
+                                backoff.reset();
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::warn!("link {}: update failed: {e}", host.name)
+                            }
+                        }
+                    }
+                    if !mismatch_notified {
+                        mismatch_notified = true;
+                        notify(&inner, &host, Subject::VersionMismatch { outpost });
+                    }
                 }
                 let wait = backoff.next();
                 tracing::debug!("link {}: dropped; next attempt in {wait:?}", host.name);
@@ -178,6 +205,55 @@ pub(super) async fn supervise(inner: Arc<Inner>, host: SavedHost, link: LinkStat
             }
         }
     }
+}
+
+/// Shows one notification about the Link to `host`.
+fn notify(inner: &Arc<Inner>, host: &SavedHost, subject: Subject) {
+    let notifier = inner.notifier.clone();
+    let notice = Notice {
+        subject,
+        host: NoticeHost::Alias(host.name.clone()),
+        target: None,
+        warnings: vec![],
+    };
+    tokio::task::spawn_blocking(move || notifier.notify(notice));
+}
+
+/// The major part of a rowser version (`1` of `1.0.0-rc.2`).
+fn major(version: &str) -> &str {
+    version.split('.').next().unwrap_or(version)
+}
+
+/// True when the Outpost's rowser version has another major version than
+/// this build. An Outpost that gives no version is not a mismatch.
+pub(super) fn is_version_mismatch(outpost: Option<&str>) -> bool {
+    outpost.is_some_and(|v| major(v.trim()) != major(env!("CARGO_PKG_VERSION")))
+}
+
+/// The automatic update: the remote install of this version on `host`,
+/// with or without the default-browser part as the host was added. It runs
+/// the Link's `ssh` with `BatchMode` on rowser's own control path.
+async fn update(inner: &Arc<Inner>, host: &SavedHost) -> Result<(), String> {
+    let ssh = crate::remote_install::Ssh {
+        program: inner.config.ssh.clone(),
+        options: vec![
+            "-o".into(),
+            "BatchMode=yes".into(),
+            "-o".into(),
+            "ControlMaster=no".into(),
+            "-o".into(),
+            control_path_option(&inner.config.link_dir),
+        ],
+    };
+    let source = crate::remote_install::source_for(inner.config.update_local_build.clone(), None);
+    let name = host.name.clone();
+    let default_browser = host.default_browser;
+    tokio::task::spawn_blocking(move || {
+        crate::remote_install::install_with(&ssh, &name, source.as_ref(), default_browser)
+            .map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Runs one `ssh` process until it ends. Returns whether the Outpost
@@ -260,7 +336,19 @@ async fn connect_once(
     tokio::pin!(serve);
     tokio::select! {
         r = tokio::time::timeout(HELLO_TIMEOUT, hello) => {
-            if let Ok(Some((_control, version, rowser_version))) = r {
+            match r {
+            Ok(Some((_, _, rowser_version))) if is_version_mismatch(rowser_version.as_deref()) => {
+                tracing::warn!(
+                    "link {}: version mismatch: outpost {}, local {}",
+                    host.name,
+                    rowser_version.as_deref().unwrap_or("-"),
+                    env!("CARGO_PKG_VERSION")
+                );
+                link.lock().unwrap_or_else(|e| e.into_inner()).outpost_rowser_version =
+                    rowser_version;
+                set_state(link, LinkState::VersionMismatch);
+            }
+            Ok(Some((_control, version, rowser_version))) => {
                 connected = true;
                 backoff.reset();
                 {
@@ -272,6 +360,8 @@ async fn connect_once(
                 set_state(link, LinkState::Connected);
                 tracing::info!("link {}: {:?} (outpost {version})", host.name, LinkState::Connected);
                 (&mut serve).await;
+            }
+            _ => {}
             }
         }
         _ = &mut serve => {}
@@ -304,6 +394,16 @@ mod tests {
         assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
         b.reset();
         assert_eq!(b.next(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn only_another_major_version_is_a_mismatch() {
+        // This build is 1.x.
+        assert!(is_version_mismatch(Some("0.9.0")));
+        assert!(is_version_mismatch(Some("2.0.0")));
+        assert!(!is_version_mismatch(Some("1.0.0")));
+        assert!(!is_version_mismatch(Some("1.4.2")));
+        assert!(!is_version_mismatch(None));
     }
 
     #[test]

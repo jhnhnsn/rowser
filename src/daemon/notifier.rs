@@ -34,6 +34,11 @@ pub enum Subject {
     Forward(Vec<u16>),
     /// The Link to the host cannot log in with `BatchMode`.
     NeedsLogin,
+    /// The Outpost on the host has another major version: `outpost` is its
+    /// rowser version, if it gave one.
+    VersionMismatch { outpost: Option<String> },
+    /// The Daemon updated rowser on the host to `version`.
+    Updated { version: String },
 }
 
 /// What the Daemon tells the user about an Open request or a `rowser
@@ -56,6 +61,8 @@ impl Notice {
             Subject::Url(_) => "rowser: opened a URL".into(),
             Subject::Forward(_) => "rowser: forwarded a port".into(),
             Subject::NeedsLogin => "rowser: needs login".into(),
+            Subject::VersionMismatch { .. } => "rowser: version mismatch".into(),
+            Subject::Updated { .. } => "rowser: updated".into(),
         }
     }
 
@@ -65,7 +72,9 @@ impl Notice {
             Subject::Url(_) => "Open this URL?",
             Subject::Forward(_) => "Forward this port?",
             // Never a confirmation.
-            Subject::NeedsLogin => "Log in?",
+            Subject::NeedsLogin | Subject::VersionMismatch { .. } | Subject::Updated { .. } => {
+                "Log in?"
+            }
         }
     }
 
@@ -98,6 +107,14 @@ impl Notice {
             }
             Subject::NeedsLogin => {
                 format!("cannot log in; run \"rowser host connect {host}\"")
+            }
+            Subject::VersionMismatch { outpost } => format!(
+                "rowser {} there, {} here; run \"rowser remote install {host}\"",
+                clean(outpost.as_deref().unwrap_or("of another version"), escape),
+                env!("CARGO_PKG_VERSION")
+            ),
+            Subject::Updated { version } => {
+                format!("updated rowser on {host} to {}", clean(version, escape))
             }
         };
         let mut body = format!("From {host}: {what}");

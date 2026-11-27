@@ -8,6 +8,12 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser host add` installs rowser on the host when it is missing or has another version.
+  `rowser remote install --no-default-browser` (and `host add --no-default-browser`) installs only
+  the binary, for a host with its own desktop. When a Saved host's Outpost has another major
+  version, the daemon updates rowser there and notifies you once (`auto_update = false` in the
+  `[[host]]` entry: one notification, no update).
+  ([#81](https://github.com/jhnhnsn/rowser/issues/81))
 - Two Local machines with a Link to one Remote host share its Outpost socket: the Link that
   connected last gets the URLs, and the other Link gets them again when it drops. Each Link
   keeps its own Callback forwards. ([#80](https://github.com/jhnhnsn/rowser/issues/80))

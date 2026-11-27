@@ -72,6 +72,9 @@ pub struct DaemonConfig {
     pub ssh: PathBuf,
     /// Where a Link's control path (`cm-%C`) goes: the runtime directory.
     pub link_dir: PathBuf,
+    /// The automatic update copies this binary in place of the release
+    /// download (the hidden `ROWSER_TEST_LOCAL_BUILD` hook, and tests).
+    pub update_local_build: Option<PathBuf>,
 }
 
 impl Default for DaemonConfig {
@@ -92,6 +95,7 @@ impl Default for DaemonConfig {
             // Empty: no shared folder such as /tmp. The default has no
             // Saved hosts, so no Link uses it; a caller with hosts sets it.
             link_dir: PathBuf::new(),
+            update_local_build: None,
         }
     }
 }
@@ -625,8 +629,8 @@ impl Inner {
         let (not_approved, not_done) = match notice.subject {
             Subject::Url(_) => (NOT_APPROVED, "the URL was not opened"),
             Subject::Forward(_) => (FORWARD_NOT_APPROVED, "the port was not forwarded"),
-            Subject::NeedsLogin => {
-                unreachable!("a needs-login notice is sent with Notifier::notify, never confirmed")
+            Subject::NeedsLogin | Subject::VersionMismatch { .. } | Subject::Updated { .. } => {
+                unreachable!("a Link notice is sent with Notifier::notify, never confirmed")
             }
         };
         let paused = paused_text(&notice.subject);
@@ -743,8 +747,8 @@ fn paused_text(subject: &Subject) -> String {
                 .join(", ");
             format!("paused; port {ports} was not forwarded")
         }
-        Subject::NeedsLogin => {
-            unreachable!("a needs-login notice is never a request, so no pause refuses it")
+        Subject::NeedsLogin | Subject::VersionMismatch { .. } | Subject::Updated { .. } => {
+            unreachable!("a Link notice is never a request, so no pause refuses it")
         }
     }
 }
@@ -900,6 +904,9 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
         browser_roots: Some(roots),
         hosts: file.hosts.clone(),
         link_dir: dir.clone(),
+        update_local_build: std::env::var_os(crate::host::TEST_LOCAL_BUILD_VAR)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from),
         routes: Routes::from_config(&file),
         config_file: Some(config_path),
         confirm_hosts: args.confirm_hosts,

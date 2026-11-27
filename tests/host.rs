@@ -37,7 +37,13 @@ impl World {
                 "printf '%s\\n' \"$*\" >> {args}\n\
                  case \"$*\" in\n\
                  *'-N -f'*) touch {master}; exit 0;;\n\
-                 *'command -v rowser'*) [ -n \"$FAKE_FOUND\" ] || exit 1; echo \"$FAKE_FOUND\"; exit 0;;\n\
+                 *'-- g14 uname -sm'|*'-- pi uname -sm') echo 'Linux x86_64'; exit 0;;\n\
+                 *\"-- g14 sh -c '\"*|*\"-- pi sh -c '\"*)\n\
+                 eval \"cmd=\\${{$#}}\"\n\
+                 mkdir -p {remote}\n\
+                 HOME={remote} PATH={toolbox} exec /bin/sh -c \"$cmd\";;\n\
+                 *'command -v rowser'*) [ -n \"$FAKE_FOUND\" ] || exit 1; echo \"$FAKE_FOUND\";\n\
+                 [ -n \"$FAKE_VERSION\" ] && echo \"rowser $FAKE_VERSION\"; exit 0;;\n\
                  *__outpost)\n\
                  eval \"alias=\\${{$(($# - 2))}}\"\n\
                  if [ -f {deny} ] && [ ! -f {master} ]; then echo \"$alias: Permission denied (publickey).\" >&2; exit 255; fi\n\
@@ -55,9 +61,22 @@ impl World {
                 home = d.display(),
                 outpost = d.join("o").display(),
                 pid = d.join("pid").display(),
+                remote = d.join("remote").display(),
+                toolbox = remote_toolbox(d).display(),
             ),
         );
+        std::fs::write(d.join("rowser-built"), "LOCAL").unwrap();
         World { dir }
+    }
+
+    /// The remote HOME that installs write into.
+    fn remote_home(&self) -> PathBuf {
+        self.dir.0.join("remote")
+    }
+
+    /// Whether an install ran (`uname -sm` is its first step).
+    fn installed(&self) -> bool {
+        self.ssh_args().iter().any(|a| a.ends_with("uname -sm"))
     }
 
     fn config_file(&self) -> PathBuf {
@@ -92,6 +111,17 @@ impl World {
 
     /// `host`, with `ROWSER_RUNTIME_DIR` set to `run_dir`.
     fn host_in(&self, args: &[&str], found: Option<&str>, run_dir: &Path) -> Output {
+        self.host_with(args, found, Some(env!("CARGO_PKG_VERSION")), run_dir)
+    }
+
+    /// `host_in`; `version` is what the remote `rowser --version` gives.
+    fn host_with(
+        &self,
+        args: &[&str],
+        found: Option<&str>,
+        version: Option<&str>,
+        run_dir: &Path,
+    ) -> Output {
         let d = &self.dir.0;
         let mut c = std::process::Command::new(ROWSER);
         c.arg("host")
@@ -100,8 +130,13 @@ impl World {
             .env("HOME", d)
             .env("XDG_CONFIG_HOME", d.join("cfg"))
             .env("ROWSER_RUNTIME_DIR", run_dir)
+            .env("ROWSER_TEST_LOCAL_BUILD", d.join("rowser-built"))
             .env_remove("FAKE_FOUND")
+            .env_remove("FAKE_VERSION")
             .stdin(std::process::Stdio::null());
+        if let Some(v) = version {
+            c.env("FAKE_VERSION", v);
+        }
         if let Some(f) = found {
             c.env("FAKE_FOUND", f);
         }
@@ -130,6 +165,24 @@ impl World {
     fn socket(&self, alias: &str) -> PathBuf {
         self.dir.0.join("o").join(alias).join("outpost.sock")
     }
+}
+
+/// The remote `PATH` for an install: only the tools the remote script
+/// needs, linked from the real `PATH`. It never holds the real `xdg-mime`.
+fn remote_toolbox(dir: &Path) -> PathBuf {
+    let tools = dir.join("toolbox");
+    std::fs::create_dir_all(&tools).unwrap();
+    let path = std::env::var("PATH").unwrap();
+    for tool in [
+        "sh", "mkdir", "rm", "cat", "chmod", "mv", "ln", "head", "awk",
+    ] {
+        let found = std::env::split_paths(&path)
+            .map(|d| d.join(tool))
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| panic!("no {tool} on PATH"));
+        std::os::unix::fs::symlink(found, tools.join(tool)).unwrap();
+    }
+    tools
 }
 
 /// Runs `w.host(…)` off the tokio threads, so the Daemon can answer.
@@ -252,12 +305,69 @@ fn add_with_no_default_browser_records_it() {
 }
 
 #[test]
-fn add_without_rowser_on_the_host_names_the_install_command() {
+fn add_without_rowser_on_the_host_installs_it_first() {
     let w = World::new("hm");
+    let out = w.host(&["add", "g14"], None);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(w.installed());
+    let home = w.remote_home();
+    assert_eq!(
+        std::fs::read_to_string(home.join(".local/bin/rowser")).unwrap(),
+        "LOCAL"
+    );
+    assert!(std::fs::symlink_metadata(home.join(".local/bin/xdg-open")).is_ok());
+    let c = rowser::config::parse(&w.config()).unwrap();
+    assert_eq!(c.hosts[0].remote_path, "~/.local/bin/rowser");
+    assert!(c.hosts[0].default_browser);
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("rowser installed on g14"), "{stdout}");
+}
+
+#[test]
+fn add_with_another_version_on_the_host_installs_this_one() {
+    let w = World::new("hv");
+    let out = w.host_with(
+        &["add", "g14"],
+        Some("/opt/rowser"),
+        Some("0.9.0"),
+        &w.run_dir(),
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(w.installed());
+    let c = rowser::config::parse(&w.config()).unwrap();
+    assert_eq!(c.hosts[0].remote_path, "~/.local/bin/rowser");
+
+    // No version answer (an old rowser) also installs.
+    let w = World::new("hw");
+    let out = w.host_with(&["add", "g14"], Some("/opt/rowser"), None, &w.run_dir());
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(w.installed());
+}
+
+#[test]
+fn add_with_no_default_browser_installs_only_the_binary() {
+    let w = World::new("hb");
+    let out = w.host(&["add", "pi", "--no-default-browser"], None);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let home = w.remote_home();
+    assert!(home.join(".local/bin/rowser").is_file());
+    assert!(std::fs::symlink_metadata(home.join(".local/bin/xdg-open")).is_err());
+    assert!(!home.join(".config/environment.d/rowser.conf").exists());
+    assert!(home
+        .join(rowser::remote_install::NO_DEFAULT_BROWSER_MARKER)
+        .is_file());
+    let c = rowser::config::parse(&w.config()).unwrap();
+    assert!(!c.hosts[0].default_browser);
+}
+
+#[test]
+fn a_failed_install_saves_nothing() {
+    let w = World::new("hf");
+    std::fs::remove_file(w.dir.0.join("rowser-built")).unwrap();
     let out = w.host(&["add", "g14"], None);
     assert_eq!(out.status.code(), Some(1));
     let err = text(&out.stderr);
-    assert!(err.contains("rowser remote install g14"), "{err}");
+    assert!(err.contains("rowser host add: "), "{err}");
     assert!(!w.config_file().exists());
 }
 

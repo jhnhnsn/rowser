@@ -127,16 +127,30 @@ impl BinarySource for ReleaseDownload {
     }
 }
 
+/// The marker, under `$HOME`, that an install without the default-browser
+/// part leaves on the Remote host. A full install removes it.
+pub const NO_DEFAULT_BROWSER_MARKER: &str = ".local/share/rowser/no-default-browser";
+
 /// The remote `sh` script: reads the binary on stdin into
-/// `$HOME/.local/bin/rowser`, links the browser names to it, and writes
-/// `~/.config/environment.d/rowser.conf` (see [`environment_d_script`]). It
-/// writes only under `$HOME`. No single quotes, so it fits in `sh -c '…'`.
-pub fn remote_script() -> String {
+/// `$HOME/.local/bin/rowser`. With `default_browser`, it also links the
+/// browser names to it, writes `~/.config/environment.d/rowser.conf` (see
+/// [`environment_d_script`]) and `rowser.desktop`, and removes the marker;
+/// without, it writes the marker [`NO_DEFAULT_BROWSER_MARKER`]. It writes only
+/// under `$HOME`. No single quotes, so it fits in `sh -c '…'`.
+pub fn remote_script(default_browser: bool) -> String {
     let mut s = String::from(
         "set -e; [ -n \"$HOME\" ] || { echo \"HOME is not set\" >&2; exit 1; }; \
          d=\"$HOME/.local/bin\"; mkdir -p \"$d\"; rm -f \"$d/.rowser.tmp\"; cat >\"$d/.rowser.tmp\"; \
          chmod 755 \"$d/.rowser.tmp\"; mv -f \"$d/.rowser.tmp\" \"$d/rowser\";",
     );
+    let marker = format!("\"$HOME/{NO_DEFAULT_BROWSER_MARKER}\"");
+    if !default_browser {
+        s.push_str(&format!(
+            " mkdir -p \"$HOME/.local/share/rowser\"; rm -f {marker}; : >{marker};"
+        ));
+        return s;
+    }
+    s.push_str(&format!(" rm -f {marker};"));
     for name in BROWSER_NAMES {
         s.push_str(&format!(" ln -sfn rowser \"$d/{name}\";"));
     }
@@ -256,9 +270,44 @@ pub struct Installed {
     pub default_by: Option<DefaultBy>,
 }
 
-/// Runs the install against `host` with the `ssh` on `PATH`.
-pub fn install(host: &str, source: &dyn BinarySource) -> Result<Installed, String> {
-    let out = Command::new("ssh")
+/// How an install reaches the Remote host: the `ssh` program and the
+/// options before `-- <host>`.
+#[derive(Debug, Clone)]
+pub struct Ssh {
+    pub program: PathBuf,
+    pub options: Vec<String>,
+}
+
+impl Default for Ssh {
+    /// The `ssh` on `PATH`, with no options.
+    fn default() -> Self {
+        Ssh {
+            program: PathBuf::from("ssh"),
+            options: vec![],
+        }
+    }
+}
+
+/// Runs the install against `host` with the `ssh` on `PATH`; with
+/// `default_browser`, it includes the default-browser part.
+pub fn install(
+    host: &str,
+    source: &dyn BinarySource,
+    default_browser: bool,
+) -> Result<Installed, String> {
+    install_with(&Ssh::default(), host, source, default_browser)
+}
+
+/// As [`install`], with `ssh`. Stdin is null for `uname`, so `ssh` can ask
+/// for a passphrase only on the terminal.
+pub fn install_with(
+    ssh: &Ssh,
+    host: &str,
+    source: &dyn BinarySource,
+    default_browser: bool,
+) -> Result<Installed, String> {
+    let out = Command::new(&ssh.program)
+        .args(&ssh.options)
         .args(["--", host, "uname -sm"])
         .stdin(Stdio::null())
         .stderr(Stdio::inherit())
@@ -270,8 +319,13 @@ pub fn install(host: &str, source: &dyn BinarySource) -> Result<Installed, Strin
     let asset = asset_for(&String::from_utf8_lossy(&out.stdout))?;
 
     let bin = source.binary(asset)?;
-    let mut ssh = Command::new("ssh")
-        .args(["--", host, &format!("sh -c '{}'", remote_script())])
+    let mut ssh = Command::new(&ssh.program)
+        .args(&ssh.options)
+        .args([
+            "--",
+            host,
+            &format!("sh -c '{}'", remote_script(default_browser)),
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -302,44 +356,80 @@ pub fn install(host: &str, source: &dyn BinarySource) -> Result<Installed, Strin
     })
 }
 
+/// The binary source: `local_build` if given, else the release download at
+/// `release_url` (default: this version's release).
+pub fn source_for(
+    local_build: Option<PathBuf>,
+    release_url: Option<String>,
+) -> Box<dyn BinarySource + Send + Sync> {
+    match local_build {
+        Some(path) => Box::new(LocalBuild(path)),
+        None => Box::new(ReleaseDownload {
+            base_url: release_url.unwrap_or_else(default_release_url),
+        }),
+    }
+}
+
+/// Tells the user what an install on `host` changed.
+pub fn write_report(
+    out: &mut impl Write,
+    host: &str,
+    default_browser: bool,
+    installed: &Installed,
+) -> std::io::Result<()> {
+    if !default_browser {
+        return writeln!(
+            out,
+            "rowser installed on {host} in ~/.local/bin (only the binary: no default-browser part)."
+        );
+    }
+    writeln!(
+        out,
+        "rowser installed on {host} in ~/.local/bin (with {}).",
+        BROWSER_NAMES.join(", ")
+    )?;
+    if installed.environment_d {
+        writeln!(
+            out,
+            "Wrote ~/.config/environment.d/rowser.conf on {host} (BROWSER and PATH for \
+             systemd user services); it applies from the next login."
+        )?;
+    }
+    if installed.desktop {
+        writeln!(
+            out,
+            "Wrote ~/.local/share/applications/rowser.desktop on {host}."
+        )?;
+    }
+    match installed.default_by {
+        Some(DefaultBy::XdgMime) => writeln!(
+            out,
+            "Made rowser.desktop the default for http and https links on {host} (with xdg-mime)."
+        )?,
+        Some(DefaultBy::MimeappsList) => writeln!(
+            out,
+            "Made rowser.desktop the default for http and https links on {host} \
+             (in ~/.config/mimeapps.list)."
+        )?,
+        None => {}
+    }
+    writeln!(
+        out,
+        "Add this line to your shell rc on {host}:\n\n    export BROWSER=rowser"
+    )
+}
+
 /// `rowser remote install <host>`.
 pub fn install_main(
     host: &str,
     local_build: Option<PathBuf>,
     release_url: Option<String>,
+    default_browser: bool,
 ) -> ExitCode {
-    let source: Box<dyn BinarySource> = match local_build {
-        Some(path) => Box::new(LocalBuild(path)),
-        None => Box::new(ReleaseDownload {
-            base_url: release_url.unwrap_or_else(default_release_url),
-        }),
-    };
-    match install(host, source.as_ref()) {
+    let source = source_for(local_build, release_url);
+    match install(host, source.as_ref(), default_browser) {
         Ok(installed) => {
-            println!(
-                "rowser installed on {host} in ~/.local/bin (with {}).",
-                BROWSER_NAMES.join(", ")
-            );
-            if installed.environment_d {
-                println!(
-                    "Wrote ~/.config/environment.d/rowser.conf on {host} (BROWSER and PATH for \
-                     systemd user services); it applies from the next login."
-                );
-            }
-            if installed.desktop {
-                println!("Wrote ~/.local/share/applications/rowser.desktop on {host}.");
-            }
-            match installed.default_by {
-                Some(DefaultBy::XdgMime) => println!(
-                    "Made rowser.desktop the default for http and https links on {host} (with xdg-mime)."
-                ),
-                Some(DefaultBy::MimeappsList) => println!(
-                    "Made rowser.desktop the default for http and https links on {host} \
-                     (in ~/.config/mimeapps.list)."
-                ),
-                None => {}
-            }
-            println!("Add this line to your shell rc on {host}:\n\n    export BROWSER=rowser");
+            let _ = write_report(&mut std::io::stdout(), host, default_browser, &installed);
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -377,7 +467,7 @@ mod tests {
 
     #[test]
     fn remote_script_fits_in_single_quotes_and_stays_in_home() {
-        let s = remote_script();
+        let s = remote_script(true);
         assert!(!s.contains('\''), "{s}");
         // A fish login shell folds `\\` to `\` inside single quotes.
         assert!(!s.contains("\\\\"), "{s}");

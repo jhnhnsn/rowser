@@ -367,13 +367,21 @@ desk  needs login  since 2026-11-27 10:02:12  last connected never  outpost -
 ```
 
 - `host add` runs `command -v rowser` in your login shell on the host and saves the path as
-  `remote_path`. If rowser is not there, it stops and tells you to run
-  `rowser remote install <host>` first. Adding a Saved host again updates its `remote_path` and
+  `remote_path`. If rowser is not there, or `rowser --version` there gives another version, it
+  runs `rowser remote install <host>` first and saves `~/.local/bin/rowser`. Use
+  `--no-default-browser` for a host with its own desktop: the install then copies only the
+  binary (no browser symlinks, `environment.d` file or `rowser.desktop`) and leaves the marker
+  `~/.local/share/rowser/no-default-browser` there. Adding a Saved host again updates its `remote_path` and
   `default_browser` (a plain `add` sets `default_browser` back to true); other keys and comments
   stay.
 - `host list` shows each Saved host's Link state: `connected`, `connecting`, `needs login` or
   `version mismatch`, and `daemon not running` when the daemon is stopped. `outpost` is the
   rowser version on the host. With no Saved hosts it prints `no Saved hosts`.
+- When the Outpost on a Saved host has another major version, the Link shows `version
+  mismatch`. With `auto_update = true` (the default) the daemon runs the remote install for that
+  host (with or without the default-browser part, as you added it), notifies you once
+  ("updated rowser on <host> to <version>") and connects again. With `auto_update = false` in
+  the `[[host]]` entry it notifies you once and waits for `rowser remote install <host>`.
 - `host connect` exits 1 when the daemon has not loaded the host; run `rowser reload`, then
   connect again.
 - A Link logs in with `BatchMode`. If that fails, the Link shows `needs login` and stops

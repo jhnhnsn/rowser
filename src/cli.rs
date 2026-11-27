@@ -250,6 +250,9 @@ pub enum RemoteAction {
         /// Test hook: base URL for the release asset download.
         #[arg(long, hide = true)]
         release_url: Option<String>,
+        /// Install only the binary (a host with its own desktop).
+        #[arg(long)]
+        no_default_browser: bool,
     },
 }
 
@@ -356,8 +359,14 @@ pub fn run(command: Command) -> ExitCode {
                     host,
                     local_build,
                     release_url,
+                    no_default_browser,
                 },
-        } => crate::remote_install::install_main(&host, local_build, release_url),
+        } => crate::remote_install::install_main(
+            &host,
+            local_build,
+            release_url,
+            !no_default_browser,
+        ),
     }
 }
 

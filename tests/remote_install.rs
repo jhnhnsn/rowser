@@ -370,6 +370,57 @@ fn install_does_not_write_through_a_planted_environment_d_temp_symlink() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+const MARKER: &str = ".local/share/rowser/no-default-browser";
+
+#[test]
+fn no_default_browser_installs_only_the_binary_and_writes_the_marker() {
+    let dir = temp_dir("nodb");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let local = dir.join("rowser-built");
+    std::fs::write(&local, "LOCAL").unwrap();
+    let xdg = fake_xdg_mime(&dir);
+    let local_s = local.to_str().unwrap();
+
+    let out = run_install_remote(
+        &dir,
+        &home,
+        "Linux x86_64",
+        &["--local-build", local_s, "--no-default-browser"],
+        Some(&xdg),
+    );
+    assert!(out.status.success(), "{out:?}");
+    let bin = home.join(".local/bin");
+    assert_eq!(
+        std::fs::read_to_string(bin.join("rowser")).unwrap(),
+        "LOCAL"
+    );
+    for name in ["xdg-open", "sensible-browser", "www-browser"] {
+        assert!(std::fs::symlink_metadata(bin.join(name)).is_err(), "{name}");
+    }
+    assert!(!home.join(ENV_D).exists());
+    assert!(!home
+        .join(".local/share/applications/rowser.desktop")
+        .exists());
+    assert!(!dir.join("xdg-mime.args").exists());
+    assert!(home.join(MARKER).is_file());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("export BROWSER"), "{stdout}");
+
+    // A full install again removes the marker.
+    let out = run_install_remote(
+        &dir,
+        &home,
+        "Linux x86_64",
+        &["--local-build", local_s],
+        Some(&xdg),
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert!(!home.join(MARKER).exists());
+    assert!(home.join(ENV_D).exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn install_works_with_a_space_in_home() {
     let dir = temp_dir("envdspace");

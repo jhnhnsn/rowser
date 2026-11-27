@@ -44,7 +44,9 @@ pub struct HostArgs {
 }
 
 /// The remote command that finds rowser in the user's login shell.
-pub const FIND_COMMAND: &str = "exec \"$SHELL\" -lc 'command -v rowser'";
+/// It prints the path, then `rowser <version>`. Only `&&`, which fish has
+/// too (fish has no `{ …; }`). The exit status is not read.
+pub const FIND_COMMAND: &str = "exec \"$SHELL\" -lc 'command -v rowser && rowser --version'";
 
 /// Runs one `rowser host` command.
 pub fn run_host(args: HostArgs, out: &mut impl Write, err: &mut impl Write) -> ExitCode {
@@ -90,7 +92,7 @@ fn run_inner(args: HostArgs, out: &mut impl Write) -> Result<(), String> {
             let text = read(&file)?;
             // Refuse an invalid file before ssh runs.
             config::parse(&text).map_err(in_file)?;
-            let remote_path = find_rowser(&host)?;
+            let remote_path = ensure_rowser(&host, default_browser, out)?;
             let saved = SavedHost {
                 name: host.clone(),
                 remote_path: remote_path.clone(),
@@ -183,9 +185,43 @@ pub fn master_args(host: &str, runtime_dir: &Path) -> Vec<String> {
     ]
 }
 
-/// Runs `command -v rowser` on `host` and gives the path. `ssh` keeps the
-/// terminal for its prompts; only stdout is read.
-fn find_rowser(host: &str) -> Result<String, String> {
+/// Where an install puts rowser on the Remote host.
+const INSTALLED_PATH: &str = "~/.local/bin/rowser";
+
+/// rowser on a Remote host, as [`FIND_COMMAND`] found it.
+#[derive(Debug, PartialEq, Eq)]
+struct Found {
+    path: String,
+    /// What `rowser --version` gave (`None`: no answer).
+    version: Option<String>,
+}
+
+/// Reads the output of [`FIND_COMMAND`]: the path line, then the
+/// `rowser <version>` line. A login-shell profile can print lines before
+/// them. `None` when there is no path: `command -v` gives a name, not a
+/// path, for an alias or a function.
+fn parse_found(stdout: &str) -> Option<Found> {
+    let lines: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let (version, rest) = match lines.split_last() {
+        Some((last, rest)) if last.starts_with("rowser ") => {
+            (Some(last["rowser ".len()..].trim().to_string()), rest)
+        }
+        _ => (None, &lines[..]),
+    };
+    let path = rest.last()?;
+    (path.starts_with('/') || path.starts_with('~')).then(|| Found {
+        path: path.to_string(),
+        version,
+    })
+}
+
+/// Runs [`FIND_COMMAND`] on `host`. `ssh` keeps the terminal for its
+/// prompts; only stdout is read. `Ok(None)`: rowser is not there.
+fn find_rowser(host: &str) -> Result<Option<Found>, String> {
     let out = Command::new("ssh")
         .arg(host)
         .arg(FIND_COMMAND)
@@ -196,21 +232,52 @@ fn find_rowser(host: &str) -> Result<String, String> {
     if out.status.code() == Some(255) {
         return Err(format!("ssh to {host} failed ({})", out.status));
     }
-    // A login-shell profile can print lines before the path.
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let path = stdout
-        .lines()
-        .map(str::trim)
-        .rfind(|l| !l.is_empty())
-        .unwrap_or_default()
-        .to_string();
-    // `command -v` gives a name, not a path, for an alias or a function.
-    if !out.status.success() || !(path.starts_with('/') || path.starts_with('~')) {
-        return Err(format!(
-            "rowser is not installed on {host}; run \"rowser remote install {host}\", then add it again"
-        ));
+    // `command -v` fails when rowser is missing; a failed `--version` still
+    // leaves the path.
+    Ok(parse_found(&stdout))
+}
+
+/// The hidden test hook: a local build for the install of `host add`, in
+/// place of the release download.
+pub const TEST_LOCAL_BUILD_VAR: &str = "ROWSER_TEST_LOCAL_BUILD";
+
+/// The binary source of an install from this machine: the release of this
+/// version (or the test hook's local build).
+pub fn install_source() -> Box<dyn crate::remote_install::BinarySource + Send + Sync> {
+    let local = std::env::var_os(TEST_LOCAL_BUILD_VAR)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    crate::remote_install::source_for(local, None)
+}
+
+/// The `remote_path` for `host`: the found rowser when its version is this
+/// one, else the path of a new install.
+fn ensure_rowser(
+    host: &str,
+    default_browser: bool,
+    out: &mut impl Write,
+) -> Result<String, String> {
+    let found = find_rowser(host)?;
+    let local = env!("CARGO_PKG_VERSION");
+    if let Some(f) = &found {
+        if f.version.as_deref() == Some(local) {
+            return Ok(f.path.clone());
+        }
     }
-    Ok(path)
+    let why = match &found {
+        None => "rowser is not installed".to_string(),
+        Some(Found {
+            version: Some(v), ..
+        }) => format!("rowser {v} is installed, not {local}"),
+        Some(_) => "the installed rowser gives no version".to_string(),
+    };
+    writeln!(out, "rowser: {why} on {host}; installing rowser {local}").map_err(io)?;
+    let source = install_source();
+    let installed = crate::remote_install::install(host, source.as_ref(), default_browser)
+        .map_err(|e| format!("install on {host} failed: {e}"))?;
+    crate::remote_install::write_report(out, host, default_browser, &installed).map_err(io)?;
+    Ok(INSTALLED_PATH.into())
 }
 
 /// `g14  connected  since <time>  last connected <time>  outpost 1.0.0`: the
