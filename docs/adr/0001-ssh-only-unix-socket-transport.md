@@ -11,3 +11,8 @@ user and root.
 - mosh is not supported: it has no SSH channel to carry the Tunnel. Do not "fix" this by adding a
   relay transport without revisiting this ADR.
 - rowser has no crypto or credentials of its own.
+
+## Note (2026-11-27)
+
+Still SSH only, but since ADR 0010 the transport is the Link's stdio, not a forwarded Unix
+socket. A direct LAN or Tailscale transport was considered again and rejected for v1.0 (ADR 0009).

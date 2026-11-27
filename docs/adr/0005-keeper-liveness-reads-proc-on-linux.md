@@ -28,3 +28,7 @@ This keeps ADR 0004; it changes only how "stops listening" is detected.
 
 - On macOS remotes the TIME-WAIT delay can still happen; the forward then ends up to about 60
   seconds late, which is harmless but keeps the `ssh` session open that long.
+
+## Note (2026-11-27)
+
+Since ADR 0010 the Outpost, not a Keeper, runs this check.

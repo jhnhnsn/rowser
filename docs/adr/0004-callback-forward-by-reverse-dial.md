@@ -1,3 +1,7 @@
+---
+status: dial mechanism superseded by ADR 0010
+---
+
 # Callback forwards reverse-dial through the Tunnel
 
 A Callback forward needs connections to flow from the Local machine to the Remote host, but the

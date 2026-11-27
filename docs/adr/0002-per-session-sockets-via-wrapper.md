@@ -1,3 +1,7 @@
+---
+status: superseded by ADR 0009
+---
+
 # Per-session sockets through the Wrapper, not a fixed ssh_config path
 
 opener-style tools use one fixed `RemoteForward` path. Without `StreamLocalBindUnlink yes` in the

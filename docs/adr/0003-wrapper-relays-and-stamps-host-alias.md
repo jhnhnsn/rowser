@@ -1,3 +1,7 @@
+---
+status: superseded by ADR 0009
+---
+
 # The Wrapper relays the Tunnel and stamps the Host alias
 
 The Tunnel ends at a per-session socket owned by the Wrapper, not at the Daemon. The Wrapper

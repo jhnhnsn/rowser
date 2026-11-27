@@ -6,66 +6,49 @@ machine, and carries OAuth callbacks back to the remote host.
 ## Places
 
 **Local machine**:
-The machine the user sits at, with a desktop and a browser. Runs the Daemon and the Wrapper.
+The machine the user sits at, with a desktop and a browser. Runs the Daemon.
 _Avoid_: client, laptop, desktop
 
 **Remote host**:
-A headless machine the user connects to over SSH. Runs the Shim.
+A headless machine the user connects to over SSH. Runs the Shim and the Outpost.
 _Avoid_: server, box, headless machine
+
+**Saved host**:
+A Remote host that the user added to rowser, so that the Daemon keeps a Link to it.
+_Avoid_: known host, paired host, configured host
 
 ## Parts
 
 **Daemon**:
-The long-running process on the Local machine that receives Open requests and opens URLs in
-the browser.
+The long-running process on the Local machine that keeps the Links, receives Open requests and
+opens URLs in the browser.
 _Avoid_: server, agent, rowserd (except as the socket's file name)
-
-**Wrapper**:
-The `rowser ssh` command on the Local machine that starts an SSH session with a Tunnel and
-relays the Tunnel to the Daemon for the life of that session.
-_Avoid_: ssh shim, launcher
 
 **Shim**:
 The `rowser open` command on the Remote host, also reached through the `xdg-open`,
 `sensible-browser` and `www-browser` names and through `BROWSER`.
 _Avoid_: client, opener, fake xdg-open
 
+**Outpost**:
+The long-running rowser process on a Remote host, at the far end of a Link, that takes the
+Shim's Open requests and carries Callback forwards.
+_Avoid_: agent, remote daemon, server, keeper
+
 ## Connection
 
-**Tunnel**:
-The SSH remote forward that joins a Session socket on the Remote host to the Wrapper (or
-directly to the Daemon) on the Local machine.
-_Avoid_: forward (reserved for Callback forward), pipe, channel
+**Link**:
+The SSH connection that the Daemon keeps open to one Saved host, with the Outpost at its far end.
+_Avoid_: tunnel, session, channel
 
-**Session socket**:
-The Unix socket on the Remote host that one SSH session's Tunnel listens on.
-_Avoid_: remote socket, opener socket
-
-**Stale socket**:
-A Session socket file left behind after its SSH session ended, which no longer accepts
-connections.
-_Avoid_: dead socket, orphan
-
-**Direct socket**:
-The Daemon's socket for Tunnels that reach it without a Wrapper. Requests on it carry only a
-Reported host name.
-_Avoid_: main socket, daemon socket
-
-**Relay socket**:
-The Daemon's socket that only Wrappers connect to. Every connection on it carries a Host alias.
-_Avoid_: wrapper socket, trusted socket
-
-**Host stamp**:
-The Host alias that a Wrapper attaches to a connection it relays.
-_Avoid_: host header, tag
+**Outpost socket**:
+The Unix socket on the Remote host where the Outpost takes the Shim's connections. There is one
+for each user on the host.
+_Avoid_: session socket, remote socket
 
 **Host alias**:
-The host name the user typed to the Wrapper. It is the trusted name of a Remote host.
-_Avoid_: hostname, host label
-
-**Reported host name**:
-The host name that a Shim claims for itself. It is shown to the user but never trusted.
-_Avoid_: hostname
+The name of a Saved host, as the user gave it to `rowser host add` and as the Daemon gives it to
+`ssh`. It is the trusted name of a Remote host.
+_Avoid_: hostname, host label, reported host name
 
 ## Requests
 
@@ -79,13 +62,8 @@ _Avoid_: redirect port, OAuth port, listener
 
 **Callback forward**:
 The temporary path that carries browser connections to a Callback port on the Local machine
-through the Tunnel to the same Callback port on the Remote host.
-_Avoid_: port forward, tunnel (reserved for Tunnel), proxy
-
-**Keeper**:
-The detached `rowser __keeper` process on the Remote host that holds one Callback forward. It
-dials the Callback port for each browser connection and carries the bytes through the Tunnel.
-_Avoid_: helper, background shim, daemon (reserved for Daemon)
+through the Link to the same Callback port on the Remote host.
+_Avoid_: port forward, tunnel, proxy
 
 **Confirmed host**:
 A Remote host whose Open requests wait for the user to approve them before the browser opens.
@@ -115,7 +93,3 @@ _Avoid_: account, persona, space
 **Control socket**:
 The Daemon's socket for rowser commands run by the same user on the Local machine.
 _Avoid_: admin socket, API socket
-
-**Session**:
-One SSH session started by a Wrapper, from its start until `ssh` exits.
-_Avoid_: connection, tunnel (reserved for Tunnel)
