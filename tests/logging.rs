@@ -17,20 +17,16 @@ const EXE: &str = env!("CARGO_BIN_EXE_rowser");
 /// before it.
 fn daemon(
     dir: &Path,
-    open_command: &str,
+    config_text: &str,
     log: Option<&str>,
 ) -> (Child, mpsc::Receiver<String>, Vec<String>) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-    // Never read the real config. `[unverified]` opens at once, so the
-    // direct-socket request below gives a plain notification.
+    // Never read the real config.
     let config = dir.join("config");
     std::fs::create_dir_all(config.join("rowser")).unwrap();
-    std::fs::write(
-        config.join("rowser").join("config.toml"),
-        "[unverified]\nopen = \"system\"\n",
-    )
-    .unwrap();
+    std::fs::write(config.join("rowser").join("config.toml"), config_text).unwrap();
+    let open_command = "true {url}";
     let mut cmd = Command::new(EXE);
     cmd.arg("daemon")
         .env("XDG_CONFIG_HOME", &config)
@@ -71,7 +67,6 @@ fn daemon(
 }
 
 /// Lines that arrive within `wait`.
-#[cfg(target_os = "linux")]
 fn drain(rx: &mpsc::Receiver<String>, wait: Duration) -> Vec<String> {
     let mut out = Vec::new();
     while let Ok(line) = rx.recv_timeout(wait) {
@@ -83,40 +78,27 @@ fn drain(rx: &mpsc::Receiver<String>, wait: Duration) -> Vec<String> {
 #[test]
 fn rowser_log_debug_shows_debug_lines_on_stderr() {
     let dir = TmpDir::new("logd");
-    let (mut child, _rx, early) = daemon(&dir.0, "true {url}", Some("debug"));
+    let (mut child, _rx, early) = daemon(&dir.0, "", Some("debug"));
     child.kill().unwrap();
     child.wait().unwrap();
     assert!(early.iter().any(|l| l.contains("DEBUG")), "{early:?}");
 }
 
-// The notification fails only where notify-rust uses DBUS_SESSION_BUS_ADDRESS.
-#[cfg(target_os = "linux")]
 #[test]
-fn without_rowser_log_a_failed_notification_shows_one_warning() {
+fn without_rowser_log_an_unverified_entry_shows_one_warning() {
     let dir = TmpDir::new("logw");
-    let (mut child, rx, early) = daemon(&dir.0, "true {url}", None);
-    assert!(early.is_empty(), "{early:?}");
-    let out = Command::new(EXE)
-        .args(["open", "https://example.com/"])
-        .env("ROWSER_SOCKET", dir.0.join("rowserd.sock"))
-        .env_remove("ROWSER_LOG")
-        // With no tunnel, a graphical session would run the real xdg-open.
-        .env_remove("DISPLAY")
-        .env_remove("WAYLAND_DISPLAY")
-        .output()
-        .unwrap();
-    let lines = drain(&rx, Duration::from_millis(1000));
+    let (mut child, rx, early) = daemon(&dir.0, "[unverified]\nopen = \"system\"\n", None);
+    let mut lines = early;
+    lines.extend(drain(&rx, Duration::from_millis(300)));
     child.kill().unwrap();
     child.wait().unwrap();
     let warns: Vec<_> = lines.iter().filter(|l| l.contains("WARN")).collect();
     assert_eq!(warns.len(), 1, "{lines:?}");
-    assert!(warns[0].contains("notification failed"), "{lines:?}");
-    assert!(!lines.iter().any(|l| l.contains("DEBUG")), "{lines:?}");
-    // The shim prints nothing to stdout for a log line.
     assert!(
-        !String::from_utf8_lossy(&out.stdout).contains("WARN"),
-        "{out:?}"
+        warns[0].contains("the [unverified] entry is removed and ignored"),
+        "{lines:?}"
     );
+    assert!(!lines.iter().any(|l| l.contains("DEBUG")), "{lines:?}");
 }
 
 #[test]

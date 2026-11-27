@@ -10,14 +10,17 @@ use common::TmpDir;
 use rowser::config::Target;
 use rowser::daemon::testing::{Answer, RecordingNotifier, RecordingOpener, ScriptedNotifier};
 use rowser::daemon::{
-    bind_sockets, CommandOpener, Daemon, DaemonConfig, NoticeHost, Notifier, Opener, DIRECT_SOCKET,
-    FORWARD_NOT_APPROVED, NOT_APPROVED, RELAY_SOCKET,
+    bind_sockets, CommandOpener, Daemon, DaemonConfig, NoticeHost, Notifier, Opener,
+    FORWARD_NOT_APPROVED, NOT_APPROVED,
 };
 use rowser::protocol::{Conn, Hello, Msg, CONTROL_SOCKET};
 use rowser::routes::Routes;
 use script::write_script;
 use tokio::net::UnixStream;
 use url::Url;
+
+/// The Saved hosts that have a test Link in each Harness.
+const ALIASES: &[&str] = &["devbox", "b", "g14", "db1", "db.prod", "DB.prod"];
 
 struct Harness<N = RecordingNotifier> {
     dir: TmpDir,
@@ -36,10 +39,21 @@ impl<N: Notifier + Clone> Harness<N> {
     async fn with(config: DaemonConfig, notifier: N) -> Harness<N> {
         let dir = TmpDir::new("d");
         let run = dir.0.join("run");
-        let (direct, relay, control) = bind_sockets(&run).unwrap();
+        let control = bind_sockets(&run).unwrap();
         let opener = RecordingOpener::default();
         let daemon = Daemon::new(config, opener.clone(), notifier.clone());
-        tokio::spawn(daemon.serve(direct, relay, control));
+        let links = ALIASES
+            .iter()
+            .enumerate()
+            .map(|(i, alias)| {
+                let path = run.join(format!("link-{i}.sock"));
+                (
+                    alias.to_string(),
+                    tokio::net::UnixListener::bind(path).unwrap(),
+                )
+            })
+            .collect();
+        tokio::spawn(daemon.serve_with_test_links(control, links));
         Harness {
             dir,
             opener,
@@ -54,15 +68,10 @@ impl<N: Notifier + Clone> Harness<N> {
         Conn::connect(stream, Hello::current()).await.unwrap()
     }
 
-    /// Connects to the relay socket and sends the Host stamp `alias`.
-    async fn connect_relay(&self, alias: &str) -> Conn<UnixStream> {
-        let mut conn = self.connect(RELAY_SOCKET).await;
-        conn.send(&Msg::HostStamp {
-            alias: alias.into(),
-        })
-        .await
-        .unwrap();
-        conn
+    /// Connects to the test Link of the Saved host `alias`.
+    async fn connect_link(&self, alias: &str) -> Conn<UnixStream> {
+        let i = ALIASES.iter().position(|a| *a == alias).expect("alias");
+        self.connect(&format!("link-{i}.sock")).await
     }
 
     fn run(&self) -> std::path::PathBuf {
@@ -77,7 +86,6 @@ impl<N: Notifier + Clone> Harness<N> {
 fn open(url: &str) -> Msg {
     Msg::Open {
         url: url.into(),
-        reported_host: "devbox.internal".into(),
         callback_ports: vec![],
     }
 }
@@ -95,9 +103,9 @@ fn error_of(reply: &Msg) -> Option<&str> {
 }
 
 #[tokio::test]
-async fn direct_socket_opens_http_and_https() {
+async fn a_link_opens_http_and_https() {
     let h = Harness::start().await;
-    let mut conn = h.connect(DIRECT_SOCKET).await;
+    let mut conn = h.connect_link("devbox").await;
     for url in ["http://example.com/a", "https://example.com/b?c=d"] {
         let reply = request(&mut conn, open(url)).await;
         assert_eq!(error_of(&reply), None, "{url}");
@@ -111,7 +119,7 @@ async fn direct_socket_opens_http_and_https() {
 #[tokio::test]
 async fn other_schemes_are_rejected_and_not_opened() {
     let h = Harness::start().await;
-    let mut conn = h.connect(DIRECT_SOCKET).await;
+    let mut conn = h.connect_link("devbox").await;
     for url in ["file:///etc/passwd", "javascript:alert(1)", "not a url"] {
         let reply = request(&mut conn, open(url)).await;
         assert!(error_of(&reply).is_some(), "{url}");
@@ -121,40 +129,9 @@ async fn other_schemes_are_rejected_and_not_opened() {
 }
 
 #[tokio::test]
-async fn direct_socket_notice_marks_the_reported_host_as_unverified() {
+async fn a_link_uses_the_alias_of_its_saved_host() {
     let h = Harness::start().await;
-    let mut conn = h.connect(DIRECT_SOCKET).await;
-    request(&mut conn, open("https://example.com/")).await;
-    let notices = h.notifier.notices();
-    assert_eq!(notices.len(), 1);
-    assert_eq!(
-        notices[0].host,
-        NoticeHost::Reported("devbox.internal".into())
-    );
-    assert!(notices[0].body().contains("devbox.internal (unverified)"));
-}
-
-#[tokio::test]
-async fn direct_socket_rejects_a_host_stamp() {
-    let h = Harness::start().await;
-    let mut conn = h.connect(DIRECT_SOCKET).await;
-    let reply = request(
-        &mut conn,
-        Msg::HostStamp {
-            alias: "devbox".into(),
-        },
-    )
-    .await;
-    assert!(error_of(&reply).is_some());
-    // The daemon closes the connection after the rejection.
-    assert!(matches!(conn.recv().await, Ok(None) | Err(_)));
-    assert!(h.opened().is_empty());
-}
-
-#[tokio::test]
-async fn relay_socket_uses_the_host_alias_from_the_stamp() {
-    let h = Harness::start().await;
-    let mut conn = h.connect_relay("devbox").await;
+    let mut conn = h.connect_link("devbox").await;
     let reply = request(&mut conn, open("https://example.com/")).await;
     assert_eq!(error_of(&reply), None);
     assert_eq!(h.opened(), ["https://example.com/"]);
@@ -164,29 +141,11 @@ async fn relay_socket_uses_the_host_alias_from_the_stamp() {
 }
 
 #[tokio::test]
-async fn relay_socket_rejects_a_connection_without_a_stamp() {
+async fn ping_answers_pong_with_the_version_on_a_link() {
     let h = Harness::start().await;
-    let mut conn = h.connect(RELAY_SOCKET).await;
-    let reply = request(&mut conn, open("https://example.com/")).await;
-    assert!(error_of(&reply).is_some());
-    assert!(matches!(conn.recv().await, Ok(None) | Err(_)));
-    assert!(h.opened().is_empty());
-}
-
-#[tokio::test]
-async fn ping_answers_pong_with_the_version_on_both_sockets() {
-    let h = Harness::start().await;
-    let mut direct = h.connect(DIRECT_SOCKET).await;
+    let mut link = h.connect_link("b").await;
     assert_eq!(
-        request(&mut direct, Msg::Ping).await,
-        Msg::Pong {
-            version: Hello::current().version(),
-            rowser_version: Some(env!("CARGO_PKG_VERSION").into()),
-        }
-    );
-    let mut relay = h.connect_relay("b").await;
-    assert_eq!(
-        request(&mut relay, Msg::Ping).await,
+        request(&mut link, Msg::Ping).await,
         Msg::Pong {
             version: Hello::current().version(),
             rowser_version: Some(env!("CARGO_PKG_VERSION").into()),
@@ -195,9 +154,9 @@ async fn ping_answers_pong_with_the_version_on_both_sockets() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn rate_limit_allows_five_opens_per_ten_seconds_per_connection() {
+async fn rate_limit_allows_five_opens_per_ten_seconds_per_link() {
     let h = Harness::start().await;
-    let mut conn = h.connect(DIRECT_SOCKET).await;
+    let mut conn = h.connect_link("devbox").await;
     for i in 0..5 {
         let reply = request(&mut conn, open(&format!("https://example.com/{i}"))).await;
         assert_eq!(error_of(&reply), None, "request {i}");
@@ -205,8 +164,8 @@ async fn rate_limit_allows_five_opens_per_ten_seconds_per_connection() {
     let reply = request(&mut conn, open("https://example.com/5")).await;
     assert!(error_of(&reply).is_some());
 
-    // Another connection has its own budget.
-    let mut other = h.connect(DIRECT_SOCKET).await;
+    // Another Link has its own budget.
+    let mut other = h.connect_link("b").await;
     let reply = request(&mut other, open("https://example.com/other")).await;
     assert_eq!(error_of(&reply), None);
 
@@ -220,7 +179,7 @@ async fn rate_limit_allows_five_opens_per_ten_seconds_per_connection() {
 #[tokio::test(start_paused = true)]
 async fn rate_limit_counts_rejected_scheme_requests() {
     let h = Harness::start().await;
-    let mut conn = h.connect(DIRECT_SOCKET).await;
+    let mut conn = h.connect_link("devbox").await;
     let reply = request(&mut conn, open("https://example.com/")).await;
     assert_eq!(error_of(&reply), None);
     let reply = request(&mut conn, open("file:///etc/passwd")).await;
@@ -237,33 +196,19 @@ async fn rate_limit_counts_rejected_scheme_requests() {
 #[tokio::test]
 async fn notice_body_strips_control_characters_and_escapes_markup() {
     let h = Harness::start().await;
-    let mut conn = h.connect(DIRECT_SOCKET).await;
-    let forged = Msg::Open {
-        url: "https://example.com/?a=1&b=2".into(),
-        reported_host: "devbox\n<b>trusted</b> <a href=\"x\">\u{202e}".into(),
-        callback_ports: vec![],
-    };
-    request(&mut conn, forged).await;
+    let mut conn = h.connect_link("devbox").await;
+    request(&mut conn, open("https://example.com/?a=1&b=2\n<b>x</b>")).await;
     let body = h.notifier.notices()[0].body();
     assert_eq!(
         body,
-        "From devbox&lt;b&gt;trusted&lt;/b&gt; &lt;a href=&quot;x&quot;&gt; (unverified): \
-         https://example.com/?a=1&amp;b=2"
+        "From devbox: https://example.com/?a=1&amp;b=2%3Cb%3Ex%3C/b%3E"
     );
 }
 
 /// A Daemon with `--confirm-hosts` patterns and a scripted Notifier answer.
-async fn confirm_harness(
-    patterns: &[&str],
-    unverified: bool,
-    answer: Answer,
-) -> Harness<ScriptedNotifier> {
+async fn confirm_harness(patterns: &[&str], answer: Answer) -> Harness<ScriptedNotifier> {
     let config = DaemonConfig {
         confirm_hosts: patterns.iter().map(|p| p.to_string()).collect(),
-        confirm_unverified: unverified,
-        // Without this, `[unverified]` asks by default; these tests check
-        // `--confirm-hosts` alone.
-        routes: routes("[unverified]\nopen = \"system\"\n"),
         ..DaemonConfig::default()
     };
     Harness::with(config, ScriptedNotifier::new(answer)).await
@@ -291,7 +236,7 @@ const G14: &str = "[[route]]\nhost = \"g14\"\nopen = \"system\"\n\n\
 #[tokio::test]
 async fn a_host_alias_reaches_the_opener_with_its_routes_target() {
     let h = routed_harness(G14, Answer::Deny).await;
-    let mut conn = h.connect_relay("g14").await;
+    let mut conn = h.connect_link("g14").await;
     assert_eq!(
         error_of(&request(&mut conn, open("https://example.com/a")).await),
         None
@@ -346,12 +291,12 @@ async fn a_route_to_a_found_browser_reaches_the_opener_with_the_resolved_target(
         ..DaemonConfig::default()
     };
     let h = Harness::with(config, RecordingNotifier::default()).await;
-    let mut conn = h.connect_relay("g14").await;
+    let mut conn = h.connect_link("g14").await;
     assert_eq!(
         error_of(&request(&mut conn, open("https://example.com/a")).await),
         None
     );
-    let mut conn = h.connect_relay("db1").await;
+    let mut conn = h.connect_link("db1").await;
     assert_eq!(
         error_of(&request(&mut conn, open("https://example.com/b")).await),
         None
@@ -425,7 +370,7 @@ fn command_opener_runs_the_browser_argv_without_a_shell() {
 #[tokio::test]
 async fn an_unmatched_alias_goes_to_default_and_a_browser_target_falls_back_with_a_warning() {
     let h = routed_harness(G14, Answer::Deny).await;
-    let mut conn = h.connect_relay("db1").await;
+    let mut conn = h.connect_link("db1").await;
     assert_eq!(
         error_of(&request(&mut conn, open("https://example.com/b")).await),
         None
@@ -444,7 +389,7 @@ async fn an_unmatched_alias_goes_to_default_and_a_browser_target_falls_back_with
 #[tokio::test]
 async fn first_route_wins_so_ask_true_on_a_later_route_is_not_used() {
     let h = routed_harness(G14, Answer::Deny).await;
-    let mut conn = h.connect_relay("g14").await;
+    let mut conn = h.connect_link("g14").await;
     assert_eq!(
         error_of(&request(&mut conn, open("https://mail.google.com/")).await),
         None
@@ -456,7 +401,7 @@ async fn first_route_wins_so_ask_true_on_a_later_route_is_not_used() {
 async fn ask_true_on_a_route_waits_for_the_user() {
     let text = "[[route]]\nhost = \"g14\"\nopen = \"system\"\nask = true\n";
     let h = routed_harness(text, Answer::Deny).await;
-    let mut conn = h.connect_relay("g14").await;
+    let mut conn = h.connect_link("g14").await;
     let reply = request(&mut conn, open("https://example.com/")).await;
     assert_eq!(error_of(&reply), Some(NOT_APPROVED));
     assert!(h.opened().is_empty());
@@ -467,7 +412,7 @@ async fn ask_true_on_a_route_waits_for_the_user() {
 async fn an_ask_target_opens_in_system_after_open() {
     let text = "[[route]]\nhost = \"g14\"\nopen = \"ask\"\n[default]\nopen = \"ask\"\n";
     let h = routed_harness(text, Answer::Approve).await;
-    let mut conn = h.connect_relay("g14").await;
+    let mut conn = h.connect_link("g14").await;
     assert_eq!(
         error_of(&request(&mut conn, open("https://example.com/")).await),
         None
@@ -477,25 +422,10 @@ async fn an_ask_target_opens_in_system_after_open() {
 }
 
 #[tokio::test]
-async fn a_browser_target_on_unverified_falls_back_to_an_ask_default_and_waits() {
-    let text = "[unverified]\nopen = \"safari\"\n[default]\nopen = \"ask\"\n";
-    let h = routed_harness(text, Answer::Deny).await;
-    let mut conn = h.connect(DIRECT_SOCKET).await;
-    let msg = Msg::Open {
-        url: "https://example.com/".into(),
-        reported_host: "devbox".into(),
-        callback_ports: vec![],
-    };
-    assert_eq!(error_of(&request(&mut conn, msg).await), Some(NOT_APPROVED));
-    assert!(h.opened().is_empty());
-    assert_eq!(h.notifier.confirms().len(), 1);
-}
-
-#[tokio::test]
 async fn a_browser_target_on_a_route_falls_back_to_an_ask_default_and_waits() {
     let text = "[[route]]\nhost = \"g14\"\nopen = \"chrome:Work\"\n[default]\nopen = \"ask\"\n";
     let h = routed_harness(text, Answer::Deny).await;
-    let mut conn = h.connect_relay("g14").await;
+    let mut conn = h.connect_link("g14").await;
     let reply = request(&mut conn, open("https://example.com/")).await;
     assert_eq!(error_of(&reply), Some(NOT_APPROVED));
     assert!(h.opened().is_empty());
@@ -508,25 +438,10 @@ async fn a_browser_target_falls_back_with_a_warning_in_the_notice() {
         Answer::Approve,
     )
     .await;
-    let mut conn = h.connect_relay("g14").await;
+    let mut conn = h.connect_link("g14").await;
     request(&mut conn, open("https://example.com/")).await;
     let body = h.notifier.notices()[0].body();
     assert!(body.contains("target `safari` is not available"), "{body}");
-}
-
-#[tokio::test]
-async fn a_reported_host_named_like_a_route_never_uses_that_route() {
-    let h = routed_harness(G14, Answer::Deny).await;
-    let mut conn = h.connect(DIRECT_SOCKET).await;
-    let msg = Msg::Open {
-        url: "https://example.com/".into(),
-        reported_host: "g14".into(),
-        callback_ports: vec![],
-    };
-    // `[unverified]` defaults to `ask`; the `g14` Route would open at once.
-    assert_eq!(error_of(&request(&mut conn, msg).await), Some(NOT_APPROVED));
-    assert!(h.opened().is_empty());
-    assert_eq!(h.notifier.confirms().len(), 1);
 }
 
 #[tokio::test]
@@ -537,7 +452,7 @@ async fn confirm_hosts_asks_first_on_top_of_a_route() {
         ..DaemonConfig::default()
     };
     let h = Harness::with(config, ScriptedNotifier::new(Answer::Deny)).await;
-    let mut conn = h.connect_relay("g14").await;
+    let mut conn = h.connect_link("g14").await;
     let reply = request(&mut conn, open("https://example.com/")).await;
     assert_eq!(error_of(&reply), Some(NOT_APPROVED));
 }
@@ -589,8 +504,8 @@ fn an_invalid_config_file_stops_the_daemon_with_the_file_and_line() {
 
 #[tokio::test]
 async fn confirmed_host_opens_after_the_user_approves() {
-    let h = confirm_harness(&["*.prod"], false, Answer::Approve).await;
-    let mut conn = h.connect_relay("db.prod").await;
+    let h = confirm_harness(&["*.prod"], Answer::Approve).await;
+    let mut conn = h.connect_link("db.prod").await;
     let reply = request(&mut conn, open("https://example.com/ok")).await;
     assert_eq!(error_of(&reply), None);
     assert_eq!(h.opened(), ["https://example.com/ok"]);
@@ -601,8 +516,8 @@ async fn confirmed_host_opens_after_the_user_approves() {
 
 #[tokio::test]
 async fn confirmed_host_is_not_opened_when_the_user_denies() {
-    let h = confirm_harness(&["db.prod"], false, Answer::Deny).await;
-    let mut conn = h.connect_relay("DB.prod").await;
+    let h = confirm_harness(&["db.prod"], Answer::Deny).await;
+    let mut conn = h.connect_link("DB.prod").await;
     let reply = request(&mut conn, open("https://example.com/no")).await;
     assert_eq!(error_of(&reply), Some(NOT_APPROVED));
     assert!(h.opened().is_empty());
@@ -611,8 +526,8 @@ async fn confirmed_host_is_not_opened_when_the_user_denies() {
 
 #[tokio::test(start_paused = true)]
 async fn confirmed_host_is_not_opened_after_the_timeout() {
-    let h = confirm_harness(&["db*"], false, Answer::Hang).await;
-    let mut conn = h.connect_relay("db1").await;
+    let h = confirm_harness(&["db*"], Answer::Hang).await;
+    let mut conn = h.connect_link("db1").await;
     let asked = tokio::spawn(async move {
         let reply = request(&mut conn, open("https://example.com/late")).await;
         error_of(&reply).map(str::to_owned)
@@ -639,37 +554,13 @@ async fn confirmed_host_is_not_opened_after_the_timeout() {
 
 #[tokio::test]
 async fn non_matching_host_opens_immediately() {
-    let h = confirm_harness(&["*.prod"], false, Answer::Deny).await;
-    let mut conn = h.connect_relay("devbox").await;
+    let h = confirm_harness(&["*.prod"], Answer::Deny).await;
+    let mut conn = h.connect_link("devbox").await;
     let reply = request(&mut conn, open("https://example.com/now")).await;
     assert_eq!(error_of(&reply), None);
     assert_eq!(h.opened(), ["https://example.com/now"]);
     assert!(h.notifier.confirms().is_empty());
     assert_eq!(h.notifier.notices().len(), 1);
-}
-
-#[tokio::test]
-async fn direct_socket_ignores_confirm_hosts_without_confirm_unverified() {
-    let h = confirm_harness(&["devbox.*"], false, Answer::Deny).await;
-    let mut conn = h.connect(DIRECT_SOCKET).await;
-    let reply = request(&mut conn, open("https://example.com/d")).await;
-    assert_eq!(error_of(&reply), None);
-    assert_eq!(h.opened(), ["https://example.com/d"]);
-    assert!(h.notifier.confirms().is_empty());
-}
-
-#[tokio::test]
-async fn confirm_unverified_matches_the_reported_host_name() {
-    let h = confirm_harness(&["devbox.*"], true, Answer::Deny).await;
-    let mut conn = h.connect(DIRECT_SOCKET).await;
-    let reply = request(&mut conn, open("https://example.com/d")).await;
-    assert_eq!(error_of(&reply), Some(NOT_APPROVED));
-    assert!(h.opened().is_empty());
-    let asked = h.notifier.confirms();
-    assert_eq!(
-        asked[0].host,
-        NoticeHost::Reported("devbox.internal".into())
-    );
 }
 
 #[tokio::test]
@@ -681,7 +572,7 @@ async fn bind_refuses_an_existing_directory_open_to_others() {
     let err = bind_sockets(&run).unwrap_err();
     assert!(err.to_string().contains("0700"), "{err}");
     assert_eq!(mode(&run), 0o755, "the directory is not changed");
-    assert!(!run.join(DIRECT_SOCKET).exists());
+    assert!(!run.join(CONTROL_SOCKET).exists());
 }
 
 #[tokio::test]
@@ -690,32 +581,31 @@ async fn bind_accepts_an_existing_private_directory() {
     let run = dir.0.join("run");
     std::fs::create_dir(&run).unwrap();
     std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let _listeners = bind_sockets(&run).unwrap();
-    assert_eq!(mode(&run.join(DIRECT_SOCKET)), 0o600);
+    let _listener = bind_sockets(&run).unwrap();
+    assert_eq!(mode(&run.join(CONTROL_SOCKET)), 0o600);
 }
 
 #[tokio::test]
-async fn sockets_are_0600_in_a_0700_directory() {
+async fn the_control_socket_is_0600_in_a_0700_directory() {
     let dir = TmpDir::new("d");
     let run = dir.0.join("run");
-    let _listeners = bind_sockets(&run).unwrap();
+    let _listener = bind_sockets(&run).unwrap();
     assert_eq!(mode(&run), 0o700);
-    assert_eq!(mode(&run.join(DIRECT_SOCKET)), 0o600);
-    assert_eq!(mode(&run.join(RELAY_SOCKET)), 0o600);
+    assert_eq!(mode(&run.join(CONTROL_SOCKET)), 0o600);
 }
 
-/// Held by tests that start child processes, and by the Stale socket test: a
-/// fork in another test thread holds a copy of a closed listener until exec,
-/// so the Stale socket can look live for a moment.
+/// Held by tests that start child processes, and by the stale control socket
+/// test: a fork in another test thread holds a copy of a closed listener
+/// until exec, so the old socket can look live for a moment.
 static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[tokio::test]
-async fn bind_replaces_a_stale_socket_but_not_a_live_one() {
+async fn bind_replaces_a_stale_control_socket_but_not_a_live_one() {
     let _spawn = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     let dir = TmpDir::new("d");
     let run = dir.0.join("run");
     drop(bind_sockets(&run).unwrap());
-    let live = bind_sockets(&run).expect("stale sockets are replaced");
+    let live = bind_sockets(&run).expect("a stale control socket is replaced");
     assert!(bind_sockets(&run).is_err(), "a live daemon is not replaced");
     drop(live);
 }
@@ -830,7 +720,6 @@ async fn forward_ports(run: &Path) -> Vec<u16> {
 fn open_with_port(url: &str, port: u16) -> Msg {
     Msg::Open {
         url: url.into(),
-        reported_host: "devbox.internal".into(),
         callback_ports: vec![port],
     }
 }
@@ -848,7 +737,7 @@ async fn forward_confirm_harness(answer: Answer) -> Harness<ScriptedNotifier> {
 async fn denied_url_with_callback_port_binds_no_forward() {
     let h = forward_confirm_harness(Answer::Deny).await;
     let port = free_port();
-    let mut conn = h.connect_relay("db.prod").await;
+    let mut conn = h.connect_link("db.prod").await;
     let reply = request(&mut conn, open_with_port("https://example.com/", port)).await;
     assert_eq!(error_of(&reply), Some(NOT_APPROVED));
     assert!(matches!(
@@ -863,8 +752,8 @@ async fn denied_url_with_callback_port_binds_no_forward() {
     assert_eq!(forward_ports(&h.run()).await, [] as [u16; 0], "port {port}");
 }
 
-/// The warning for a Callback port of a request with no Link (the Wrapper's
-/// sockets). Forwards through a Link: tests/callback.rs.
+/// The warning for a Callback port on a test Link, which has no yamux
+/// session. Forwards through a real Link: tests/callback.rs.
 fn no_link_warning(port: u16) -> String {
     format!("callback forwards need a Link to a Saved host; port {port} is not forwarded")
 }
@@ -882,10 +771,10 @@ fn assert_no_link_forward(reply: &Msg, port: u16) {
 }
 
 #[tokio::test]
-async fn approved_url_with_callback_port_on_the_relay_socket_gets_no_forward() {
+async fn approved_url_with_callback_port_on_a_test_link_gets_no_forward() {
     let h = forward_confirm_harness(Answer::Approve).await;
     let port = free_port();
-    let mut conn = h.connect_relay("db.prod").await;
+    let mut conn = h.connect_link("db.prod").await;
     let reply = request(&mut conn, open_with_port("https://example.com/", port)).await;
     assert_no_link_forward(&reply, port);
     assert_eq!(forward_ports(&h.run()).await, [] as [u16; 0]);
@@ -893,7 +782,6 @@ async fn approved_url_with_callback_port_on_the_relay_socket_gets_no_forward() {
 
 fn manual_forward(port: u16) -> Msg {
     Msg::Forward {
-        reported_host: "devbox.internal".into(),
         callback_ports: vec![port],
     }
 }
@@ -902,7 +790,7 @@ fn manual_forward(port: u16) -> Msg {
 async fn denied_manual_forward_binds_nothing() {
     let h = forward_confirm_harness(Answer::Deny).await;
     let port = free_port();
-    let mut conn = h.connect_relay("db.prod").await;
+    let mut conn = h.connect_link("db.prod").await;
     let reply = request(&mut conn, manual_forward(port)).await;
     assert_eq!(error_of(&reply), Some(FORWARD_NOT_APPROVED));
     assert_eq!(forward_ports(&h.run()).await, [] as [u16; 0]);
@@ -917,10 +805,10 @@ async fn denied_manual_forward_binds_nothing() {
 }
 
 #[tokio::test]
-async fn approved_manual_forward_on_the_relay_socket_gets_no_forward_and_a_notice() {
+async fn approved_manual_forward_on_a_test_link_gets_no_forward_and_a_notice() {
     let h = forward_confirm_harness(Answer::Approve).await;
     let port = free_port();
-    let mut conn = h.connect_relay("db.prod").await;
+    let mut conn = h.connect_link("db.prod").await;
     let reply = request(&mut conn, manual_forward(port)).await;
     assert_no_link_forward(&reply, port);
     assert_eq!(h.notifier.confirms().len(), 1);
@@ -940,7 +828,7 @@ async fn approved_manual_forward_on_the_relay_socket_gets_no_forward_and_a_notic
 async fn manual_forward_binds_nothing_after_the_confirmation_timeout() {
     let h = forward_confirm_harness(Answer::Hang).await;
     let port = free_port();
-    let mut conn = h.connect_relay("db.prod").await;
+    let mut conn = h.connect_link("db.prod").await;
     let asked = tokio::spawn(async move {
         let reply = request(&mut conn, manual_forward(port)).await;
         error_of(&reply).map(str::to_owned)
@@ -961,7 +849,7 @@ async fn manual_forward_binds_nothing_after_the_confirmation_timeout() {
 async fn manual_forward_from_a_non_matching_host_shows_a_notice_with_the_port() {
     let h = forward_confirm_harness(Answer::Deny).await;
     let port = free_port();
-    let mut conn = h.connect_relay("devbox").await;
+    let mut conn = h.connect_link("devbox").await;
     let reply = request(&mut conn, manual_forward(port)).await;
     assert_no_link_forward(&reply, port);
     assert!(h.notifier.confirms().is_empty());
@@ -978,24 +866,5 @@ async fn manual_forward_from_a_non_matching_host_shows_a_notice_with_the_port() 
     assert!(
         body.contains("devbox") && body.contains(&port.to_string()),
         "{body}"
-    );
-}
-
-#[tokio::test]
-async fn manual_forward_on_the_direct_socket_matches_the_reported_host_with_confirm_unverified() {
-    let config = DaemonConfig {
-        confirm_hosts: vec!["devbox.*".into()],
-        confirm_unverified: true,
-        loopback: vec!["127.0.0.1".parse().unwrap()],
-        ..DaemonConfig::default()
-    };
-    let h = Harness::with(config, ScriptedNotifier::new(Answer::Deny)).await;
-    let port = free_port();
-    let mut conn = h.connect(DIRECT_SOCKET).await;
-    let reply = request(&mut conn, manual_forward(port)).await;
-    assert_eq!(error_of(&reply), Some(FORWARD_NOT_APPROVED));
-    assert_eq!(
-        h.notifier.confirms()[0].host,
-        NoticeHost::Reported("devbox.internal".into())
     );
 }

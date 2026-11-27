@@ -18,12 +18,8 @@ async fn pair() -> (Conn<tokio::io::DuplexStream>, Conn<tokio::io::DuplexStream>
 
 fn all_messages() -> Vec<Msg> {
     vec![
-        Msg::HostStamp {
-            alias: "devbox".into(),
-        },
         Msg::Open {
             url: "https://example.com/auth?redirect_uri=http://localhost:8400/cb".into(),
-            reported_host: "devbox.internal".into(),
             callback_ports: vec![8400],
         },
         Msg::OpenResult {
@@ -37,7 +33,6 @@ fn all_messages() -> Vec<Msg> {
             error: Some("scheme not allowed".into()),
         },
         Msg::Forward {
-            reported_host: "devbox".into(),
             callback_ports: vec![8080],
         },
         Msg::Watch {

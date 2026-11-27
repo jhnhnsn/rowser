@@ -102,8 +102,9 @@ pub struct Config {
     /// The Saved hosts, in file order.
     pub hosts: Vec<SavedHost>,
     pub routes: Vec<Route>,
-    /// `[unverified] open`; default `ask`.
-    pub unverified: Option<Target>,
+    /// The file has an `[unverified]` entry. It is ignored for one release
+    /// (v1.0 Links), with `UNVERIFIED_IGNORED` in the log and in `rowser doctor`.
+    pub has_unverified: bool,
     /// `[default] open`; default `system`.
     pub default: Option<Target>,
 }
@@ -141,9 +142,15 @@ struct RawFile {
     host: Vec<RawHost>,
     #[serde(default)]
     route: Vec<RawRoute>,
-    unverified: Option<RawEntry>,
+    /// Removed (v1.0 Links): any content is ignored.
+    unverified: Option<toml::Value>,
     default: Option<RawEntry>,
 }
+
+/// The warning for an `[unverified]` entry in the config file.
+pub const UNVERIFIED_IGNORED: &str =
+    "the [unverified] entry is removed and ignored: every Open request now comes from a Saved host; \
+     remove [unverified] from the config file";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -228,11 +235,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
     Ok(Config {
         hosts,
         routes,
-        unverified: raw
-            .unverified
-            .as_ref()
-            .map(|e| target(&e.open))
-            .transpose()?,
+        has_unverified: raw.unverified.is_some(),
         default: raw.default.as_ref().map(|e| target(&e.open)).transpose()?,
     })
 }
@@ -590,15 +593,30 @@ mod tests {
         let c = parse(
             "[[route]]\nhost = \"g14\"\nmatch = [\"*.google.com\"]\nopen = \"chrome:Profile 2\"\n\n\
              [[route]]\nhost = \"g14\"\nopen = \"safari\"\nask = true\n\n\
-             [unverified]\nopen = \"ask\"\n\n[default]\nopen = \"system\"\n",
+             [default]\nopen = \"system\"\n",
         )
         .unwrap();
         assert_eq!(c.routes.len(), 2);
         assert_eq!(c.routes[0].matches, ["*.google.com"]);
         assert_eq!(c.routes[0].target.to_string(), "chrome:Profile 2");
         assert!(c.routes[1].ask);
-        assert_eq!(c.unverified, Some(Target::Ask));
         assert_eq!(c.default, Some(Target::System));
+        assert!(!c.has_unverified);
+    }
+
+    #[test]
+    fn an_unverified_entry_is_ignored_and_flagged() {
+        // Any content, even a Target that no longer parses, is ignored.
+        let c = parse("[unverified]\nopen = \"not a target!\"\n").unwrap();
+        assert!(c.has_unverified);
+        assert_eq!(
+            c,
+            Config {
+                has_unverified: true,
+                ..Config::default()
+            }
+        );
+        assert!(UNVERIFIED_IGNORED.contains("[unverified]"));
     }
 
     #[test]

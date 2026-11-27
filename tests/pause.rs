@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use common::TmpDir;
+use common::{test_link, TmpDir, TEST_LINK};
 use rowser::control::{parse_duration, run_pause, run_resume, run_status, StatusArgs};
 use rowser::daemon::testing::{Answer, RecordingNotifier, RecordingOpener, ScriptedNotifier};
-use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET};
+use rowser::daemon::{bind_sockets, Daemon, DaemonConfig};
 use rowser::protocol::{Conn, Hello, Msg, CONTROL_SOCKET};
 use rowser::shim::{run_forward, run_open, ShimEnv};
 use serde_json::Value;
@@ -18,23 +18,22 @@ use url::Url;
 
 async fn start(dir: &TmpDir) -> (PathBuf, RecordingOpener) {
     let run = dir.0.join("run");
-    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let control = bind_sockets(&run).unwrap();
     let opener = RecordingOpener::default();
     let daemon = Daemon::new(
         DaemonConfig::default(),
         opener.clone(),
         RecordingNotifier::default(),
     );
-    tokio::spawn(daemon.serve(direct, relay, control));
+    let links = vec![test_link(&run, "devbox")];
+    tokio::spawn(daemon.serve_with_test_links(control, links));
     (run, opener)
 }
 
 fn shim_env(run: &Path) -> ShimEnv<Vec<u8>> {
     ShimEnv {
-        tunnel_dir: run.join("no-tunnels"),
-        socket_override: Some(run.join(DIRECT_SOCKET)),
+        socket_override: Some(run.join(TEST_LINK)),
         outpost_socket: None,
-        reported_host: "devbox".into(),
         procfs: rowser::detect::Procfs::new("/nonexistent"),
         caller_pid: 1,
         graphical: false,
@@ -253,16 +252,16 @@ async fn pause_for_ends_by_itself() {
 /// `ScriptedNotifier::release`.
 async fn start_hung(dir: &TmpDir) -> (PathBuf, RecordingOpener, ScriptedNotifier) {
     let run = dir.0.join("run");
-    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let control = bind_sockets(&run).unwrap();
     let opener = RecordingOpener::default();
     let notifier = ScriptedNotifier::new(Answer::Hang);
     let config = DaemonConfig {
         confirm_hosts: vec!["*".into()],
-        confirm_unverified: true,
         ..DaemonConfig::default()
     };
     let daemon = Daemon::new(config, opener.clone(), notifier.clone());
-    tokio::spawn(daemon.serve(direct, relay, control));
+    let links = vec![test_link(&run, "devbox")];
+    tokio::spawn(daemon.serve_with_test_links(control, links));
     (run, opener, notifier)
 }
 

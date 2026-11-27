@@ -27,7 +27,7 @@ All notable changes to rowser are listed here. The format follows
   ([#78](https://github.com/jhnhnsn/rowser/issues/78))
 - Saved hosts and Links: each `[[host]]` in the config file gets one Link, an `ssh` connection
   that the Daemon keeps open and runs `rowser __outpost` on the host. Programs on that host
-  open URLs through the Outpost socket `/tmp/rowser-<uid>/outpost.sock`, without `rowser ssh`.
+  open URLs through the Outpost socket `/tmp/rowser-<uid>/outpost.sock`.
   The Shim uses that socket only when its folder belongs to the user with mode 0700. A dropped
   Link reconnects after 1 s, then up to 60 s. A failed login shows one notification and stops
   the retries. `rowser reload` adds or removes Links.
@@ -37,12 +37,25 @@ All notable changes to rowser are listed here. The format follows
 
 - OAuth callbacks go through the Link: the Outpost on the Saved host dials the remote port for
   each browser connection. `rowser open` and `rowser forward` exit when the Daemon accepts the
-  request and leave no process on the host. A forward also ends when the Link drops. A request
-  through a `rowser ssh` session still opens the URL, but its callback port is not forwarded.
+  request and leave no process on the host. A forward also ends when the Link drops.
   `--confirm-hosts` still applies to `rowser forward`.
   ([#79](https://github.com/jhnhnsn/rowser/issues/79))
 - Protocol 2.0. A rowser 1.x on the other side gets the version mismatch error; update both
   sides. ([#77](https://github.com/jhnhnsn/rowser/issues/77))
+- With no Link, the Shim prints two lines to stderr (`rowser: no Link to your Local machine;
+  open this URL manually: <url>` and how to add a Saved host) and exits 1. It uses
+  `ROWSER_SOCKET`, else the Outpost socket. ([#82](https://github.com/jhnhnsn/rowser/issues/82))
+
+### Removed
+
+- The Wrapper: `rowser ssh …` now prints `rowser ssh is removed: run "rowser host add <host>"
+  once, then use plain ssh` and exits 2. Use plain `ssh` after `rowser host add`. Gone with it:
+  Session sockets, the relay socket and Host stamp, the direct socket `rowserd.sock` (and the
+  `ssh_config` `RemoteForward` setup), the Shim's search of `/tmp` and its Stale socket removal,
+  the Reported host name, and Sessions in `rowser status`.
+- `[unverified]`: the entry is ignored, with one warning in the log and in `rowser doctor`.
+  `rowser daemon --confirm-unverified` exits 2 with an error that says the flag is removed, and
+  `rowser route test --unverified` is gone. ([#82](https://github.com/jhnhnsn/rowser/issues/82))
 
 ## [1.0.0-rc.2] - 2026-11-26
 

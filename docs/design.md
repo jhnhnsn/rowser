@@ -15,12 +15,12 @@ src/
   cli.rs             clap definitions + argv[0] and first-argument URL dispatch; maps args to module calls
   protocol/          wire messages, NDJSON codec, handshake
   detect/            Callback port detection (URL + /proc)
-  discovery.rs       Shim's search for a working Session socket
+  discovery.rs       Shim's handshake with the first socket that answers
   daemon/            Daemon: policy, Open requests, Callback forwards
     opener.rs        Opener port + CommandOpener adapter
     notifier.rs      Notifier port + DesktopNotifier adapter
     forward.rs       internal: local listeners, one Link stream per browser connection
-    limit.rs         internal: per-connection rate limit
+    limit.rs         internal: rate limit for each Saved host
     confirm.rs       internal: `--confirm-hosts` matching and the confirmation timeout
     link.rs          internal: one Link for each Saved host (ssh child, backoff, Link state)
     testing.rs       test adapters for the Opener and Notifier ports
@@ -29,13 +29,12 @@ src/
   outpost.rs         `rowser __outpost` on a Saved host: the Outpost socket, its relay, and the
                      remote side of Callback forwards (`Watch`, `Dial`)
   liveness.rs        internal: remote-port liveness and the loopback dial (ADR 0005)
-  wrapper/           `rowser ssh`: destination resolution, relay with Host stamp
   service.rs         `rowser daemon install|uninstall` (systemd unit, launchd plist, their paths)
   remote_install.rs  `rowser remote install <host>`
   doctor.rs          `rowser doctor`
   logging.rs         tracing subscriber on stderr, level from ROWSER_LOG (default warn)
-  platform.rs        default paths per OS (runtime dir or ROWSER_RUNTIME_DIR, tunnel dir,
-                     browser names)
+  platform.rs        default paths per OS (runtime dir or ROWSER_RUNTIME_DIR, browser
+                     names)
   test_support.rs    `#[cfg(test)]` helpers for unit tests; includes tests/common/script.rs
 tests/               level-2 integration tests and the level-3 sshd e2e test
 install.sh           Release installer (rowser-installer.sh); hidden test seam ROWSER_INSTALL_BASE_URL
@@ -53,8 +52,7 @@ Interface:
 - `Conn::send(&Msg)` / `Conn::recv() -> Result<Option<Msg>>`.
 - `Conn::into_raw()` hands back the stream for byte splicing after a `Dial` reply.
 
-Messages (one enum, `Msg`): `HostStamp{alias}`, `Open{url, reported_host, callback_ports}`,
-`Forward{reported_host, callback_ports}` (`rowser forward`; the reply is an `OpenResult`),
+Messages (one enum, `Msg`): `Open{url, callback_ports}`, `Forward{callback_ports}` (`rowser forward`; the reply is an `OpenResult`),
 `OpenResult{forward_id?, warnings, error?}`, `Watch{ports}`, `Dial{port}`, `Ping`,
 `Pong{version, rowser_version?}` (`rowser_version` is the answering side's `CARGO_PKG_VERSION`,
 protocol 2.0; the Daemon and the Outpost send it). `Watch` and `Dial` go from the Daemon to the
@@ -63,16 +61,13 @@ seconds and closes the stream when none listens. On a `Dial` stream it dials `12
 `[::1]`, replies with an `OpenResult` (an `error` when the dial fails or the port is below 1024),
 and then splices.
 
-Control messages (protocol 1.1, control socket only; `Msg::is_control` names them, and the direct
-and relay sockets answer them with an `OpenResult` error and close the connection): `Status`,
+Control messages (protocol 1.1, control socket only; `Msg::is_control` names them, and a Link
+stream answers them with an `OpenResult` error and closes): `Status`,
 `StatusReply{daemon_version, protocol_version, config_file?, config_file_exists, paused,
-paused_until?, forwards: [ForwardInfo{port, host, unverified, age_secs}],
-sessions: [SessionInfo{host, age_secs, target}], links: [LinkInfo{host, state, since,
+paused_until?, forwards: [ForwardInfo{port, host, age_secs}], links: [LinkInfo{host, state, since,
 last_connected?, outpost_version?, outpost_rowser_version?}]}` (2.0: one entry for each Saved
 host), `Reconnect{host}` (2.0, `rowser host connect`; the reply is `Reconnected{host}`, or an
-`OpenResult` error when the Daemon has no Link to `host`), and `Session{host}` (the Wrapper registers
-its Session; the reply is an `OpenResult`, and the Session lasts until that connection closes),
-`Reload` (the Daemon reads the config file again; the reply is `Reloaded{routes}` with the number
+`OpenResult` error when the Daemon has no Link to `host`), `Reload` (the Daemon reads the config file again; the reply is `Reloaded{routes}` with the number
 of Routes, or an `OpenResult` error with the file, line and reason, and the old Routes stay).
 `Activity{follow}` (`rowser activity`; the reply is `ActivityReply{entries: [ActivityEntry]}`,
 oldest first, and with `follow` an `ActivityUpdate{entry}` follows for each new entry and for an
@@ -81,7 +76,7 @@ closes the connection).
 `Pause{for_secs?}` (the reply is `Paused{until?}`, Unix seconds) and `Resume` (the reply is
 `Resumed{was_paused}`).
 `Pending` (`rowser pending`; the reply is `PendingReply{requests: [PendingInfo{id, kind, host,
-unverified, url?, ports, target?, age_secs}]}`, oldest first) and `AnswerPending{id, approve,
+url?, ports, target?, age_secs}]}`, oldest first) and `AnswerPending{id, approve,
 open?}` (`rowser approve <id> [--open <target>]` and `rowser deny <id>`; the reply is
 `Answered{id}`, or an `OpenResult` error `no pending request <id>` for an unknown or already
 answered id, or for an `open` Target that is `ask`, not found, or given for a `rowser forward`
@@ -91,10 +86,9 @@ The Daemon keeps its Routes behind a lock, so a reload applies to the next Open 
 commands share. The control socket also answers `Ping`. `CONTROL_SOCKET` (the socket's file
 name) lives in `protocol`, so the client side does not depend on `daemon`.
 
-The version is 1.1: 1.1 adds the control messages, `Session` among them. Peers with the same major interoperate, so a
-1.0 Shim or Wrapper still works with a 1.1 Daemon. A Daemon built
-before `Forward` cannot parse it and closes the connection, so `rowser forward` prints "daemon closed the
-connection" and exits 1.
+The version is 2.0 (#77). Peers with the same major interoperate. Serde ignores unknown fields,
+so a Daemon of this version reads an `Open` from an older 2.0 Shim that still sends
+`reported_host`; an older 2.0 Daemon refuses an `Open` without it (#82).
 
 Hidden: framing, max line length, serde details, version constants, handshake ordering.
 Tests: `tokio::io::duplex` pairs; no adapters needed.
@@ -110,10 +104,9 @@ pid matching. On non-Linux the `/proc` part yields nothing.
 
 ### `discovery` — deep, local-substitutable
 
-Interface: `find_tunnel(dir: &Path, env_override: Option<PathBuf>) -> Result<Conn, NoTunnel>`.
-
-Hidden: glob, UID ownership filter, newest-first ordering, handshake probe, Stale socket removal.
-Tests use a temp directory and real Unix sockets.
+Interface: `find_socket(paths: &[PathBuf]) -> Result<(Conn, PathBuf), NoTunnel>`: the first
+path that answers the handshake, in order (`ROWSER_SOCKET`, else the Outpost socket). Hidden:
+the handshake probe. Tests use a temp directory and real Unix sockets.
 
 ### `daemon` — the deepest module
 
@@ -121,21 +114,25 @@ Interface:
 
 ```rust
 Daemon::new(DaemonConfig, opener: impl Opener, notifier: impl Notifier) -> Daemon
-Daemon::serve(self, direct: UnixListener, relay: UnixListener, control: UnixListener)
-    -> impl Future<Output = Result<()>>
-bind_sockets(dir: &Path) -> Result<(UnixListener, UnixListener, UnixListener)>
+Daemon::serve(self, control: UnixListener) -> impl Future<Output = Result<()>>
+bind_sockets(dir: &Path) -> Result<UnixListener>   // the control socket only
 ```
+
+Test seam (`#[doc(hidden)]`): `Daemon::serve_with_test_links(control, Vec<(alias,
+UnixListener)>)`. Each listener stands in for the Link of the Saved host `alias`: a connection
+on it is an Open request from that host, with no yamux session, so a Callback port gets the
+"need a Link" warning. `tests/common/mod.rs` has `test_link`.
 
 `DaemonConfig`: `open_command`, `confirm_hosts`, rate-limit values, forward timeout, loopback
 bind addresses.
 
-Everything else is hidden behind `serve`: Host stamp rules per socket, scheme allowlist, rate
+Everything else is hidden behind `serve`: the Links, scheme allowlist, rate
 limit, confirmation, `Ping`, Callback forward lifecycle (bind local port, busy-port warning,
 a `Watch` stream on the Link, a `Dial` stream for each browser connection, splice, 10-minute
 timeout). A forward ends when the `Watch` stream closes (the remote port stopped listening or
-the Link dropped), when a dial fails, or at the timeout. A request with no Link (the Wrapper's
-direct and relay sockets) gets no forward, only the warning `callback forwards need a Link to a
-Saved host; port <p> is not forwarded`. The hidden daemon flag `--forward-timeout <secs>` is a
+the Link dropped), when a dial fails, or at the timeout. A request on a test Link (no yamux
+session) gets no forward, only the warning `callback forwards need a Link to a Saved host; port
+<p> is not forwarded`. The hidden daemon flag `--forward-timeout <secs>` is a
 test hook for the timeout.
 
 Ports (each has a production adapter and a test adapter, so both seams are real):
@@ -215,11 +212,10 @@ names `rowser reload`.
 
 `DaemonConfig` adds `hosts`, `ssh` (the program; tests give a fake that runs `rowser __outpost`
 locally) and `link_dir` (the `ControlPath` folder; empty by default, and a Link refuses an
-empty one). The Shim tries `ROWSER_SOCKET`, then the Outpost socket (`ShimEnv::outpost_socket`),
-then the old socket discovery of the Wrapper (until #82). Before it uses the Outpost socket, the
-Shim checks `outpost::check_socket`: the folder belongs to the user with mode 0700 and the socket
-belongs to the user. On a failed check it prints a warning and goes on to the next step. It does
-not check `ROWSER_SOCKET`.
+empty one). The Shim uses `ROWSER_SOCKET`, else the Outpost socket (`ShimEnv::outpost_socket`) (#82).
+Before it uses the Outpost socket, the Shim checks `outpost::check_socket`: the folder belongs to
+the user with mode 0700 and the socket belongs to the user. On a failed check it prints a
+warning and acts as with no Link. It does not check `ROWSER_SOCKET`.
 
 Two Links to one host (#80): each Outpost listens on its own socket file
 `link-<start nanos>-<pid>-<n>.sock` in the Outpost socket folder (the start time is from the
@@ -237,23 +233,17 @@ Outpost repairs the socket.
 Interface: `run_open(url, ShimEnv) -> ExitCode`, `run_forward(port, ShimEnv) -> ExitCode`.
 The Shim detects Callback ports, sends the request and exits; it starts no other process.
 
-`ShimEnv`: tunnel directory, `ROWSER_SOCKET`, the Outpost socket, procfs root, caller pid, the
-host name it sends, `graphical` (`WAYLAND_DISPLAY` or `DISPLAY` set),
+`ShimEnv`: `ROWSER_SOCKET`, the Outpost socket, procfs root, caller pid, `graphical` (`WAYLAND_DISPLAY` or `DISPLAY` set),
 `search_path` (`PATH`, for the real `xdg-open`), `self_exe` (skipped as an `xdg-open`),
-`in_fallback` (the hidden `ROWSER_SHIM_FALLBACK` guard), stderr writer. Hidden: discovery,
+`in_fallback` (the hidden `ROWSER_SHIM_FALLBACK` guard), stderr writer. With no Link it prints
+`rowser: no Link to your Local machine; open this URL manually: <url>` and `NO_LINK_HINT` and
+exits 1, or in a graphical session hands the URL to the real `xdg-open`. Hidden: discovery,
 detection, message flow, the real `xdg-open` lookup (it runs with `ROWSER_SHIM_FALLBACK=1`, and a
 Shim that sees it does not run `xdg-open` again, so `BROWSER=rowser` or a copy of rowser on `PATH`
 cannot loop). Remote-port liveness (LISTEN entries in `/proc/net/tcp{,6}` on Linux, a bind
 probe elsewhere; ADR 0005) is in `liveness`, and the Outpost runs it.
 
-### `wrapper` — deep
-
-Interface: `run_ssh(args: Vec<OsString>, WrapperEnv) -> ExitCode`.
-
-`WrapperEnv`: ssh program path, relay socket path, per-session socket directory. Hidden:
-`ssh -G` resolution with argv fallback, random remote path, per-session listener, Host stamp,
-byte relay, daemon-not-running warning, cleanup, exit-code passthrough. Tests use a fake `ssh`
-script for level 2 and the real `ssh` in level 3.
+The Wrapper (`rowser ssh`) is removed (#82): `cli` prints `SSH_REMOVED` and exits 2.
 
 ### `service`, `remote_install`, `doctor` — shallow on purpose
 
@@ -277,12 +267,11 @@ hidden `ROWSER_TEST_LOCAL_BUILD` hook for `host add` and the Daemon. After a suc
 ## Dependency direction
 
 ```
-cli ─► daemon, shim, wrapper, service, remote_install, doctor, route, host
+cli ─► daemon, shim, service, remote_install, doctor, route, host
 route ─► config, routes, control
 daemon ─► protocol, remote_install
 host ─► config, control, protocol, remote_install, daemon (control_path_option)
 shim ─► protocol, discovery, detect
-wrapper ─► protocol
 doctor ─► config, browsers, control, discovery, protocol, platform
 remote_install ─► platform, control, protocol
 discovery ─► protocol
@@ -292,13 +281,13 @@ discovery ─► protocol
 
 ## Test levels mapped to modules
 
-1. Unit: `protocol`, `detect`, `discovery`, `daemon::limit`, `wrapper` destination parsing,
-   `service` rendering, `remote_install` asset choice, `doctor` checks.
-2. Integration (`tests/`, Linux + macOS): shim ↔ daemon over real sockets, wrapper ↔ daemon with a
-   fake `ssh`, Callback forward with a fake remote HTTP listener, all with the test adapters.
+1. Unit: `protocol`, `detect`, `discovery`, `daemon::limit`, `service` rendering,
+   `remote_install` asset choice, `doctor` checks.
+2. Integration (`tests/`, Linux + macOS): shim ↔ daemon over real sockets (test Links), Links
+   with a fake `ssh` that runs `rowser __outpost` locally, Callback forward with a fake remote
+   HTTP listener, all with the test adapters.
 3. E2E (`tests/e2e_sshd.rs`, Linux only; each test returns at once unless `ROWSER_E2E=1`): throwaway
-   `sshd`, `rowser ssh`, OAuth-style callback, tmux-style reattach (second session, shim picks
-   newest socket), and a `ProxyJump` hop through the same `sshd`.
+   `sshd` and `rowser remote install`. A Link through `sshd` is #84.
 
 Every fake script at any level is written with `write_script`/`write_executable` from
 `tests/common/script.rs`, so the test process never holds the write fd (ETXTBSY, #55).
@@ -310,7 +299,7 @@ New modules, in the same style (deep modules, few ports):
 ```
 src/
   config/            config file: path rules, load + validate (toml), edit in place (toml_edit)
-  routes/            Route matching: (Host alias or unverified, URL) -> (Route index, Target); pure
+  routes/            Route matching: (Host alias, URL) -> (Route index, Target); pure
   browsers/          browser + Profile discovery per OS; resolves a Target to an argv
   route.rs           `rowser route list|add|remove|move|test`: edits the config file, then reloads
   host.rs            `rowser host add|remove|list|connect` (#78): edits `[[host]]`, then reloads
@@ -320,15 +309,14 @@ src/
   daemon/control.rs  internal: control socket handlers (status, activity, pause, pending, reload,
                      reconnect)
   daemon/activity.rs internal: in-memory ring of the last 200 requests
-  daemon/session.rs  internal: Sessions, one per Wrapper control connection
   daemon/pending.rs  internal: confirmations that wait, with ids, for `rowser pending|approve|deny`
 ```
 
-- `routes` is pure and has no ports: `Routes::from_config(&Config)`, `Routes::pick(&RequestHost,
+- `routes` is pure and has no ports: `Routes::from_config(&Config)`, `Routes::pick(alias: &str,
   &Url) -> Pick { route: Option<usize>, target: Target, ask: bool }`. `rowser route test` and the
   Daemon call it; `rowser doctor` checks Targets with `Browsers::normalize` only. `Target`
   (`system`, `ask`, `<browser>[:<profile>]`) lives in `config`, which parses it.
-- `Routes::resolve(&RequestHost, &Url, &Browsers) -> Resolved { route, target, ask, warnings }`
+- `Routes::resolve(alias: &str, &Url, &Browsers) -> Resolved { route, target, ask, warnings }`
   applies the fallback rules on top of `pick`: an `ask` Target waits, then opens in
   `[default]`; a browser Target that `Browsers::normalize` rejects (browser or profile missing,
   or no argv can be built, such as a Linux browser with no usable `Exec`) falls back to
@@ -353,18 +341,18 @@ src/
   `--open-command` template for `system`. The test adapter records (URL, Target).
 - `DaemonConfig.browser_roots: Option<Roots>` is where the Daemon scans for browsers on each
   Open request; `None` means no browsers, so every browser Target falls back to `[default]`.
-- `daemon::serve` takes the control listener as a third socket (`bind_sockets` gives all three).
-  Control messages are refused on the direct and relay sockets.
+- `daemon::serve` takes the control listener (`bind_sockets` gives it). Control messages are
+  refused on a Link.
 - `control` (client side): `control::request(runtime_dir, &Msg) -> Result<Msg, RequestError>`
   is the one helper for every control command; `RequestError::NotRunning` prints
   `rowser: the daemon is not running`. `control::run_status(StatusArgs, out, err)` is
-  `rowser status`; the runtime directory comes from `platform::runtime_dir`, as for `rowser ssh`.
+  `rowser status`; the runtime directory comes from `platform::runtime_dir`, as for `rowser daemon`.
   `open_control(runtime_dir)` connects and does the handshake for `request` and for
   `rowser activity --follow`, which keeps its connection open.
 - `rowser activity`: `daemon/activity.rs` keeps the ring (200 entries) and a broadcast channel
   for `follow`; `Forwards::create` takes an `on_end` callback that reports how long the forward
-  stayed open. `Resolved.route` carries the Route index, shown as `route <n>` (from 1),
-  `[unverified]` or `[default]`. `control::run_activity(ActivityArgs, out, err)` is the client;
+  stayed open. `Resolved.route` carries the Route index, shown as `route <n>` (from 1)
+  or `[default]`. `control::run_activity(ActivityArgs, out, err)` is the client;
   its text lines pass through `protocol::printable`, which the Notifier also uses, so a forged
   host name or URL cannot move text with control or bidi characters.
 - `rowser pause` / `rowser resume`: `Inner.pause` holds the pause in memory (a restart ends
@@ -385,14 +373,9 @@ src/
   the request's Target after `Browsers::normalize`; `--open ask` and a missing browser are
   refused. The test `ScriptedNotifier` counts dismissals (`dismissed()`), and a dismissed hung
   confirmation returns. `control::{run_pending, run_approve, run_deny}` are the clients.
-- The Wrapper registers its Session with the Daemon (protocol 1.1) and keeps that connection
-  open until `ssh` exits, so `rowser status` lists Sessions. On the control socket (local only,
-  mode 0600) it sends `Msg::Session{host}` with the `ssh -G` Host alias; the Daemon answers
-  `OpenResult` and keeps the Session in `daemon/session.rs` until the connection closes (also
-  when the kernel closes it for a killed Wrapper). The relay socket refuses `Session`, as the
-  Wrapper copies raw Tunnel bytes there after the Host stamp. The Wrapper skips this when no
-  control socket answers or the Daemon's hello is 1.0 (`Conn::peer_version`). The shown Target is `Routes::session_target(alias)`:
-  the alias's first Route without `match`, else `[default]`.
+- `[unverified]` (#82): `config::parse` ignores the entry and sets `Config::has_unverified`. The
+  Daemon logs `config::UNVERIFIED_IGNORED` once at start and on each reload that reads it, and
+  `rowser doctor` shows it as one `config` warning.
 - Dependency direction: `cli ─► config, routes, browsers, control, route`;
   `route ─► config, routes, browsers, control`; `control ─► protocol,
   platform`; `daemon ─► config, routes, browsers, protocol`; `routes ─► config, browsers`
@@ -402,8 +385,8 @@ src/
   `browser_roots` and `ssh` (`SSH_CONNECTION` set). `run_doctor` runs the Local checks
   (`check_config`, `check_routes` over every browser Target with `Browsers::normalize`,
   `check_daemon` with `control::request_async(&Msg::Status)`) when a config file or the
-  runtime directory exists, and the Remote checks when a Session socket exists or `ssh` is
-  set, or when neither side is found. A Daemon that does not answer is a warning.
+  runtime directory exists, and the Remote checks when the Shim's socket (`ROWSER_SOCKET`, else
+  the Outpost socket) exists or `ssh` is set, or when neither side is found. A Daemon that does not answer is a warning.
 - `rowser route`: `route::run_route(RouteArgs { config_file, runtime_dir, action, browsers },
   out, err)`. Warnings go to `err`.
   `config::{add_route, remove_route, move_route}` are text-to-text edits with `toml_edit`

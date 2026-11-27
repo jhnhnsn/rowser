@@ -105,7 +105,6 @@ impl Pending {
             .1
             .iter()
             .map(|(id, e)| {
-                let (host, unverified) = e.notice.host.parts();
                 let (kind, url, ports) = match &e.notice.subject {
                     Subject::Url(u) => (RequestKind::Open, Some(u.to_string()), vec![]),
                     Subject::Forward(p) => (RequestKind::Forward, None, p.clone()),
@@ -116,8 +115,7 @@ impl Pending {
                 PendingInfo {
                     id: *id,
                     kind,
-                    host: host.to_string(),
-                    unverified,
+                    host: e.notice.host.alias().to_string(),
                     url,
                     ports,
                     target: e.notice.target.as_ref().map(Target::to_string),

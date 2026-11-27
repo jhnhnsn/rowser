@@ -68,7 +68,7 @@ impl Local {
                 outpost = outpost.display(),
             ),
         );
-        let (direct, relay, control) = bind_sockets(&dir.0.join("run")).unwrap();
+        let control = bind_sockets(&dir.0.join("run")).unwrap();
         let config = DaemonConfig {
             hosts: vec![SavedHost {
                 name: "g14".into(),
@@ -83,7 +83,7 @@ impl Local {
         };
         let opener = RecordingOpener::default();
         let daemon = Daemon::new(config, opener.clone(), RecordingNotifier::default());
-        tokio::spawn(daemon.serve(direct, relay, control));
+        tokio::spawn(daemon.serve(control));
         Local { dir, opener }
     }
 
@@ -166,10 +166,8 @@ impl Remote {
     /// A Shim on this Remote host that finds the Outpost socket.
     fn shim(&self) -> ShimEnv<Vec<u8>> {
         ShimEnv {
-            tunnel_dir: self.dir.0.join("no-tunnels"),
             socket_override: None,
             outpost_socket: Some(self.socket()),
-            reported_host: "g14-box".into(),
             procfs: Procfs::new(self.dir.0.join("no-proc")),
             caller_pid: 1,
             graphical: false,

@@ -6,9 +6,6 @@ use std::path::{Path, PathBuf};
 /// Names under which rowser acts as `rowser open` (installed as symlinks).
 pub const BROWSER_NAMES: [&str; 3] = ["xdg-open", "sensible-browser", "www-browser"];
 
-/// Where the Shim looks for Session sockets in production.
-pub const TUNNEL_DIR: &str = "/tmp";
-
 /// The Daemon's runtime directory: `$ROWSER_RUNTIME_DIR` when set and not
 /// empty, else `$XDG_RUNTIME_DIR/rowser/` on Linux,
 /// `~/Library/Application Support/rowser/` on macOS.
@@ -18,7 +15,7 @@ pub fn runtime_dir() -> Result<PathBuf, String> {
 
 /// `$ROWSER_RUNTIME_DIR` when set and not empty. A relative value is
 /// refused: each process would resolve it against its own current
-/// directory, so the Daemon and the Wrapper could use different ones.
+/// directory, so the Daemon and `rowser status` could use different ones.
 pub fn rowser_runtime_dir_from(
     var: impl Fn(&str) -> Option<OsString>,
 ) -> Result<Option<PathBuf>, String> {

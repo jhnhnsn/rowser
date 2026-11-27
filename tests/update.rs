@@ -79,7 +79,7 @@ impl World {
             ),
         );
         let run = d.join("run");
-        let (direct, relay, control) = bind_sockets(&run).unwrap();
+        let control = bind_sockets(&run).unwrap();
         let build = if setup.build_ok {
             ROWSER.into()
         } else {
@@ -99,7 +99,7 @@ impl World {
         };
         let notifier = RecordingNotifier::default();
         let daemon = Daemon::new(config, RecordingOpener::default(), notifier.clone());
-        tokio::spawn(daemon.serve(direct, relay, control));
+        tokio::spawn(daemon.serve(control));
         World { dir, notifier }
     }
 

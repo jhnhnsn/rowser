@@ -1,25 +1,15 @@
-//! Route matching: (Host alias or unverified host, URL) -> (Route index,
-//! Target). Pure: no ports, no I/O.
+//! Route matching: (Host alias, URL) -> (Route index, Target). Pure: no
+//! ports, no I/O.
 
 use url::Url;
 
 use crate::browsers::Browsers;
 use crate::config::{Config, Route, Target};
 
-/// The host an Open request comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RequestHost {
-    /// A Host alias from a Host stamp: matched against `[[route]]` hosts.
-    Alias(String),
-    /// A Reported host name: never matches a `[[route]]`.
-    Unverified(String),
-}
-
 /// The result of `Routes::pick`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pick {
-    /// The index of the matching `[[route]]`; `None` for `[unverified]` or
-    /// `[default]`.
+    /// The index of the matching `[[route]]`; `None` for `[default]`.
     pub route: Option<usize>,
     pub target: Target,
     /// The Route has `ask = true`.
@@ -30,7 +20,6 @@ pub struct Pick {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Routes {
     routes: Vec<Route>,
-    unverified: Target,
     default: Target,
 }
 
@@ -44,24 +33,13 @@ impl Routes {
     pub fn from_config(config: &Config) -> Routes {
         Routes {
             routes: config.routes.clone(),
-            unverified: config.unverified.clone().unwrap_or(Target::Ask),
             default: config.default.clone().unwrap_or(Target::System),
         }
     }
 
-    /// The first matching Route in file order; else `[unverified]` for a
-    /// Reported host name, or `[default]`.
-    pub fn pick(&self, host: &RequestHost, url: &Url) -> Pick {
-        let alias = match host {
-            RequestHost::Alias(a) => a,
-            RequestHost::Unverified(_) => {
-                return Pick {
-                    route: None,
-                    target: self.unverified.clone(),
-                    ask: false,
-                }
-            }
-        };
+    /// The first Route in file order that matches the Host alias `alias`
+    /// and the URL; else `[default]`.
+    pub fn pick(&self, alias: &str, url: &Url) -> Pick {
         let url_host = url.host_str().unwrap_or("");
         for (i, r) in self.routes.iter().enumerate() {
             if glob_match(&r.host, alias)
@@ -81,15 +59,15 @@ impl Routes {
         }
     }
 
-    /// The `[unverified]` and `[default]` Targets, with the spec's defaults.
-    pub fn fallbacks(&self) -> (&Target, &Target) {
-        (&self.unverified, &self.default)
+    /// The `[default]` Target, with the spec's default.
+    pub fn default_target(&self) -> &Target {
+        &self.default
     }
 
-    /// The Target `rowser status` shows for a Session: the first Route of
-    /// `alias` without a `match` list, else `[default]`. It is what an
-    /// `https` URL that no `match` list names opens in.
-    pub fn session_target(&self, alias: &str) -> Target {
+    /// The Target of a Saved host's Route: the first Route of `alias`
+    /// without a `match` list, else `[default]`. It is what an `https` URL
+    /// that no `match` list names opens in.
+    pub fn host_target(&self, alias: &str) -> Target {
         self.routes
             .iter()
             .find(|r| r.matches.is_empty() && glob_match(&r.host, alias))
@@ -102,8 +80,8 @@ impl Routes {
     /// profile as a folder name; a missing one falls back to `[default]`
     /// with a warning, and a `[default]` of `ask` then waits too (ADR 0008).
     /// A `[default]` that is missing too opens with `system`.
-    pub fn resolve(&self, host: &RequestHost, url: &Url, browsers: &Browsers) -> Resolved {
-        let pick = self.pick(host, url);
+    pub fn resolve(&self, alias: &str, url: &Url, browsers: &Browsers) -> Resolved {
+        let pick = self.pick(alias, url);
         let mut resolved = Resolved {
             route: pick.route,
             target: Target::System,
@@ -189,8 +167,8 @@ mod tests {
         Url::parse(s).unwrap()
     }
 
-    fn alias(a: &str) -> RequestHost {
-        RequestHost::Alias(a.into())
+    fn alias(a: &str) -> &str {
+        a
     }
 
     const TWO: &str =
@@ -198,15 +176,15 @@ mod tests {
                        [[route]]\nhost = \"g1?\"\nopen = \"safari\"\n";
 
     #[test]
-    fn session_target_is_the_first_route_without_match_else_default() {
+    fn host_target_is_the_first_route_without_match_else_default() {
         let r = routes(TWO);
-        assert_eq!(r.session_target("g14").to_string(), "safari");
-        assert_eq!(r.session_target("db1").to_string(), "system");
+        assert_eq!(r.host_target("g14").to_string(), "safari");
+        assert_eq!(r.host_target("db1").to_string(), "system");
     }
 
     #[test]
     fn first_matching_route_wins() {
-        let p = routes(TWO).pick(&alias("g14"), &url("https://mail.google.com/x"));
+        let p = routes(TWO).pick(alias("g14"), &url("https://mail.google.com/x"));
         assert_eq!(p.route, Some(0));
         assert_eq!(p.target.to_string(), "chrome:Work");
     }
@@ -214,14 +192,14 @@ mod tests {
     #[test]
     fn match_globs_test_the_url_host() {
         let r = routes(TWO);
-        let p = r.pick(&alias("G14"), &url("https://example.com/google.com"));
+        let p = r.pick(alias("G14"), &url("https://example.com/google.com"));
         assert_eq!(p.route, Some(1));
         assert_eq!(p.target.to_string(), "safari");
     }
 
     #[test]
     fn no_match_goes_to_default_which_defaults_to_system() {
-        let p = routes(TWO).pick(&alias("db1"), &url("https://example.com/"));
+        let p = routes(TWO).pick(alias("db1"), &url("https://example.com/"));
         assert_eq!(
             p,
             Pick {
@@ -232,7 +210,7 @@ mod tests {
         );
         let r = routes("[default]\nopen = \"firefox:Dev\"\n");
         assert_eq!(
-            r.pick(&alias("db1"), &url("https://e.com/"))
+            r.pick(alias("db1"), &url("https://e.com/"))
                 .target
                 .to_string(),
             "firefox:Dev"
@@ -240,27 +218,19 @@ mod tests {
     }
 
     #[test]
-    fn a_reported_host_never_matches_a_route_and_goes_to_unverified() {
-        let r = routes(TWO);
-        let p = r.pick(
-            &RequestHost::Unverified("g14".into()),
-            &url("https://mail.google.com/"),
-        );
-        assert_eq!(p.route, None);
-        assert_eq!(p.target, Target::Ask);
-        let r = routes("[unverified]\nopen = \"system\"\n");
-        let p = r.pick(&RequestHost::Unverified("x".into()), &url("https://e.com/"));
-        assert_eq!(p.target, Target::System);
+    fn an_ignored_unverified_entry_changes_no_pick() {
+        let r = routes("[unverified]\nopen = \"safari\"\n");
+        assert_eq!(r, Routes::default());
     }
 
     #[test]
     fn ask_true_is_reported() {
         let r = routes("[[route]]\nhost = \"*\"\nopen = \"system\"\nask = true\n");
-        assert!(r.pick(&alias("any"), &url("https://e.com/")).ask);
+        assert!(r.pick(alias("any"), &url("https://e.com/")).ask);
     }
 
-    fn resolve(text: &str, host: RequestHost) -> Resolved {
-        routes(text).resolve(&host, &url("https://e.com/"), &Browsers::default())
+    fn resolve(text: &str, host: &str) -> Resolved {
+        routes(text).resolve(host, &url("https://e.com/"), &Browsers::default())
     }
 
     fn chrome() -> Browsers {
@@ -286,7 +256,7 @@ mod tests {
         let r = routes(
             "[[route]]\nhost = \"g14\"\nopen = \"chrome:Work\"\n[default]\nopen = \"ask\"\n",
         )
-        .resolve(&alias("g14"), &url("https://e.com/"), &chrome());
+        .resolve(alias("g14"), &url("https://e.com/"), &chrome());
         assert_eq!(r.target.to_string(), "chrome:Profile 2");
         assert!(!r.ask);
         assert!(r.warnings.is_empty());
@@ -296,7 +266,7 @@ mod tests {
     fn a_missing_route_target_falls_back_to_a_found_browser_default() {
         let r =
             routes("[[route]]\nhost = \"g14\"\nopen = \"safari\"\n[default]\nopen = \"chrome\"\n")
-                .resolve(&alias("g14"), &url("https://e.com/"), &chrome());
+                .resolve(alias("g14"), &url("https://e.com/"), &chrome());
         assert_eq!(r.target.to_string(), "chrome");
         assert_eq!(
             r.warnings,
@@ -310,14 +280,13 @@ mod tests {
         assert_eq!(r.target, Target::System);
         assert!(r.ask);
         assert!(r.warnings.is_empty());
-        assert!(resolve("", RequestHost::Unverified("x".into())).ask);
         assert!(!resolve("", alias("x")).ask);
     }
 
     #[test]
     fn a_browser_target_falls_back_to_an_ask_default_and_waits() {
-        let text = "[unverified]\nopen = \"safari\"\n[default]\nopen = \"ask\"\n";
-        let r = resolve(text, RequestHost::Unverified("x".into()));
+        let text = "[[route]]\nhost = \"x\"\nopen = \"safari\"\n[default]\nopen = \"ask\"\n";
+        let r = resolve(text, alias("x"));
         assert_eq!(r.target, Target::System);
         assert!(r.ask);
         assert_eq!(

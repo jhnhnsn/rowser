@@ -30,7 +30,6 @@ pub(super) struct Forwards {
 struct Active {
     ports: Vec<u16>,
     host: String,
-    unverified: bool,
     started: tokio::time::Instant,
 }
 
@@ -128,14 +127,11 @@ impl Forwards {
             }
         };
         let ports = bound.clone();
-        let (host, unverified) = host.parts();
-        let host = host.to_string();
         self.active.lock().unwrap().insert(
             id.clone(),
             Active {
                 ports: bound.clone(),
-                host,
-                unverified,
+                host: host.alias().to_string(),
                 started: tokio::time::Instant::now(),
             },
         );
@@ -168,7 +164,6 @@ impl Forwards {
                 a.ports.iter().map(|&port| ForwardInfo {
                     port,
                     host: a.host.clone(),
-                    unverified: a.unverified,
                     age_secs: a.started.elapsed().as_secs(),
                 })
             })

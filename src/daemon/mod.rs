@@ -1,4 +1,4 @@
-//! The Daemon: serves Open requests on the direct and relay sockets, and
+//! The Daemon: serves Open requests on the Link to each Saved host, and
 //! control commands on the control socket.
 
 mod activity;
@@ -10,7 +10,6 @@ mod link;
 mod notifier;
 mod opener;
 mod pending;
-mod session;
 #[doc(hidden)]
 pub mod testing;
 
@@ -27,30 +26,22 @@ use url::Url;
 
 use crate::browsers::{Browsers, Roots};
 use crate::protocol::{ActivityEntry, AnsweredBy, Conn, Hello, Msg, Outcome, RequestKind};
-use crate::routes::{RequestHost, Resolved, Routes};
+use crate::routes::{Resolved, Routes};
 use limit::Limit;
 pub use notifier::{DesktopNotifier, Dismiss, LinkEvent, Notice, NoticeHost, Notifier, Subject};
 pub use opener::{CommandOpener, Opener};
 
-/// File name of the direct socket in the runtime directory.
-pub const DIRECT_SOCKET: &str = "rowserd.sock";
-/// File name of the relay socket in the runtime directory.
-pub const RELAY_SOCKET: &str = "rowserd-relay.sock";
 pub use crate::protocol::CONTROL_SOCKET;
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
-    /// Most Open requests one Saved host (all streams of its Link) or one
-    /// socket connection may make in `rate_window`.
+    /// Most Open requests one Saved host (all streams of its Link) may make
+    /// in `rate_window`.
     pub rate_max: usize,
     pub rate_window: Duration,
     /// `--confirm-hosts` glob patterns (`*`, `?`; ASCII case is ignored).
     /// Open requests whose Host alias matches wait for `Notifier::confirm`.
     pub confirm_hosts: Vec<String>,
-    /// `--confirm-unverified`: on the direct socket, also match the patterns
-    /// against the Reported host name. Without it, requests on the direct
-    /// socket never wait for confirmation.
-    pub confirm_unverified: bool,
     /// How long a confirmation may take before the request is refused.
     pub confirm_timeout: Duration,
     /// How long a Callback forward lives at most.
@@ -85,7 +76,6 @@ impl Default for DaemonConfig {
             rate_max: 5,
             rate_window: Duration::from_secs(10),
             confirm_hosts: vec![],
-            confirm_unverified: false,
             confirm_timeout: confirm::CONFIRM_TIMEOUT,
             forward_timeout: crate::callback::FORWARD_TIMEOUT,
             loopback: crate::callback::LOOPBACK.to_vec(),
@@ -100,24 +90,14 @@ impl Default for DaemonConfig {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Socket {
-    Direct,
-    Relay,
-    /// Local control commands only (ADR 0006).
-    Control,
-}
-
-/// Where a request connection came from.
-pub(crate) enum Source {
-    Socket(Socket),
-    /// A stream on the Link to the Saved host `alias`; all its streams share
-    /// `limit`. `link` opens new streams on that Link, for Callback forwards.
-    Link {
-        alias: String,
-        limit: Arc<Mutex<Limit>>,
-        link: crate::mux::Opener,
-    },
+/// Where a request connection came from: a stream on the Link to the Saved
+/// host `alias`. All its streams share `limit`. `link` opens new streams on
+/// that Link, for Callback forwards; `None` only for a test Link
+/// (`Daemon::serve_with_test_links`), which then forwards nothing.
+pub(crate) struct Source {
+    pub alias: String,
+    pub limit: Arc<Mutex<Limit>>,
+    pub link: Option<crate::mux::Opener>,
 }
 
 /// Any byte stream a request can arrive on: a Unix socket or a Link stream.
@@ -147,7 +127,6 @@ struct Inner {
     opener: Arc<dyn Opener>,
     notifier: Arc<dyn Notifier>,
     forwards: Arc<forward::Forwards>,
-    sessions: Arc<session::Sessions>,
     /// Recent requests, for `rowser activity`.
     activity: Arc<activity::Activity>,
     /// The Routes in use and the file state: set at start, replaced by a
@@ -196,7 +175,6 @@ impl Daemon {
                 opener: Arc::new(opener),
                 notifier: Arc::new(notifier),
                 forwards: Arc::default(),
-                sessions: Arc::default(),
                 activity: Arc::default(),
                 pause: Mutex::default(),
                 pending: Arc::default(),
@@ -205,27 +183,46 @@ impl Daemon {
     }
 
     /// Opens a Link to each Saved host, and accepts connections on the
-    /// three sockets until an accept fails.
-    pub async fn serve(
+    /// control socket until an accept fails.
+    pub async fn serve(self, control: UnixListener) -> io::Result<()> {
+        self.serve_with_test_links(control, vec![]).await
+    }
+
+    /// `serve`, and also takes each connection on a test listener as a
+    /// stream of a Link to its Host alias, with no Link under it: a
+    /// Callback forward gives a warning and forwards nothing. A test hook:
+    /// the binary never binds one.
+    #[doc(hidden)]
+    pub async fn serve_with_test_links(
         self,
-        direct: UnixListener,
-        relay: UnixListener,
         control: UnixListener,
+        test_links: Vec<(String, UnixListener)>,
     ) -> io::Result<()> {
         self.inner.sync_links(self.inner.config.hosts.clone());
+        for (alias, listener) in test_links {
+            let inner = self.inner.clone();
+            let limit = inner.new_limit();
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let source = Source {
+                        alias: alias.clone(),
+                        limit: limit.clone(),
+                        link: None,
+                    };
+                    let inner = inner.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = inner.handle(stream, source).await {
+                            tracing::debug!("connection ended: {e}");
+                        }
+                    });
+                }
+            });
+        }
         loop {
-            let (stream, socket) = tokio::select! {
-                r = direct.accept() => (r?.0, Socket::Direct),
-                r = relay.accept() => (r?.0, Socket::Relay),
-                r = control.accept() => (r?.0, Socket::Control),
-            };
+            let (stream, _) = control.accept().await?;
             let inner = self.inner.clone();
             tokio::spawn(async move {
-                let result = match socket {
-                    Socket::Control => inner.handle_control(stream).await,
-                    socket => inner.handle(stream, Source::Socket(socket)).await,
-                };
-                if let Err(e) = result {
+                if let Err(e) = inner.handle_control(stream).await {
                     tracing::debug!("connection ended: {e}");
                 }
             });
@@ -241,7 +238,7 @@ pub const NOT_APPROVED: &str =
 pub const FORWARD_NOT_APPROVED: &str =
     "the forward was not approved: the user denied it, or the confirmation could not be shown (see the daemon log)";
 
-/// The error for a control message on the direct or relay socket.
+/// The error for a control message on a Link.
 pub const CONTROL_ONLY: &str = "control messages are accepted only on the control socket";
 
 /// The answer to `Ping` on every socket.
@@ -326,54 +323,21 @@ impl Inner {
         source: Source,
     ) -> crate::protocol::Result<()> {
         let (mut conn, _) = Conn::accept(Box::new(stream) as BoxStream).await?;
-        let (socket, shared, link) = match source {
-            Source::Socket(s) => (s, None, None),
-            Source::Link { alias, limit, link } => {
-                (Socket::Relay, Some((alias, limit)), Some(link))
-            }
-        };
+        let Source { alias, limit, link } = source;
         let link = link.as_ref();
-        let stamp = match (&shared, socket) {
-            (Some((alias, _)), _) => Some(alias.clone()),
-            (None, Socket::Direct | Socket::Control) => None,
-            (None, Socket::Relay) => match conn.recv().await? {
-                Some(Msg::HostStamp { alias }) => Some(alias),
-                Some(_) => {
-                    return conn
-                        .send(&open_error("the relay socket needs a host stamp first"))
-                        .await
-                }
-                None => return Ok(()),
-            },
-        };
-        let limit = match shared {
-            Some((_, l)) => l,
-            None => Arc::new(Mutex::new(Limit::new(
-                self.config.rate_max,
-                self.config.rate_window,
-            ))),
-        };
         let allow = || limit.lock().unwrap_or_else(|e| e.into_inner()).allow();
         while let Some(msg) = conn.recv().await? {
             if msg.is_control() {
                 // ADR 0006: a Remote host never reaches the control socket.
                 return conn.send(&open_error(CONTROL_ONLY)).await;
             }
+            let host = NoticeHost::Alias(alias.clone());
             let reply = match msg {
                 Msg::Ping => pong(),
-                Msg::HostStamp { .. } => {
-                    let text = match socket {
-                        Socket::Relay => "only one host stamp is allowed per connection",
-                        _ => "host stamps are not accepted on the direct socket",
-                    };
-                    return conn.send(&open_error(text)).await;
-                }
                 Msg::Open {
                     url,
-                    reported_host,
                     callback_ports,
                 } => {
-                    let host = notice_host(&stamp, reported_host);
                     if self.pause_state().is_paused() {
                         let mut e = new_entry(RequestKind::Open, &host, Outcome::Paused);
                         e.url = Some(url.clone());
@@ -388,11 +352,7 @@ impl Inner {
                         self.rate_error()
                     }
                 }
-                Msg::Forward {
-                    reported_host,
-                    callback_ports,
-                } => {
-                    let host = notice_host(&stamp, reported_host);
+                Msg::Forward { callback_ports } => {
                     if self.pause_state().is_paused() {
                         let text = paused_text(&Subject::Forward(callback_ports.clone()));
                         let e = new_entry(RequestKind::Forward, &host, Outcome::Paused);
@@ -411,6 +371,14 @@ impl Inner {
             conn.send(&reply).await?;
         }
         Ok(())
+    }
+
+    /// A fresh rate limit, for all the streams of one Link.
+    pub(crate) fn new_limit(&self) -> Arc<Mutex<Limit>> {
+        Arc::new(Mutex::new(Limit::new(
+            self.config.rate_max,
+            self.config.rate_window,
+        )))
     }
 
     /// Records a request that started no Callback forward, with the ports
@@ -532,10 +500,6 @@ impl Inner {
                 url.scheme()
             ));
         }
-        let request_host = match &host {
-            NoticeHost::Alias(a) => RequestHost::Alias(a.clone()),
-            NoticeHost::Reported(n) => RequestHost::Unverified(n.clone()),
-        };
         let Resolved {
             route,
             mut target,
@@ -543,8 +507,8 @@ impl Inner {
             mut warnings,
         } = self
             .current_routes()
-            .resolve(&request_host, &url, &self.browsers());
-        entry.route = Some(route_label(route, &host));
+            .resolve(host.alias(), &url, &self.browsers());
+        entry.route = Some(route_label(route));
         entry.target = Some(target.to_string());
         entry.warnings = warnings.clone();
         let confirm = ask || self.config.needs_confirm(&host);
@@ -763,13 +727,11 @@ fn unix_now() -> u64 {
 /// A new `rowser activity` entry, stamped with the time now. The ring
 /// sets its id.
 fn new_entry(kind: RequestKind, host: &NoticeHost, result: Outcome) -> ActivityEntry {
-    let (host, unverified) = host.parts();
     ActivityEntry {
         id: 0,
         time: unix_now(),
         kind,
-        host: host.to_string(),
-        unverified,
+        host: host.alias().to_string(),
         url: None,
         route: None,
         target: None,
@@ -782,34 +744,21 @@ fn new_entry(kind: RequestKind, host: &NoticeHost, result: Outcome) -> ActivityE
 }
 
 /// The Route that matched, as `rowser activity` shows it.
-fn route_label(route: Option<usize>, host: &NoticeHost) -> String {
-    match (route, host) {
-        (Some(i), _) => format!("route {}", i + 1),
-        (None, NoticeHost::Reported(_)) => "[unverified]".into(),
-        (None, NoticeHost::Alias(_)) => "[default]".into(),
+fn route_label(route: Option<usize>) -> String {
+    match route {
+        Some(i) => format!("route {}", i + 1),
+        None => "[default]".into(),
     }
 }
 
-/// The host name of a request: the Host stamp's alias on the relay socket,
-/// else the Reported host name.
-fn notice_host(stamp: &Option<String>, reported_host: String) -> NoticeHost {
-    match stamp {
-        Some(alias) => NoticeHost::Alias(alias.clone()),
-        None => NoticeHost::Reported(reported_host),
-    }
-}
-
-/// Binds the direct, relay and control sockets (mode 0600) in the runtime
-/// directory `dir`. A missing `dir` is created with mode 0700. An existing `dir` must be
-/// owned by the current user and have no group or other permission bits; it is
-/// never changed. A Stale socket is replaced; a live one is an error.
-pub fn bind_sockets(dir: &Path) -> io::Result<(UnixListener, UnixListener, UnixListener)> {
+/// Binds the control socket (mode 0600) in the runtime directory `dir`. A
+/// missing `dir` is created with mode 0700. An existing `dir` must be owned
+/// by the current user and have no group or other permission bits; it is
+/// never changed. A socket nothing listens on is replaced; a live one is an
+/// error.
+pub fn bind_sockets(dir: &Path) -> io::Result<UnixListener> {
     prepare_dir(dir)?;
-    Ok((
-        bind(&dir.join(DIRECT_SOCKET))?,
-        bind(&dir.join(RELAY_SOCKET))?,
-        bind(&dir.join(CONTROL_SOCKET))?,
-    ))
+    bind(&dir.join(CONTROL_SOCKET))
 }
 
 fn prepare_dir(dir: &Path) -> io::Result<()> {
@@ -877,7 +826,6 @@ pub struct RunArgs {
     pub runtime_dir: Option<PathBuf>,
     pub open_command: Option<String>,
     pub confirm_hosts: Vec<String>,
-    pub confirm_unverified: bool,
     /// Test hook: a scripted Notifier answer instead of the desktop.
     pub test_confirm: Option<testing::Answer>,
     /// Test hook: confirmation timeout in seconds.
@@ -908,9 +856,9 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
         routes: Routes::from_config(&file),
         config_file: Some(config_path),
         confirm_hosts: args.confirm_hosts,
-        confirm_unverified: args.confirm_unverified,
         ..DaemonConfig::default()
     };
+    let unverified = file.has_unverified;
     if let Some(secs) = args.confirm_timeout {
         config.confirm_timeout = Duration::from_secs(secs);
     }
@@ -922,15 +870,15 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
     }
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let (direct, relay, control) = bind_sockets(&dir).map_err(|e| e.to_string())?;
+        let control = bind_sockets(&dir).map_err(|e| e.to_string())?;
         eprintln!("rowser daemon: listening in {}", dir.display());
+        if unverified {
+            tracing::warn!("{}", crate::config::UNVERIFIED_IGNORED);
+        }
         let daemon = match args.test_confirm {
             Some(answer) => Daemon::new(config, opener, testing::ScriptedNotifier::new(answer)),
             None => Daemon::new(config, opener, DesktopNotifier),
         };
-        daemon
-            .serve(direct, relay, control)
-            .await
-            .map_err(|e| e.to_string())
+        daemon.serve(control).await.map_err(|e| e.to_string())
     })
 }

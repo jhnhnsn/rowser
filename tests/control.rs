@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
-use common::TmpDir;
+use common::{test_link, TmpDir, TEST_LINK};
 use rowser::control::{run_reload, run_status, StatusArgs};
 use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
-use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET, RELAY_SOCKET};
+use rowser::daemon::{bind_sockets, Daemon, DaemonConfig};
 use rowser::protocol::{Conn, Hello, Msg, Version, CONTROL_SOCKET};
 use rowser::routes::Routes;
 use tokio::net::UnixStream;
@@ -25,7 +25,7 @@ async fn start(dir: &TmpDir) -> PathBuf {
 
 async fn start_with(dir: &TmpDir, config: DaemonConfig) -> PathBuf {
     let run = dir.0.join("run");
-    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let control = bind_sockets(&run).unwrap();
     let config = DaemonConfig {
         loopback: vec![V6],
         ..config
@@ -35,7 +35,8 @@ async fn start_with(dir: &TmpDir, config: DaemonConfig) -> PathBuf {
         RecordingOpener::default(),
         RecordingNotifier::default(),
     );
-    tokio::spawn(daemon.serve(direct, relay, control));
+    let links = vec![test_link(&run, "g14")];
+    tokio::spawn(daemon.serve_with_test_links(control, links));
     run
 }
 
@@ -94,7 +95,8 @@ async fn status_shows_the_daemon_version() {
             "paused:            no".to_string(),
         ]
     );
-    assert_eq!(lines[5], "sessions:          none");
+    assert_eq!(lines[5], "callback forwards: none");
+    assert!(!out.contains("sessions"), "{out}");
 
     let v = json_status(run.clone()).await;
     assert_eq!(v["daemon_version"], env!("CARGO_PKG_VERSION"));
@@ -103,6 +105,7 @@ async fn status_shows_the_daemon_version() {
     assert_eq!(v["config_file"], serde_json::Value::Null);
     assert_eq!(v["config_file_exists"], false);
     assert_eq!(v["paused"], false);
+    assert!(v.get("sessions").is_none(), "{v}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -131,119 +134,12 @@ async fn status_shows_the_config_file_path_and_whether_it_exists() {
 async fn a_protocol_1_0_shim_is_refused_by_the_2_0_daemon() {
     let dir = TmpDir::new("ctl");
     let run = start(&dir).await;
-    let s = UnixStream::connect(run.join(DIRECT_SOCKET)).await.unwrap();
+    let s = UnixStream::connect(run.join(TEST_LINK)).await.unwrap();
     let r = Conn::connect(s, Hello::with_version(Version::new(1, 0))).await;
     assert!(matches!(
         r,
         Err(rowser::protocol::Error::VersionMismatch { .. })
     ));
-}
-
-/// A control connection that registered a Session for `alias`.
-async fn session(run: &Path, alias: &str) -> Conn<UnixStream> {
-    let mut control = connect(run.join(CONTROL_SOCKET)).await;
-    control
-        .send(&Msg::Session { host: alias.into() })
-        .await
-        .unwrap();
-    assert!(matches!(
-        control.recv().await.unwrap(),
-        Some(Msg::OpenResult { error: None, .. })
-    ));
-    control
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_session_shows_the_target_of_its_first_route_without_match() {
-    let text = "[[route]]\nhost = \"g14\"\nmatch = [\"*.google.com\"]\nopen = \"chrome:Work\"\n\
-                [[route]]\nhost = \"g1?\"\nopen = \"safari\"\n";
-    let config = DaemonConfig {
-        routes: Routes::from_config(&rowser::config::parse(text).unwrap()),
-        ..DaemonConfig::default()
-    };
-    let dir = TmpDir::new("ctl");
-    let run = start_with(&dir, config).await;
-    let _a = session(&run, "g14").await;
-    let _b = session(&run, "db1").await;
-
-    let (_, out, _) = status(run.clone(), false).await;
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines[5], "sessions:");
-    assert!(
-        lines[6].starts_with("  g14  ") && lines[6].ends_with("  safari"),
-        "{out}"
-    );
-    assert!(
-        lines[7].starts_with("  db1  ") && lines[7].ends_with("  system"),
-        "{out}"
-    );
-
-    let v = json_status(run).await;
-    assert_eq!(v["sessions"][0]["host"], "g14");
-    assert_eq!(v["sessions"][0]["target"], "safari");
-    assert_eq!(v["sessions"][1]["target"], "system");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_session_ends_when_its_connection_closes() {
-    let dir = TmpDir::new("ctl");
-    let run = start(&dir).await;
-    let conn = session(&run, "g14").await;
-    assert_eq!(json_status(run.clone()).await["sessions"][0]["host"], "g14");
-    drop(conn);
-    for _ in 0..50 {
-        if json_status(run.clone()).await["sessions"] == serde_json::json!([]) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("the session is still in status");
-}
-
-#[tokio::test]
-async fn a_session_is_refused_on_the_direct_socket() {
-    let dir = TmpDir::new("ctl");
-    let run = start(&dir).await;
-    let mut direct = connect(run.join(DIRECT_SOCKET)).await;
-    direct
-        .send(&Msg::Session { host: "g14".into() })
-        .await
-        .unwrap();
-    match direct.recv().await.unwrap() {
-        Some(Msg::OpenResult { error: Some(e), .. }) => {
-            assert!(e.contains("control socket"), "{e}")
-        }
-        other => panic!("unexpected {other:?}"),
-    }
-    let v = json_status(run).await;
-    assert_eq!(v["sessions"], serde_json::json!([]));
-}
-
-#[tokio::test]
-async fn a_session_on_the_relay_socket_after_a_host_stamp_is_refused() {
-    let dir = TmpDir::new("ctl");
-    let run = start(&dir).await;
-    let mut relay = connect(run.join(RELAY_SOCKET)).await;
-    relay
-        .send(&Msg::HostStamp {
-            alias: "g14".into(),
-        })
-        .await
-        .unwrap();
-    relay
-        .send(&Msg::Session {
-            host: "evil".into(),
-        })
-        .await
-        .unwrap();
-    match relay.recv().await.unwrap() {
-        Some(Msg::OpenResult { error: Some(e), .. }) => {
-            assert!(e.contains("control socket"), "{e}")
-        }
-        other => panic!("unexpected {other:?}"),
-    }
-    let v = json_status(run).await;
-    assert_eq!(v["sessions"], serde_json::json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -256,7 +152,7 @@ async fn status_with_no_forwards_says_none() {
 }
 
 #[tokio::test]
-async fn control_messages_are_refused_on_the_direct_and_relay_sockets() {
+async fn control_messages_are_refused_on_a_link() {
     let dir = TmpDir::new("ctl");
     let run = start(&dir).await;
 
@@ -266,24 +162,9 @@ async fn control_messages_are_refused_on_the_direct_and_relay_sockets() {
         Msg::Pause { for_secs: None },
         Msg::Resume,
     ] {
-        let mut direct = connect(run.join(DIRECT_SOCKET)).await;
-        direct.send(&msg).await.unwrap();
-        match direct.recv().await.unwrap() {
-            Some(Msg::OpenResult { error: Some(e), .. }) => {
-                assert!(e.contains("control socket"), "{msg:?}: {e}")
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-
-        let mut relay = connect(run.join(RELAY_SOCKET)).await;
-        relay
-            .send(&Msg::HostStamp {
-                alias: "g14".into(),
-            })
-            .await
-            .unwrap();
-        relay.send(&msg).await.unwrap();
-        match relay.recv().await.unwrap() {
+        let mut link = connect(run.join(TEST_LINK)).await;
+        link.send(&msg).await.unwrap();
+        match link.recv().await.unwrap() {
             Some(Msg::OpenResult { error: Some(e), .. }) => {
                 assert!(e.contains("control socket"), "{msg:?}: {e}")
             }
@@ -292,7 +173,7 @@ async fn control_messages_are_refused_on_the_direct_and_relay_sockets() {
     }
 
     // The Daemon keeps serving.
-    let mut again = connect(run.join(DIRECT_SOCKET)).await;
+    let mut again = connect(run.join(TEST_LINK)).await;
     again.send(&Msg::Ping).await.unwrap();
     assert!(matches!(
         again.recv().await.unwrap(),
@@ -316,28 +197,20 @@ async fn reload(run: PathBuf) -> (ExitCode, String, String) {
     .unwrap()
 }
 
-/// Sends an Open request for `alias` on the relay socket and gives the
-/// warnings of its notice. A browser Target falls back to `system` (#47)
-/// with a warning that names it, so the warnings show which Route applied.
-async fn open_warnings(run: &Path, notifier: &RecordingNotifier, alias: &str) -> Vec<String> {
+/// Sends an Open request on the test Link of `g14` and gives the warnings
+/// of its notice. A browser Target falls back to `system` (#47) with a
+/// warning that names it, so the warnings show which Route applied.
+async fn open_warnings(run: &Path, notifier: &RecordingNotifier) -> Vec<String> {
     let before = notifier.notices().len();
-    let mut relay = connect(run.join(RELAY_SOCKET)).await;
-    relay
-        .send(&Msg::HostStamp {
-            alias: alias.into(),
-        })
-        .await
-        .unwrap();
-    relay
-        .send(&Msg::Open {
-            url: "https://example.com/".into(),
-            reported_host: "devbox".into(),
-            callback_ports: vec![],
-        })
-        .await
-        .unwrap();
+    let mut link = connect(run.join(TEST_LINK)).await;
+    link.send(&Msg::Open {
+        url: "https://example.com/".into(),
+        callback_ports: vec![],
+    })
+    .await
+    .unwrap();
     assert!(matches!(
-        relay.recv().await.unwrap(),
+        link.recv().await.unwrap(),
         Some(Msg::OpenResult { error: None, .. })
     ));
     // The notice is sent from a blocking task after the reply.
@@ -357,7 +230,7 @@ async fn reload_applies_new_routes_and_refuses_an_invalid_file() {
     let file = dir.0.join("config.toml");
     std::fs::write(&file, "[[route]]\nhost = \"g14\"\nopen = \"system\"\n").unwrap();
     let run = dir.0.join("run");
-    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let control = bind_sockets(&run).unwrap();
     let notifier = RecordingNotifier::default();
     let config = DaemonConfig {
         loopback: vec![V6],
@@ -366,11 +239,9 @@ async fn reload_applies_new_routes_and_refuses_an_invalid_file() {
         ..DaemonConfig::default()
     };
     let daemon = Daemon::new(config, RecordingOpener::default(), notifier.clone());
-    tokio::spawn(daemon.serve(direct, relay, control));
-    assert_eq!(
-        open_warnings(&run, &notifier, "g14").await,
-        Vec::<String>::new()
-    );
+    let links = vec![test_link(&run, "g14")];
+    tokio::spawn(daemon.serve_with_test_links(control, links));
+    assert_eq!(open_warnings(&run, &notifier).await, Vec::<String>::new());
 
     std::fs::write(
         &file,
@@ -381,13 +252,8 @@ async fn reload_applies_new_routes_and_refuses_an_invalid_file() {
     let (code, out, err) = reload(run.clone()).await;
     assert_eq!(code, ExitCode::SUCCESS, "{err}");
     assert_eq!(out, "rowser: config reloaded (2 routes)\n");
-    let w = open_warnings(&run, &notifier, "g14").await;
+    let w = open_warnings(&run, &notifier).await;
     assert!(w.len() == 1 && w[0].contains("safari"), "{w:?}");
-    let _s = session(&run, "g14").await;
-    assert_eq!(
-        json_status(run.clone()).await["sessions"][0]["target"],
-        "safari"
-    );
 
     std::fs::write(&file, "[[route]]\nhost = \"g14\"\nopen = 7\n").unwrap();
     let (code, out, err) = reload(run.clone()).await;
@@ -397,7 +263,7 @@ async fn reload_applies_new_routes_and_refuses_an_invalid_file() {
     assert!(err.contains(&file.display().to_string()), "{err}");
     assert!(err.contains("line 3"), "{err}");
     // The old Route still applies.
-    let w = open_warnings(&run, &notifier, "g14").await;
+    let w = open_warnings(&run, &notifier).await;
     assert!(w.len() == 1 && w[0].contains("safari"), "{w:?}");
 }
 

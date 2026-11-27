@@ -3,10 +3,10 @@ mod common;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use common::TmpDir;
+use common::{test_link, TmpDir, TEST_LINK};
 use rowser::browsers::{Os, Roots};
 use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
-use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET};
+use rowser::daemon::{bind_sockets, Daemon, DaemonConfig};
 use rowser::doctor::{run_doctor, DoctorEnv, FIX};
 use rowser::protocol::{Conn, Hello, Msg, Version};
 use tokio::net::UnixListener;
@@ -52,7 +52,7 @@ fn env(dir: &TmpDir, over: Option<PathBuf>) -> DoctorEnv<Vec<u8>> {
         path: Some(bin.clone().into_os_string()),
         browser: Some("xdg-open".into()),
         home: Some(home),
-        tunnel_dir: dir.0.join("tunnels"),
+        outpost_socket: Some(dir.0.join("no-outpost.sock")),
         socket_override: over,
         graphical: false,
         self_exe: Some(bin.join("rowser")),
@@ -95,7 +95,7 @@ fn chrome_roots(dir: &TmpDir) -> Roots {
     empty_roots(dir)
 }
 
-/// A Local-machine env: config file with `text`, no Session socket.
+/// A Local-machine env: config file with `text`, no Outpost socket.
 fn local_env(dir: &TmpDir, text: &str) -> DoctorEnv<Vec<u8>> {
     let mut e = env(dir, None);
     let f = dir.0.join("cfg/rowser/config.toml");
@@ -122,7 +122,7 @@ async fn local_good_config_passes_and_a_stopped_daemon_only_warns() {
             "ok   routes: every browser Target is found".to_string(),
             "warn daemon: the daemon is not running; start it with `rowser daemon`".to_string(),
         ],
-        "no Remote checks without a Session socket or SSH"
+        "no Remote checks without an Outpost socket or SSH"
     );
 }
 
@@ -155,11 +155,7 @@ async fn local_route_to_a_missing_browser_or_profile_warns() {
 #[tokio::test]
 async fn local_missing_fallback_targets_say_what_they_fall_back_to() {
     let dir = TmpDir::new("df");
-    let mut e = local_env(
-        &dir,
-        "[unverified]\nopen = \"firefox\"\n\
-         [default]\nopen = \"chrome:Nope\"\n",
-    );
+    let mut e = local_env(&dir, "[default]\nopen = \"chrome:Nope\"\n");
     assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
     let out = lines(e);
     let warns: Vec<&String> = out
@@ -169,13 +165,29 @@ async fn local_missing_fallback_targets_say_what_they_fall_back_to() {
     assert_eq!(
         warns,
         vec![
-            "warn routes: [unverified]: firefox: browser `firefox` is not installed; \
-             the request falls back to [default]",
             "warn routes: [default]: chrome:Nope: browser `chrome` has no profile `Nope`; \
              the request falls back to `system`",
         ],
         "{out:?}"
     );
+}
+
+#[tokio::test]
+async fn local_unverified_entry_warns_once_that_it_is_ignored() {
+    let dir = TmpDir::new("du");
+    let mut e = local_env(&dir, "[unverified]\nopen = \"firefox\"\n");
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    let warns: Vec<&String> = out.iter().filter(|l| l.contains("unverified")).collect();
+    assert_eq!(
+        warns,
+        vec![
+            "warn config: the [unverified] entry is removed and ignored: every Open request \
+             now comes from a Saved host; remove [unverified] from the config file"
+        ],
+        "{out:?}"
+    );
+    assert!(!out.iter().any(|l| l.contains("firefox")), "{out:?}");
 }
 
 #[tokio::test]
@@ -196,13 +208,13 @@ async fn local_invalid_config_fails_with_the_file_and_line() {
 async fn local_daemon_answers_with_its_version() {
     let dir = TmpDir::new("dd");
     let run = dir.0.join("rt");
-    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let control = bind_sockets(&run).unwrap();
     let daemon = Daemon::new(
         DaemonConfig::default(),
         RecordingOpener::default(),
         RecordingNotifier::default(),
     );
-    tokio::spawn(daemon.serve(direct, relay, control));
+    tokio::spawn(daemon.serve(control));
     // No config file: the runtime directory alone makes this the Local machine.
     let mut e = env(&dir, None);
     assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
@@ -242,14 +254,15 @@ fn lines(env: DoctorEnv<Vec<u8>>) -> Vec<String> {
 async fn round_trip_against_a_daemon_is_ok_and_exits_0() {
     let dir = TmpDir::new("doc");
     let run = dir.0.join("run");
-    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let control = bind_sockets(&run).unwrap();
     let daemon = Daemon::new(
         DaemonConfig::default(),
         RecordingOpener::default(),
         RecordingNotifier::default(),
     );
-    tokio::spawn(daemon.serve(direct, relay, control));
-    let socket = run.join(DIRECT_SOCKET);
+    let links = vec![test_link(&run, "devbox")];
+    tokio::spawn(daemon.serve_with_test_links(control, links));
+    let socket = run.join(TEST_LINK);
     let mut e = env(&dir, Some(socket.clone()));
     assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
     let out = lines(e);
@@ -344,7 +357,8 @@ async fn no_tunnel_fails_clearly_and_exits_1() {
     assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
     assert_eq!(
         lines(e).last().unwrap(),
-        "fail tunnel: no tunnel; connect with `rowser ssh <host>` or set ROWSER_SOCKET"
+        "fail tunnel: no Link to your Local machine; run \"rowser host add <host>\" there, \
+         or check \"rowser host list\""
     );
 }
 

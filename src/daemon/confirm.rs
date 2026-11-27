@@ -12,12 +12,9 @@ pub(crate) const CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
 impl DaemonConfig {
     /// Whether an Open request from `host` must wait for confirmation.
     pub(crate) fn needs_confirm(&self, host: &NoticeHost) -> bool {
-        let name = match host {
-            NoticeHost::Alias(alias) => alias,
-            NoticeHost::Reported(name) if self.confirm_unverified => name,
-            NoticeHost::Reported(_) => return false,
-        };
-        self.confirm_hosts.iter().any(|p| glob_match(p, name))
+        self.confirm_hosts
+            .iter()
+            .any(|p| glob_match(p, host.alias()))
     }
 }
 

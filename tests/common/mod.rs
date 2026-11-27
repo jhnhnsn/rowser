@@ -1,7 +1,22 @@
 //! Helpers shared by the integration tests.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// The file name of the test Link socket in a run directory.
+#[allow(dead_code)]
+pub const TEST_LINK: &str = "test-link.sock";
+
+/// Binds `run/TEST_LINK`: each connection to it acts as a stream of a
+/// Link to the Saved host `alias` (see `Daemon::serve_with_test_links`).
+/// Call it after `bind_sockets`, which makes `run`.
+#[allow(dead_code)]
+pub fn test_link(run: &Path, alias: &str) -> (String, tokio::net::UnixListener) {
+    // A Daemon started again on the same run directory replaces it.
+    let _ = std::fs::remove_file(run.join(TEST_LINK));
+    let l = tokio::net::UnixListener::bind(run.join(TEST_LINK)).unwrap();
+    (alias.to_string(), l)
+}
 
 /// A short temp dir under /tmp (Unix socket paths are limited to ~104
 /// bytes), removed on drop. `tag` keeps the dirs of test binaries apart.

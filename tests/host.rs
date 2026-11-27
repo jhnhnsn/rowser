@@ -148,7 +148,7 @@ impl World {
 
     /// Starts a Daemon on the config file, with the fake `ssh`.
     fn start_daemon(&self) {
-        let (direct, relay, control) = bind_sockets(&self.run_dir()).unwrap();
+        let control = bind_sockets(&self.run_dir()).unwrap();
         let file = self.config_file();
         let config = DaemonConfig {
             ssh: self.dir.0.join("bin").join("ssh"),
@@ -162,7 +162,7 @@ impl World {
             RecordingOpener::default(),
             RecordingNotifier::default(),
         );
-        tokio::spawn(daemon.serve(direct, relay, control));
+        tokio::spawn(daemon.serve(control));
     }
 
     fn socket(&self, alias: &str) -> PathBuf {

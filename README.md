@@ -17,7 +17,7 @@ that use a `localhost` redirect (`gcloud auth login`, `az login`, …) just work
 
 | Role | Platforms |
 | --- | --- |
-| Local (daemon, `rowser ssh`) | Linux, macOS (aarch64 and x86_64) |
+| Local (daemon) | Linux, macOS (aarch64 and x86_64) |
 | Remote (shim) | Linux x86_64 and aarch64 (static musl) |
 
 ## Why rowser
@@ -34,7 +34,7 @@ changes to `sshd_config`, and give the local machine some control over what gets
 | OAuth `localhost` callbacks reach the remote host | ✅ | ❌ | ❌ rewrites the URL host only | ❌ | ✅ via `ssh -W` | ❌ rewrites the URL host only |
 | Local machine: macOS and Linux | ✅ | ✅ | ⚠️ documented for Windows | ❓ not stated | ⚠️ macOS (Linux unofficial) | ✅ |
 | Drop-in `xdg-open` / `$BROWSER` on the remote host | ✅ both, installed by `rowser remote install` | ✅ shell shims (need `nc`) | ✅ symlink | ⚠️ `$BROWSER` only | ✅ `nssh infect` | ⚠️ `$BROWSER` only |
-| Many concurrent SSH sessions, no root `sshd_config` change | ✅ per-session sockets | ❌ needs `StreamLocalBindUnlink` in `sshd_config` | ⚠️ one fixed port | ⚠️ one fixed port | ✅ | ⚠️ one fixed reverse port |
+| Many concurrent SSH sessions, no root `sshd_config` change | ✅ one Link per Saved host | ❌ needs `StreamLocalBindUnlink` in `sshd_config` | ⚠️ one fixed port | ⚠️ one fixed port | ✅ | ⚠️ one fixed reverse port |
 | Local control: trusted host name, scheme allowlist, rate limit, per-host confirmation | ✅ | ❌ | ❌ | ⚠️ http/https only | ⚠️ http(s) only; topic secrecy is the only auth | ❌ |
 | Pick the local browser and Profile per remote host or URL | ✅ Routes | ❓ | ❓ | ❓ | ❓ | ❓ |
 | See and control requests from the local terminal (status, activity, pause, approve) | ✅ | ❓ | ❓ | ❓ | ❓ | ❓ |
@@ -52,7 +52,7 @@ against the other projects. Corrections are welcome.
 
 ## Status
 
-- **v0.1.0 (the core): built.** The daemon, shim, `rowser ssh` wrapper, callback forwards,
+- **v0.1.0 (the core): built.** The daemon, shim, callback forwards,
   `rowser daemon install` (systemd and launchd), `rowser remote install` (with checksum
   verification) and `rowser doctor` are built and tested, including an end-to-end test against a
   real `sshd`. Still open: the macOS notification fix
@@ -152,22 +152,17 @@ You can also run the daemon in the foreground with `rowser daemon [flags]`.
   This is what the `system` Target runs (see Routes).
 - `--confirm-hosts <pattern>` — glob, may repeat. URLs from matching hosts wait until you click
   "Open" in the notification (or a dialog where notifications have no actions), or answer with
-  `rowser approve` (see Control the daemon). Matches the host alias you typed to `rowser ssh`.
+  `rowser approve` (see Control the daemon). Matches the Host alias of the Saved host.
   Default: no confirmation. If you do not answer within 60 seconds, the confirmation ends and
   the URL does not open. It works on top of the Routes: a matching host asks first, then opens
   in its Route's Target.
-- `--confirm-unverified` — also match `--confirm-hosts` against the host name the remote host
-  reports about itself on the direct socket (the `ssh_config` setup below). That name is
-  untrusted: a remote host can report any name. Without this flag, `--confirm-hosts` only
-  matches the trusted names from `rowser ssh`.
 - `--runtime-dir <dir>` — directory for the daemon's sockets (see Runtime directory).
 
 ### Runtime directory
 
 The daemon's sockets live in `$XDG_RUNTIME_DIR/rowser/` on Linux and
 `~/Library/Application Support/rowser/` on macOS. Set `ROWSER_RUNTIME_DIR` (an absolute path) to
-use another directory; both `rowser daemon` and `rowser ssh` read it, so one variable sets both
-sides. `rowser daemon --runtime-dir <dir>` wins over the variable. `rowser daemon install` writes
+use another directory; `rowser daemon` and the local commands (`rowser status`, …) read it. `rowser daemon --runtime-dir <dir>` wins over the variable. `rowser daemon install` writes
 the directory from either one into the service.
 
 ## Remote setup
@@ -209,7 +204,7 @@ export BROWSER=rowser
 `rowser <url>` acts as `rowser open <url>`, so programs that use `$BROWSER` work. Make sure
 `~/.local/bin` comes before `/usr/bin` on `PATH`, so the `xdg-open` symlink wins.
 
-Check the setup on the remote host (inside a `rowser ssh` session) and on the local machine.
+Check the setup on the remote host (inside an SSH session) and on the local machine.
 `rowser doctor` runs the local checks when a config file or the runtime directory exists, and
 the remote checks inside an SSH session or when neither side is found:
 
@@ -226,26 +221,22 @@ graphical session, that a real `xdg-open` exists for the fallback (see Usage). E
 check prints one warning with its fix.
 
 On the local machine, `rowser doctor` checks that the config file parses (or prints the file and
-line of the error), that the browser and Profile of each Route, of `[unverified]` and of
-`[default]` exist (and where the request falls
-back if not), and that the daemon answers, with its version.
+line of the error), that the browser and Profile of each Route and of `[default]` exist (and
+where the request falls back if not), and that the daemon answers, with its version. It warns
+once when the file still has an `[unverified]` entry, which is ignored.
 
 ## Usage
 
-Connect with `rowser ssh` instead of `ssh`. It runs plain `ssh` with every argument unchanged,
-plus a tunnel from a per-session socket to the daemon:
+Save the remote host once (see `rowser host`), then use plain `ssh`:
 
 ```sh
-rowser ssh myhost
+rowser host add myhost
+ssh myhost
 ```
 
-Most people alias it:
-
-```sh
-alias ssh='rowser ssh'
-```
-
-If the daemon is not running, `rowser ssh` prints a warning and runs `ssh` without a tunnel.
+The daemon keeps a Link to each Saved host, so every program there reaches it, in any SSH
+session or none. `rowser ssh` is removed: it prints `rowser ssh is removed: run "rowser host add
+<host>" once, then use plain ssh` and exits 2.
 
 On the remote host:
 
@@ -254,7 +245,13 @@ xdg-open https://example.com      # or: rowser open https://example.com
 rowser forward 8085               # forward a callback port by hand (1024–65535)
 ```
 
-With no tunnel, the shim prints `rowser: no tunnel; open this URL manually: <url>` and exits 1.
+With no Link, the shim prints two lines to stderr and exits 1:
+
+```
+rowser: no Link to your Local machine; open this URL manually: <url>
+On your Local machine, run "rowser host add <host>", or check "rowser host list".
+```
+
 On a remote host with a desktop (`WAYLAND_DISPLAY` or `DISPLAY` set), it instead hands the URL
 to the first `xdg-open` on `PATH` that is not rowser itself, so local browsing on that host
 still works.
@@ -268,26 +265,23 @@ daemon binds that port on loopback on your local machine and relays each connect
 Link to the Saved host, where `rowser __outpost` dials the remote port. `rowser open` exits as
 soon as the daemon accepts the URL; no process stays behind on the remote host. The forward
 closes when the remote port stops listening, when a dial to it fails, when the Link drops, or
-after 10 minutes. Use `rowser forward <port>` when detection misses a port. Callback forwards
-need a Saved host: a request through a `rowser ssh` session still opens the URL, but rowser
-warns that the port is not forwarded.
+after 10 minutes. Use `rowser forward <port>` when detection misses a port.
 
 ### tmux
 
-The shim uses the newest tunnel socket in `/tmp` that you own and that answers the handshake. A
-tmux session reattached from a new SSH session therefore uses the new connection; nothing to
-update.
+The shim uses the Outpost socket `/tmp/rowser-<uid>/outpost.sock`, which does not depend on the
+SSH session. A tmux session reattached from a new SSH session works with nothing to update.
 
 ### Environment variables
 
-- `ROWSER_SOCKET` — a socket path the shim (and `rowser doctor`) tries before it looks in `/tmp`.
-  Set it when the tunnel socket is somewhere else.
+- `ROWSER_SOCKET` — a socket path the shim (and `rowser doctor`) uses instead of the Outpost
+  socket.
 - `ROWSER_LOG` — the log level (for example `debug`). Default `warn`.
 - `ROWSER_RUNTIME_DIR` — see Runtime directory.
 
 ### Jump hosts
 
-`rowser ssh` passes `-J` / `ProxyJump` through unchanged. The tunnel ends at the final host, so
+A Link uses your `~/.ssh/config`, so `ProxyJump` works. The Link ends at the final host, so
 install rowser there, not on the jump host.
 
 ## Routes
@@ -311,16 +305,13 @@ open = "chrome:Profile 2"
 host = "g14"
 open = "safari"
 
-[unverified]
-open = "ask"
-
 [default]
 open = "system"
 ```
 
 - `[[route]]` entries are checked in file order; the first match wins.
 - `host` is a glob (`*`, `?`, ASCII case ignored, as for `--confirm-hosts`) matched against the
-  host alias you typed to `rowser ssh`.
+  Host alias of the Saved host.
 - `match` (optional) is a list of globs matched against the URL's host (`*.google.com`,
   `localhost`). Without `match`, every URL matches.
 - `open` is the Target:
@@ -338,20 +329,15 @@ open = "system"
 
 The daemon reads the file at start, on `rowser reload`, and after each `rowser route` change. A
 missing file means no Routes. An invalid file stops `rowser daemon` from starting, with the file,
-line and reason. Flags win over the file.
-
-### Unverified hosts
-
-Routes match only the trusted host alias from `rowser ssh`. A request that comes in on the
-direct socket (the `ssh_config` setup below) carries only the name the remote host reports about
-itself, so it never matches a `[[route]]`: it goes to `[unverified]`, whose default is `ask`. A
-remote host that reports a false name therefore cannot reach a named Route.
+line and reason. Flags win over the file. An `[unverified]` entry from an older version is
+ignored, with one warning in the log and in `rowser doctor`: every Open request now comes from a
+Saved host.
 
 ### `rowser host`
 
 A Saved host is a `[[host]]` entry in the config file. The daemon keeps one Link (an `ssh`
-connection) to each Saved host, so programs there open URLs without `rowser ssh`. The `host`
-commands edit the config file in place, keep your comments, and work when the daemon is stopped.
+connection) to each Saved host, so programs there open URLs from plain `ssh` sessions or none.
+The `host` commands edit the config file in place, keep your comments, and work when the daemon is stopped.
 
 ```sh
 rowser host add g14                       # finds rowser on g14 and saves its path
@@ -423,7 +409,6 @@ rowser route list
 1  g14  match *.google.com  chrome:Profile 2
 2  g14  safari
 3  prod-*  firefox  ask
-[unverified]  ask
 [default]  system
 ```
 
@@ -435,12 +420,10 @@ rowser route move 2 1     # rowser: moved route 2 to 1
 rowser route remove 3     # rowser: removed route 3
 ```
 
-`route test` prints the Target and the Route that a URL from a host takes, and opens nothing.
-Add `--unverified` to test a reported host name from the direct socket:
+`route test` prints the Target and the Route that a URL from a host takes, and opens nothing:
 
 ```sh
 rowser route test g14 https://accounts.google.com/o/oauth2/auth    # chrome:Profile 2  route 1
-rowser route test --unverified g14 https://example.com             # ask  [unverified]
 ```
 
 ### `rowser browsers`
@@ -471,8 +454,8 @@ On macOS the list follows the order below; on Linux, the order of the desktop fi
 
 ## Control the daemon
 
-The daemon has a third socket, `rowserd-control.sock`, for rowser commands on the local machine.
-No Tunnel reaches it from a remote host. Each command below prints
+The daemon has a control socket, `rowserd-control.sock`, for rowser commands on the local
+machine. No Link reaches it from a remote host. Each command below prints
 `rowser: the daemon is not running` and exits 1 when no daemon answers.
 
 ### `rowser status`
@@ -487,20 +470,14 @@ protocol version:  1.1
 runtime directory: /run/user/1000/rowser
 config file:       /home/me/.config/rowser/config.toml
 paused:            no
-sessions:
-  g14  12m 05s  safari
 callback forwards:
   8085  g14  41s
 ```
 
-A Session is one `rowser ssh` run. The list shows each, with how long each has run and the
-Target of the host's first Route without `match` (`[default]`'s Target with no such Route). A
-Session ends when `ssh` exits.
-
 ### `rowser activity`
 
 The daemon's last 200 Open requests and `rowser forward` requests, newest last: time, host (the
-reported host name is marked `(unverified)`), URL, the Route that matched, the Target and the
+Host alias of the Saved host), URL, the Route that matched, the Target and the
 result (`opened`, `denied`, `timed out`, `paused`, `rate limited`, `scheme refused`,
 `browser missing`). A Callback forward shows its ports and how long it stayed open.
 
@@ -559,43 +536,15 @@ rowser reload            # rowser: config reloaded (2 routes)
 The daemon reads the config file again. An invalid file is refused with the file, line and
 reason, the daemon keeps its old Routes, and the command exits 1.
 
-## Alternative: `ssh_config` without the wrapper
-
-If you cannot use `rowser ssh`, tunnel the daemon's direct socket in `~/.ssh/config`:
-
-```
-Host myhost
-    RemoteForward /tmp/rowser-%C.sock /run/user/1000/rowser/rowserd.sock
-```
-
-Replace `/run/user/1000/rowser` with your runtime directory. On macOS the path has a space, so
-quote it:
-
-```
-Host myhost
-    RemoteForward /tmp/rowser-%C.sock "/Users/me/Library/Application Support/rowser/rowserd.sock"
-```
-
-The remote host creates the socket, so only the remote `sshd_config` setting
-`StreamLocalBindUnlink yes` removes a stale socket from an earlier session; the same option in
-your own `~/.ssh/config` has no effect on a `RemoteForward`. Without the remote setting, a stale
-socket blocks the tunnel. In this setup the host name comes from the remote
-host itself, so notifications mark it as unverified, and `--confirm-hosts` ignores it unless the
-daemon runs with `--confirm-unverified`. Its URLs skip the `[[route]]` entries and go to
-`[unverified]` (see Unverified hosts).
-
 ## Security model
 
 - The daemon accepts only `http` and `https` URLs.
-- It listens on three Unix sockets, mode 0600 in a 0700 directory:
-  - `rowserd-relay.sock` — the relay socket, for `rowser ssh` only. The wrapper stamps each
-    connection with the host alias you typed. A remote host cannot choose which local socket its
-    tunnel reaches, so that name is trusted.
-  - `rowserd.sock` — the direct socket, for `ssh_config` tunnels. The host name is what the
-    remote host reports, and it is shown as untrusted. It never matches a named Route.
-  - `rowserd-control.sock` — the control socket, for rowser commands on the local machine
-    (`status`, `activity`, `pause`, `pending`, `reload`, …). No Tunnel reaches it.
-- Rate limit: at most 5 URLs per 10 seconds per connection; more are rejected with an error.
+- Each Open request comes through the Link of a Saved host, so its host name is the Host alias
+  in your config file. A remote host cannot choose another name.
+- The daemon listens on one Unix socket, `rowserd-control.sock`, mode 0600 in a 0700 directory,
+  for rowser commands on the local machine (`status`, `activity`, `pause`, `pending`, `reload`,
+  …). No Link reaches it.
+- Rate limit: at most 5 URLs per 10 seconds per Saved host; more are rejected with an error.
 - By default URLs open immediately with a notification. Use `--confirm-hosts` to require a click
   for hosts you trust less.
 - Callback forwards bind on loopback only (`127.0.0.1` and `[::1]`), ports 1024–65535.
@@ -603,8 +552,6 @@ daemon runs with `--confirm-unverified`. Its URLs skip the `[[route]]` entries a
 
 ## Known limits
 
-- Per-session sockets need `rowser ssh` (or an alias). Without root on the remote host, plain
-  `ssh_config` cannot avoid stale sockets.
 - The callback port is fixed by the remote program's `redirect_uri`. If that port is busy on
   your local machine, the URL still opens, but the callback cannot be forwarded; rowser shows a
   warning.

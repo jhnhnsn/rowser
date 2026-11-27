@@ -316,10 +316,10 @@ async fn connect_once(
     let serve = async {
         while let Some(stream) = inbound.recv().await {
             let inner = inner.clone();
-            let source = Source::Link {
+            let source = Source {
                 alias: host.name.clone(),
                 limit: limit.clone(),
-                link: opener.clone(),
+                link: Some(opener.clone()),
             };
             tokio::spawn(async move {
                 if let Err(e) = inner.handle(stream, source).await {

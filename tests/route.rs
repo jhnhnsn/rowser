@@ -7,10 +7,10 @@ use std::net::{IpAddr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use common::TmpDir;
+use common::{test_link, TmpDir, TEST_LINK};
 use rowser::browsers::{Browser, Browsers, Profile};
 use rowser::daemon::testing::{Answer, RecordingOpener, ScriptedNotifier};
-use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET, RELAY_SOCKET};
+use rowser::daemon::{bind_sockets, Daemon, DaemonConfig};
 use rowser::protocol::{Conn, Hello, Msg};
 use rowser::route::{run_route, RouteAction, RouteArgs};
 use tokio::net::UnixStream;
@@ -118,7 +118,6 @@ fn add_appends_a_route_and_keeps_the_comments() {
         list(&file, &run),
         "1  g14  system\n\
          2  db*  match *.google.com  chrome:Profile 2  ask\n\
-         [unverified]  ask\n\
          [default]  system\n"
     );
     assert!(
@@ -166,10 +165,7 @@ fn add_creates_the_file_and_its_directory() {
     let run = dir.0.join("run");
     let (code, _, err) = route(&file, &run, add("g14", &[], "safari", false));
     assert_eq!(code, ExitCode::SUCCESS, "{err}");
-    assert_eq!(
-        list(&file, &run),
-        "1  g14  safari\n[unverified]  ask\n[default]  system\n"
-    );
+    assert_eq!(list(&file, &run), "1  g14  safari\n[default]  system\n");
 }
 
 #[test]
@@ -219,8 +215,7 @@ fn move_and_remove_keep_the_comments() {
     assert!(out.starts_with("rowser: moved route 3 to 1\n"), "{out}");
     assert_eq!(
         list(&file, &run),
-        "1  db2  safari\n2  g14  system\n3  db1  firefox\n\
-         [unverified]  ask\n[default]  system\n"
+        "1  db2  safari\n2  g14  system\n3  db1  firefox\n[default]  system\n"
     );
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.contains("host = \"g14\"  # the laptop"), "{text}");
@@ -230,7 +225,7 @@ fn move_and_remove_keep_the_comments() {
     assert!(out.starts_with("rowser: removed route 1\n"), "{out}");
     assert_eq!(
         list(&file, &run),
-        "1  g14  system\n2  db1  firefox\n[unverified]  ask\n[default]  system\n"
+        "1  g14  system\n2  db1  firefox\n[default]  system\n"
     );
     let text = std::fs::read_to_string(&file).unwrap();
     // A comment above a Route moves with it.
@@ -312,7 +307,7 @@ fn list_with_no_file_shows_only_the_fallbacks() {
     let dir = TmpDir::new("rt");
     let file = dir.0.join("missing/config.toml");
     let run = dir.0.join("run");
-    assert_eq!(list(&file, &run), "[unverified]  ask\n[default]  system\n");
+    assert_eq!(list(&file, &run), "[default]  system\n");
     assert!(!file.exists());
 }
 
@@ -361,11 +356,10 @@ fn remove_and_move_refuse_a_number_out_of_range() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), HAND);
 }
 
-fn test_action(host: &str, url: &str, unverified: bool) -> RouteAction {
+fn test_action(host: &str, url: &str) -> RouteAction {
     RouteAction::Test {
         host: host.into(),
         url: url.parse().unwrap(),
-        unverified,
     }
 }
 
@@ -380,31 +374,24 @@ fn route_test_prints_the_target_and_the_route_and_needs_no_daemon() {
     )
     .unwrap();
     let run = dir.0.join("run");
-    let t = |host, url, unv| {
-        let (code, out, err) = route(&file, &run, test_action(host, url, unv));
+    let t = |host, url| {
+        let (code, out, err) = route(&file, &run, test_action(host, url));
         assert_eq!(code, ExitCode::SUCCESS, "{err}");
         out
     };
     assert_eq!(
-        t("g14", "https://mail.google.com/x", false),
+        t("g14", "https://mail.google.com/x"),
         "chrome:Profile 2  route 1  ask\n"
     );
-    assert_eq!(t("g14", "https://example.com/", false), "safari  route 2\n");
-    assert_eq!(
-        t("db1", "https://example.com/", false),
-        "system  [default]\n"
-    );
-    assert_eq!(
-        t("g14", "https://example.com/", true),
-        "ask  [unverified]\n"
-    );
+    assert_eq!(t("g14", "https://example.com/"), "safari  route 2\n");
+    assert_eq!(t("db1", "https://example.com/"), "system  [default]\n");
     std::fs::write(
         &file,
         "[[route]]\nhost = \"g14\"\nopen = \"edge:Dev\"\n[default]\nopen = \"chrome:Personal\"\n",
     )
     .unwrap();
     assert_eq!(
-        t("g14", "https://example.com/", false),
+        t("g14", "https://example.com/"),
         "chrome:Default  route 1\nwarning: target `edge:Dev` is not available \
          (browser `edge` is not installed); fell back to [default] `chrome:Personal`\n"
     );
@@ -414,7 +401,7 @@ fn route_test_prints_the_target_and_the_route_and_needs_no_daemon() {
     )
     .unwrap();
     assert_eq!(
-        t("g14", "https://example.com/", false),
+        t("g14", "https://example.com/"),
         "firefox:abc.dev  route 1\n"
     );
 }
@@ -424,10 +411,10 @@ const V6: IpAddr = IpAddr::V6(Ipv6Addr::LOCALHOST);
 /// The Target the Daemon opened and the `route` label of its activity
 /// entry for one Open request, as `<target>  <label>`, the `route test`
 /// form.
-async fn daemon_route(file: &Path, alias: Option<&str>, url: &str) -> String {
+async fn daemon_route(file: &Path, alias: &str, url: &str) -> String {
     let dir = TmpDir::new("rtd");
     let run: PathBuf = dir.0.join("run");
-    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let control = bind_sockets(&run).unwrap();
     let config = DaemonConfig {
         loopback: vec![V6],
         routes: rowser::routes::Routes::from_config(&rowser::config::load(file).unwrap()),
@@ -439,22 +426,12 @@ async fn daemon_route(file: &Path, alias: Option<&str>, url: &str) -> String {
         opener.clone(),
         ScriptedNotifier::new(Answer::Approve),
     );
-    tokio::spawn(daemon.serve(direct, relay, control));
-    let socket = if alias.is_some() {
-        RELAY_SOCKET
-    } else {
-        DIRECT_SOCKET
-    };
-    let s = UnixStream::connect(run.join(socket)).await.unwrap();
+    let links = vec![test_link(&run, alias)];
+    tokio::spawn(daemon.serve_with_test_links(control, links));
+    let s = UnixStream::connect(run.join(TEST_LINK)).await.unwrap();
     let mut conn = Conn::connect(s, Hello::current()).await.unwrap();
-    if let Some(a) = alias {
-        conn.send(&Msg::HostStamp { alias: a.into() })
-            .await
-            .unwrap();
-    }
     conn.send(&Msg::Open {
         url: url.into(),
-        reported_host: "devbox".into(),
         callback_ports: vec![],
     })
     .await
@@ -480,7 +457,7 @@ async fn a_change_reloads_a_running_daemon() {
     let dir = TmpDir::new("rt");
     let file = dir.0.join("config.toml");
     let run = dir.0.join("run");
-    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let control = bind_sockets(&run).unwrap();
     let config = DaemonConfig {
         loopback: vec![V6],
         config_file: Some(file.clone()),
@@ -491,7 +468,7 @@ async fn a_change_reloads_a_running_daemon() {
         RecordingOpener::default(),
         ScriptedNotifier::new(Answer::Approve),
     );
-    tokio::spawn(daemon.serve(direct, relay, control));
+    tokio::spawn(daemon.serve(control));
     let (f, r) = (file.clone(), run.clone());
     let (code, out, err) =
         tokio::task::spawn_blocking(move || route(&f, &r, add("g14", &[], "system", false)))
@@ -512,7 +489,7 @@ async fn a_daemon_that_refuses_the_reload_is_reported_and_the_change_stays() {
     let other = dir.0.join("other.toml");
     std::fs::write(&other, "[[route]]\nhost = \"g14\"\nopen = 7\n").unwrap();
     let run = dir.0.join("run");
-    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let control = bind_sockets(&run).unwrap();
     let config = DaemonConfig {
         loopback: vec![V6],
         config_file: Some(other),
@@ -523,7 +500,7 @@ async fn a_daemon_that_refuses_the_reload_is_reported_and_the_change_stays() {
         RecordingOpener::default(),
         ScriptedNotifier::new(Answer::Approve),
     );
-    tokio::spawn(daemon.serve(direct, relay, control));
+    tokio::spawn(daemon.serve(control));
     let (f, r) = (file.clone(), run.clone());
     let (code, out, err) =
         tokio::task::spawn_blocking(move || route(&f, &r, add("g14", &[], "system", false)))
@@ -546,28 +523,26 @@ async fn route_test_agrees_with_the_daemon() {
         &file,
         "[[route]]\nhost = \"db1\"\nopen = \"firefox\"\n\
          [[route]]\nhost = \"g14\"\nmatch = [\"*.google.com\"]\nopen = \"chrome:Work\"\n\
-         [[route]]\nhost = \"g*\"\nopen = \"safari\"\n\
-         [unverified]\nopen = \"system\"\n",
+         [[route]]\nhost = \"g*\"\nopen = \"safari\"\n",
     )
     .unwrap();
     let run = dir.0.join("run");
     for (alias, url) in [
-        (Some("g14"), "https://mail.google.com/"),
-        (Some("g14"), "https://example.com/"),
-        (Some("db1"), "https://example.com/"),
-        (Some("x"), "https://example.com/"),
-        (None, "https://example.com/"),
+        ("g14", "https://mail.google.com/"),
+        ("g14", "https://example.com/"),
+        ("db1", "https://example.com/"),
+        ("x", "https://example.com/"),
     ] {
         let want = daemon_route(&file, alias, url).await;
         let f = file.clone();
         let r = run.clone();
-        let action = test_action(alias.unwrap_or("devbox"), url, alias.is_none());
+        let action = test_action(alias, url);
         let (code, out, err) =
             tokio::task::spawn_blocking(move || route_with(&f, &r, action, Browsers::default()))
                 .await
                 .unwrap();
         assert_eq!(code, ExitCode::SUCCESS, "{err}");
         let got = out.lines().next().unwrap().to_string();
-        assert_eq!(got, want, "{alias:?} {url}");
+        assert_eq!(got, want, "{alias} {url}");
     }
 }

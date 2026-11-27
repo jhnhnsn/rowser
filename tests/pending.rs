@@ -7,13 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use common::TmpDir;
+use common::{test_link, TmpDir, TEST_LINK};
 use rowser::config::Target;
 use rowser::control::{run_activity, run_approve, run_deny, run_pending, ActivityArgs};
 use rowser::daemon::testing::{Answer, RecordingOpener, ScriptedNotifier};
-use rowser::daemon::{
-    bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET, FORWARD_NOT_APPROVED, NOT_APPROVED,
-};
+use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, FORWARD_NOT_APPROVED, NOT_APPROVED};
 use rowser::shim::{run_forward, run_open, ShimEnv};
 use serde_json::Value;
 use url::Url;
@@ -26,17 +24,17 @@ struct Started {
 
 async fn start(dir: &TmpDir) -> Started {
     let run = dir.0.join("run");
-    let (direct, relay, control) = bind_sockets(&run).unwrap();
+    let control = bind_sockets(&run).unwrap();
     let opener = RecordingOpener::default();
     let notifier = ScriptedNotifier::new(Answer::Hang);
     let config = DaemonConfig {
         confirm_hosts: vec!["*".into()],
-        confirm_unverified: true,
         browser_roots: Some(chrome_roots(&dir.0.join("roots"))),
         ..DaemonConfig::default()
     };
     let daemon = Daemon::new(config, opener.clone(), notifier.clone());
-    tokio::spawn(daemon.serve(direct, relay, control));
+    let links = vec![test_link(&run, "devbox")];
+    tokio::spawn(daemon.serve_with_test_links(control, links));
     Started {
         run,
         opener,
@@ -93,10 +91,8 @@ fn shim_forward(run: &Path, port: u16) -> tokio::task::JoinHandle<(ExitCode, Str
 
 fn shim_env(run: &Path) -> ShimEnv<Vec<u8>> {
     ShimEnv {
-        tunnel_dir: run.join("no-tunnels"),
-        socket_override: Some(run.join(DIRECT_SOCKET)),
+        socket_override: Some(run.join(TEST_LINK)),
         outpost_socket: None,
-        reported_host: "devbox".into(),
         procfs: rowser::detect::Procfs::new("/nonexistent"),
         caller_pid: 1,
         graphical: false,
@@ -187,7 +183,7 @@ async fn pending_lists_a_waiting_request_with_id_host_url_and_target() {
     let out = wait_pending(&s.run, 1).await;
     let fields: Vec<&str> = out.trim_end().split("  ").collect();
     assert_eq!(fields[0], "1");
-    assert_eq!(fields[1], "devbox (unverified)");
+    assert_eq!(fields[1], "devbox");
     assert_eq!(fields[2], "https://example.com/a");
     assert_eq!(fields[3], "system");
     assert!(fields[4].ends_with('s'), "{out}");

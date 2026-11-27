@@ -29,12 +29,11 @@ pub enum Command {
         #[arg(long)]
         open_command: Option<String>,
         /// Hosts (glob, may repeat) whose URLs wait until you click "Open".
-        /// Matches the Host alias from `rowser ssh`.
+        /// Matches the Host alias of the Saved host.
         #[arg(long = "confirm-hosts", value_name = "PATTERN")]
         confirm_hosts: Vec<String>,
-        /// Also match --confirm-hosts against the untrusted host name that
-        /// the remote host reports on the direct socket (ssh_config setups).
-        #[arg(long)]
+        /// Removed (v1.0 Links): kept hidden only to fail with a clear error.
+        #[arg(long, hide = true)]
         confirm_unverified: bool,
         /// Test hook: answer every confirmation with approve, deny or hang.
         #[arg(long, hide = true)]
@@ -50,9 +49,9 @@ pub enum Command {
         #[arg(long, hide = true)]
         forward_timeout: Option<u64>,
     },
-    /// Run ssh with a Tunnel to the Daemon.
+    /// Removed: prints how to use `rowser host add` and plain ssh.
+    #[command(hide = true)]
     Ssh {
-        /// Arguments passed to ssh unchanged.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
     },
@@ -142,7 +141,7 @@ pub enum DaemonAction {
 
 #[derive(Debug, Subcommand)]
 pub enum RouteCmd {
-    /// List the Routes in file order, then [unverified] and [default].
+    /// List the Routes in file order, then [default].
     List,
     /// Append a Route.
     Add {
@@ -163,13 +162,7 @@ pub enum RouteCmd {
     /// Move Route <n> to place <to>.
     Move { n: usize, to: usize },
     /// Print the Target and the Route a URL from <host> takes; opens nothing.
-    Test {
-        host: String,
-        url: Url,
-        /// Treat <host> as a Reported host name (direct socket).
-        #[arg(long)]
-        unverified: bool,
-    },
+    Test { host: String, url: Url },
 }
 
 impl From<RouteCmd> for crate::route::RouteAction {
@@ -190,15 +183,7 @@ impl From<RouteCmd> for crate::route::RouteAction {
             },
             RouteCmd::Remove { n } => A::Remove { n },
             RouteCmd::Move { n, to } => A::Move { n, to },
-            RouteCmd::Test {
-                host,
-                url,
-                unverified,
-            } => A::Test {
-                host,
-                url,
-                unverified,
-            },
+            RouteCmd::Test { host, url } => A::Test { host, url },
         }
     }
 }
@@ -302,13 +287,21 @@ fn parse_loopback(text: &str) -> Result<std::net::IpAddr, String> {
 
 /// Runs a parsed command.
 pub fn run(command: Command) -> ExitCode {
+    if let Command::Daemon {
+        confirm_unverified: true,
+        ..
+    } = command
+    {
+        eprintln!("rowser daemon: {CONFIRM_UNVERIFIED_REMOVED}");
+        return ExitCode::from(2);
+    }
     match command {
         Command::Daemon {
             action: None,
             runtime_dir,
             open_command,
             confirm_hosts,
-            confirm_unverified,
+            confirm_unverified: _,
             test_confirm,
             confirm_timeout,
             loopback,
@@ -317,7 +310,6 @@ pub fn run(command: Command) -> ExitCode {
             runtime_dir,
             open_command,
             confirm_hosts,
-            confirm_unverified,
             test_confirm,
             confirm_timeout,
             loopback,
@@ -338,7 +330,10 @@ pub fn run(command: Command) -> ExitCode {
             ..
         } => crate::service::uninstall(),
         Command::Open { url } => crate::shim::open_main(&url),
-        Command::Ssh { args } => ssh(args),
+        Command::Ssh { .. } => {
+            eprintln!("{SSH_REMOVED}");
+            ExitCode::from(2)
+        }
         Command::Forward { port } => crate::shim::forward_main(port),
         Command::Doctor => crate::doctor::doctor_main(),
         Command::Browsers { json } => crate::browsers::browsers_main(json),
@@ -388,7 +383,6 @@ fn install_args_from(
         runtime_dir,
         open_command,
         confirm_hosts,
-        confirm_unverified,
         test_confirm,
         confirm_timeout,
         loopback,
@@ -429,21 +423,18 @@ fn install_args_from(
     for host in confirm_hosts {
         args.extend(["--confirm-hosts".to_string(), host.clone()]);
     }
-    if *confirm_unverified {
-        args.push("--confirm-unverified".to_string());
-    }
     Ok(args)
 }
 
-/// `rowser ssh <args…>`: finds the Daemon's runtime directory and runs the Wrapper.
-fn ssh(args: Vec<OsString>) -> ExitCode {
-    let env = crate::platform::runtime_dir().map(|dir| crate::wrapper::WrapperEnv {
-        ssh: "ssh".into(),
-        relay_socket: dir.join(crate::daemon::RELAY_SOCKET),
-        session_dir: dir,
-    });
-    crate::wrapper::run(args, env)
-}
+/// What `rowser ssh …` prints (to stderr) before it exits 2. The Wrapper is
+/// removed (v1.0 Links); this stub stays for one release.
+pub const SSH_REMOVED: &str =
+    "rowser ssh is removed: run \"rowser host add <host>\" once, then use plain ssh";
+
+/// The error of `rowser daemon --confirm-unverified` (exit 2).
+pub const CONFIRM_UNVERIFIED_REMOVED: &str =
+    "--confirm-unverified is removed: every Open request now comes from a Saved host, \
+     so --confirm-hosts matches all of them";
 
 /// Parse a full argv. When argv[0]'s file name is a browser name (`xdg-open`, `sensible-browser`,
 /// `www-browser`), or the first argument is a `scheme://` URL, the arguments are parsed as
@@ -530,7 +521,6 @@ mod install_args_tests {
             "a*",
             "--confirm-hosts",
             "b",
-            "--confirm-unverified",
             "install",
         ])
         .unwrap();
@@ -545,7 +535,6 @@ mod install_args_tests {
                 "a*",
                 "--confirm-hosts",
                 "b",
-                "--confirm-unverified",
             ]
         );
     }

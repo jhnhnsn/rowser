@@ -26,7 +26,9 @@ Run each, one per call; all must pass:
 rowser is a CLI; test it from the terminal.
 
 - Run: `cargo build`, then `target/debug/rowser …`.
-- Drive: Bash. Run the daemon, shim and wrapper against temporary sockets.
+- Drive: Bash. Run the daemon and shim against temporary sockets. An Open request reaches a live
+  daemon only through a Link (see the Links item); in-process tests can use
+  `Daemon::serve_with_test_links` (see `tests/common/mod.rs`, `test_link`).
 - Test hooks: `--runtime-dir <tmp>`, `ROWSER_SOCKET`, `--open-command` writing URLs to a file,
   the test Opener and Notifier adapters, `ROWSER_E2E=1` with a throwaway unprivileged `sshd` on
   localhost (`/usr/bin/sshd` is installed).
@@ -42,12 +44,10 @@ rowser is a CLI; test it from the terminal.
   listened once stops; before that, only the timeout ends it. Kill the Outpost (the fake
   `ssh` can write its pid) to test a Link drop. The hidden daemon flag
   `--forward-timeout <secs>` replaces the 10-minute timeout; `rowser daemon install` refuses it.
-  A request on the Wrapper's sockets gets no forward, only the "need a Link" warning.
-- The Shim's no-tunnel fallback (graphical session) runs the first `xdg-open` on `PATH` that is
+- The Shim's no-Link fallback (graphical session) runs the first `xdg-open` on `PATH` that is
   not rowser: put a fake `xdg-open` script that records its argument first on `PATH`, set
-  `DISPLAY`, and set the hidden `ROWSER_TEST_TUNNEL_DIR` to an empty temp dir (it replaces
-  `/tmp` for socket discovery) and `ROWSER_SOCKET` to a missing path, so no real Tunnel answers.
-  Never let it reach the real `xdg-open`.
+  `DISPLAY`, and set the hidden `ROWSER_TEST_OUTPOST_DIR` to an empty short temp dir, so no
+  real Link answers. Never let it reach the real `xdg-open`.
 - Links (#77): the Shim tries the Outpost socket `/tmp/rowser-<uid>/outpost.sock` after
   `ROWSER_SOCKET`. Always set the hidden `ROWSER_TEST_OUTPOST_DIR` to a short temp dir
   (`/tmp/rw.XXXX/o`) for `rowser __outpost` and for any Shim a test runs, so no test uses the
@@ -74,9 +74,6 @@ rowser is a CLI; test it from the terminal.
   `ROWSER_TEST_OUTPOST_VERSION=<v>` makes `rowser __outpost` give `<v>` in its `Pong`: a fake
   older Outpost is a script `~/.local/bin/rowser` (temp HOME) that sets it and execs the real
   build. See `tests/update.rs`.
-- `rowser ssh` uses the `ssh` on `PATH` and the Daemon in `$ROWSER_RUNTIME_DIR` (absolute) or
-  else `$XDG_RUNTIME_DIR/rowser/`: put a fake `ssh` script first on `PATH` and set one of them to
-  a short temp dir to test it. Unset `ROWSER_RUNTIME_DIR` when a test relies on the default.
 - `rowser daemon install|uninstall` writes the unit under `$XDG_CONFIG_HOME/systemd/user/` and
   runs the `systemctl` on `PATH`: set `XDG_CONFIG_HOME` to a temp dir and put a fake `systemctl`
   script first on `PATH` that records its arguments. Never touch the real user units. Check that
@@ -106,8 +103,7 @@ rowser is a CLI; test it from the terminal.
   (e.g. `/tmp/rw.XXXX`), never under a long scratchpad or worktree path; remove it afterwards.
 - Never open the real browser or show real desktop notifications in a test.
 - `rowser daemon` reads `$XDG_CONFIG_HOME/rowser/config.toml`: always set `XDG_CONFIG_HOME` to a
-  temp dir (with or without a `rowser/config.toml`) so the real config is never read. Without a
-  file, `[unverified]` is `ask`, so direct-socket opens wait for `--test-confirm`.
+  temp dir (with or without a `rowser/config.toml`) so the real config is never read.
 - Run the live daemon with `env DBUS_SESSION_BUS_ADDRESS=unix:path=<tmp>/nobus` so no real desktop
   notification shows (a failed notification only logs a warning).
 - Manual macOS checks (notifications, confirm dialogs) go on the ticket as a `ready-for-human` note;

@@ -76,7 +76,7 @@ impl World {
     ) -> World {
         let dir = TmpDir::new("cb");
         let ssh = fake_ssh(&dir.0);
-        let (direct, relay, control) = bind_sockets(&dir.0.join("run")).unwrap();
+        let control = bind_sockets(&dir.0.join("run")).unwrap();
         let config = DaemonConfig {
             hosts: vec![SavedHost {
                 name: "g14".into(),
@@ -91,7 +91,7 @@ impl World {
         };
         let notifier = ScriptedNotifier::new(answer);
         let daemon = Daemon::new(config, daemon_opener, notifier.clone());
-        tokio::spawn(daemon.serve(direct, relay, control));
+        tokio::spawn(daemon.serve(control));
         let w = World {
             dir,
             opener,
@@ -121,10 +121,8 @@ impl World {
     /// A Shim that finds the Outpost socket, with no `/proc`.
     fn shim(&self) -> ShimEnv<Vec<u8>> {
         ShimEnv {
-            tunnel_dir: self.dir.0.join("no-tunnels"),
             socket_override: None,
             outpost_socket: Some(self.socket()),
-            reported_host: "g14-box".into(),
             procfs: Procfs::new(self.dir.0.join("no-proc")),
             caller_pid: 1,
             graphical: false,
@@ -350,7 +348,7 @@ async fn status_shows_the_forward_with_its_saved_host_until_it_ends() {
     let f = status_forwards(&w).await;
     assert_eq!(f[0]["port"], port);
     assert_eq!(f[0]["host"], "g14");
-    assert_eq!(f[0]["unverified"], false);
+    assert!(f[0].get("unverified").is_none());
     w.kill_outpost();
     for _ in 0..100 {
         if status_forwards(&w).await == serde_json::json!([]) {
@@ -517,24 +515,6 @@ async fn rowser_forward_on_a_busy_local_port_exits_1_with_the_warning() {
     let mut env = w.shim();
     assert_eq!(run_forward(port, &mut env).await, ExitCode::FAILURE);
     assert!(text(&env).contains("is busy"), "{}", text(&env));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_request_on_the_direct_socket_opens_the_url_but_forwards_nothing() {
-    let w = World::start(DaemonConfig::default(), Answer::Approve).await;
-    let port = free_port();
-    let url = auth_url(port);
-    let mut env = w.shim();
-    env.socket_override = Some(w.dir.0.join("run").join(rowser::daemon::DIRECT_SOCKET));
-    assert_eq!(
-        run_open(&url, &mut env).await,
-        ExitCode::SUCCESS,
-        "{}",
-        text(&env)
-    );
-    assert_eq!(w.opener.urls(), [url]);
-    assert!(text(&env).contains("need a Link"), "{}", text(&env));
-    assert!(!local_held(port));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -10,8 +10,8 @@ use std::process::ExitCode;
 use crate::browsers::{Browsers, Roots};
 use crate::config::{Config, Target};
 use crate::control::{request_async, RequestError};
-use crate::discovery::find_tunnel_path;
-use crate::platform::{find_on_path, real_xdg_open, BROWSER_NAMES, ENVIRONMENT_D_MARK, TUNNEL_DIR};
+use crate::discovery::find_socket;
+use crate::platform::{find_on_path, real_xdg_open, BROWSER_NAMES, ENVIRONMENT_D_MARK};
 use crate::protocol::{Hello, Msg};
 
 /// The result of one check.
@@ -58,9 +58,9 @@ pub struct DoctorEnv<W: Write> {
     pub browser: Option<OsString>,
     /// `HOME`.
     pub home: Option<PathBuf>,
-    /// Directory searched for `rowser-*.sock`.
-    pub tunnel_dir: PathBuf,
-    /// `ROWSER_SOCKET`, tried before the directory.
+    /// The Outpost socket, used when `ROWSER_SOCKET` is not set.
+    pub outpost_socket: Option<PathBuf>,
+    /// `ROWSER_SOCKET`, used in place of the Outpost socket.
     pub socket_override: Option<PathBuf>,
     /// `WAYLAND_DISPLAY` or `DISPLAY` is set.
     pub graphical: bool,
@@ -91,9 +91,7 @@ impl DoctorEnv<std::io::Stdout> {
                 .any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty())),
             self_exe: std::env::current_exe().ok(),
             home,
-            // The same hidden test hook as the Shim reads (shim::ShimEnv).
-            tunnel_dir: std::env::var_os("ROWSER_TEST_TUNNEL_DIR")
-                .map_or_else(|| PathBuf::from(TUNNEL_DIR), PathBuf::from),
+            outpost_socket: Some(crate::outpost::socket_path(&crate::outpost::outpost_dir())),
             socket_override: std::env::var_os("ROWSER_SOCKET")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
@@ -398,7 +396,7 @@ pub fn check_fallback(graphical: bool, path: Option<&OsStr>, self_exe: Option<&P
         Some(real) => Check::new(
             Status::Ok,
             NAME,
-            format!("{} opens URLs when no tunnel answers", real.display()),
+            format!("{} opens URLs when no Link answers", real.display()),
         ),
         None => Check::new(
             Status::Warn,
@@ -409,21 +407,22 @@ pub fn check_fallback(graphical: bool, path: Option<&OsStr>, self_exe: Option<&P
     }
 }
 
-/// Finds a Tunnel and sends `Ping`; reports the Daemon's protocol version
-/// and any version skew.
-pub async fn check_tunnel(tunnel_dir: &Path, socket_override: Option<PathBuf>) -> Vec<Check> {
+/// Connects to `socket` (the Shim's socket) and sends `Ping`; reports the
+/// Daemon's protocol version and any version skew.
+pub async fn check_tunnel(socket: Option<PathBuf>) -> Vec<Check> {
     const NAME: &str = "tunnel";
-    let (mut conn, socket) = match find_tunnel_path(tunnel_dir, socket_override).await {
+    let (mut conn, socket) = match find_socket(socket.as_slice()).await {
         Ok(found) => found,
         Err(e) => {
-            // A mismatch means a Tunnel exists; its message names both
-            // versions and the update command, so the "no tunnel" hint is wrong.
+            // A mismatch means a socket answers; its message names both
+            // versions and the update command, so the "no Link" hint is wrong.
             return match e.mismatch {
                 Some(m) => vec![Check::new(Status::Fail, "version", m.to_string())],
                 None => vec![Check::new(
                     Status::Fail,
                     NAME,
-                    "no tunnel; connect with `rowser ssh <host>` or set ROWSER_SOCKET",
+                    "no Link to your Local machine; run \"rowser host add <host>\" there, \
+                     or check \"rowser host list\"",
                 )],
             };
         }
@@ -505,9 +504,6 @@ pub fn check_routes(config: &Config, roots: &Roots) -> Vec<Check> {
         .enumerate()
         .map(|(i, r)| (format!("route {} (host {})", i + 1, r.host), &r.target))
         .collect();
-    if let Some(t) = &config.unverified {
-        targets.push(("[unverified]".into(), t));
-    }
     if let Some(t) = &config.default {
         targets.push(("[default]".into(), t));
     }
@@ -579,36 +575,35 @@ pub async fn check_daemon(runtime_dir: &Result<PathBuf, String>) -> Check {
     }
 }
 
-/// True when a Session socket is here: `ROWSER_SOCKET` exists, or a
-/// `rowser-*.sock` is in the tunnel directory.
-fn has_session_socket(tunnel_dir: &Path, socket_override: Option<&Path>) -> bool {
-    if socket_override.is_some_and(Path::exists) {
-        return true;
-    }
-    std::fs::read_dir(tunnel_dir).is_ok_and(|entries| {
-        entries.flatten().any(|e| {
-            let n = e.file_name();
-            let n = n.to_string_lossy();
-            n.starts_with("rowser-") && n.ends_with(".sock")
-        })
-    })
+/// The socket the Shim uses: `ROWSER_SOCKET`, else the Outpost socket.
+fn shim_socket<W: Write>(env: &DoctorEnv<W>) -> Option<PathBuf> {
+    env.socket_override
+        .clone()
+        .or_else(|| env.outpost_socket.clone())
 }
 
 /// Runs the Local machine checks, then the Remote host checks, as this
 /// machine needs; prints one line each, and exits 1 when any fails.
 ///
-/// Local: a config file exists, or the Daemon runtime directory exists. Remote: a
-/// Session socket exists or `SSH_CONNECTION` is set. Neither: Remote.
+/// Local: a config file exists, or the Daemon runtime directory exists.
+/// Remote: the Shim's socket exists or `SSH_CONNECTION` is set. Neither:
+/// Remote.
 pub async fn run_doctor<W: Write>(env: &mut DoctorEnv<W>) -> ExitCode {
     let local = env.config_file.as_ref().is_ok_and(|f| f.exists())
         || env.runtime_dir.as_ref().is_ok_and(|d| d.is_dir());
-    let remote =
-        env.ssh || has_session_socket(&env.tunnel_dir, env.socket_override.as_deref()) || !local;
+    let remote = env.ssh || shim_socket(env).is_some_and(|p| p.exists()) || !local;
     let mut checks = vec![];
     if local {
         let (c, config) = check_config(&env.config_file);
         checks.push(c);
         if let Some(config) = config {
+            if config.has_unverified {
+                checks.push(Check::new(
+                    Status::Warn,
+                    "config",
+                    crate::config::UNVERIFIED_IGNORED,
+                ));
+            }
             checks.extend(check_routes(&config, &env.browser_roots));
         }
         checks.push(check_daemon(&env.runtime_dir).await);
@@ -663,7 +658,7 @@ async fn remote_checks<W: Write>(env: &DoctorEnv<W>, checks: &mut Vec<Check>) {
         env.path.as_deref(),
         env.self_exe.as_deref(),
     ));
-    checks.extend(check_tunnel(&env.tunnel_dir, env.socket_override.clone()).await);
+    checks.extend(check_tunnel(shim_socket(env)).await);
 }
 
 /// `rowser doctor` for the binary.

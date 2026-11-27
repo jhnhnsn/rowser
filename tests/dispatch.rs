@@ -110,40 +110,54 @@ fn daemon_loopback_accepts_only_loopback_addresses() {
     }
 }
 
-#[test]
-fn ssh_passes_its_arguments_through() {
-    match parse_from(["rowser", "ssh", "-p", "22", "host"]).expect("parse") {
-        Command::Ssh { args } => assert_eq!(args, ["-p", "22", "host"]),
-        other => panic!("expected ssh, got {other:?}"),
-    }
+fn run_rowser(args: &[&str]) -> std::process::Output {
+    let tmp = std::env::temp_dir().join(format!(
+        "rowser-disp-{}-{}",
+        std::process::id(),
+        args.join("_").replace(['/', ' '], "")
+    ));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rowser"))
+        .args(args)
+        .env("HOME", &tmp)
+        .env("XDG_CONFIG_HOME", tmp.join("config"))
+        .env("XDG_RUNTIME_DIR", tmp.join("run"))
+        .env("ROWSER_TEST_OUTPOST_DIR", tmp.join("o"))
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&tmp);
+    out
 }
 
 #[test]
-fn ssh_keeps_a_double_dash_and_help_flags() {
+fn rowser_ssh_is_a_stub_that_exits_2() {
     for args in [
-        &["--", "-G", "localhost"][..],
-        &["-h"][..],
-        &["--help", "host"][..],
-        &["-V"][..],
+        &["ssh", "-p", "22", "host"][..],
+        &["ssh", "--help"][..],
+        &["ssh"][..],
     ] {
-        let mut argv = vec!["rowser", "ssh"];
-        argv.extend_from_slice(args);
-        match parse_from(argv).expect("parse") {
-            Command::Ssh { args: got } => assert_eq!(got, args, "{args:?}"),
-            other => panic!("expected ssh, got {other:?}"),
-        }
+        let out = run_rowser(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "rowser ssh is removed: run \"rowser host add <host>\" once, then use plain ssh\n"
+        );
     }
 }
 
-#[cfg(unix)]
 #[test]
-fn ssh_passes_non_utf8_arguments_unchanged() {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-    let raw = OsString::from_vec(vec![b'h', 0xff, b'x']);
-    let argv: Vec<OsString> = vec!["rowser".into(), "ssh".into(), raw.clone()];
-    match parse_from(argv).expect("parse") {
-        Command::Ssh { args } => assert_eq!(args, [raw]),
-        other => panic!("expected ssh, got {other:?}"),
+fn daemon_confirm_unverified_fails_with_a_removed_error() {
+    for args in [
+        &["daemon", "--confirm-unverified"][..],
+        &["daemon", "--confirm-unverified", "install"][..],
+    ] {
+        let out = run_rowser(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.starts_with("rowser daemon: --confirm-unverified is removed"),
+            "{err}"
+        );
     }
 }

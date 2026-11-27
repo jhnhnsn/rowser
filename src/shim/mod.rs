@@ -8,28 +8,25 @@ use std::process::ExitCode;
 use url::Url;
 
 use crate::detect::{callback_ports, Procfs};
-use crate::discovery::find_tunnel;
+use crate::discovery::find_socket;
 use crate::platform::real_xdg_open;
 use crate::protocol::Msg;
 
-pub use crate::platform::TUNNEL_DIR;
+/// The second line of the no-Link message.
+pub const NO_LINK_HINT: &str =
+    "On your Local machine, run \"rowser host add <host>\", or check \"rowser host list\".";
 
 /// What the Shim reads from its environment.
 pub struct ShimEnv<W: Write> {
-    /// Directory searched for `rowser-*.sock`.
-    pub tunnel_dir: PathBuf,
-    /// `ROWSER_SOCKET`, tried before the directory.
+    /// `ROWSER_SOCKET`, used in place of the Outpost socket.
     pub socket_override: Option<PathBuf>,
-    /// The Outpost socket, tried after `ROWSER_SOCKET` and before the
-    /// directory search.
+    /// The Outpost socket, used when `ROWSER_SOCKET` is not set.
     pub outpost_socket: Option<PathBuf>,
-    /// This host's own name, sent as the Reported host name.
-    pub reported_host: String,
     /// Root of `/proc`, for Callback port detection.
     pub procfs: Procfs,
     /// The process whose tree may listen on Callback ports (the Shim's parent).
     pub caller_pid: u32,
-    /// `WAYLAND_DISPLAY` or `DISPLAY` is set: with no Tunnel, the URL goes
+    /// `WAYLAND_DISPLAY` or `DISPLAY` is set: with no Link, the URL goes
     /// to the real `xdg-open`.
     pub graphical: bool,
     /// `PATH`, searched for the real `xdg-open`.
@@ -47,16 +44,10 @@ impl ShimEnv<std::io::Stderr> {
     /// The environment of the running process.
     pub fn from_process() -> ShimEnv<std::io::Stderr> {
         ShimEnv {
-            // ROWSER_TEST_TUNNEL_DIR is a hidden test hook: it keeps a test
-            // Shim away from real Session sockets in /tmp.
-            tunnel_dir: std::env::var_os("ROWSER_TEST_TUNNEL_DIR")
-                .filter(|v| !v.is_empty())
-                .map_or_else(|| PathBuf::from(TUNNEL_DIR), PathBuf::from),
             socket_override: std::env::var_os("ROWSER_SOCKET")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
             outpost_socket: Some(crate::outpost::socket_path(&crate::outpost::outpost_dir())),
-            reported_host: hostname(),
             procfs: Procfs::default(),
             // SAFETY: getppid has no preconditions and cannot fail.
             caller_pid: unsafe { libc::getppid() } as u32,
@@ -71,7 +62,7 @@ impl ShimEnv<std::io::Stderr> {
     }
 }
 
-/// Sends `url` and its Callback ports to the Daemon through a Tunnel. The
+/// Sends `url` and its Callback ports to the Daemon through the Link. The
 /// Outpost holds any Callback forward. Exits 0 when the Daemon accepts the
 /// URL, 1 otherwise, without waiting for the callback.
 pub async fn run_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> ExitCode {
@@ -80,12 +71,11 @@ pub async fn run_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> ExitCode {
         .collect();
     let request = Msg::Open {
         url: url.to_string(),
-        reported_host: env.reported_host.clone(),
         callback_ports: ports.clone(),
     };
     match request_forward(request, env).await {
         Outcome::Failed => ExitCode::FAILURE,
-        Outcome::NoTunnel => {
+        Outcome::NoLink => {
             if env.graphical && !env.in_fallback {
                 if let Some(code) = run_real_xdg_open(url, env) {
                     return code;
@@ -93,7 +83,7 @@ pub async fn run_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> ExitCode {
             }
             let _ = writeln!(
                 env.stderr,
-                "rowser: no tunnel; open this URL manually: {url}"
+                "rowser: no Link to your Local machine; open this URL manually: {url}\n{NO_LINK_HINT}"
             );
             ExitCode::FAILURE
         }
@@ -130,8 +120,8 @@ const FALLBACK_GUARD: &str = "ROWSER_SHIM_FALLBACK";
 
 /// What `request_forward` did.
 enum Outcome {
-    /// No Tunnel answered; the caller prints the no-tunnel message.
-    NoTunnel,
+    /// No socket answered; the caller prints the no-Link message.
+    NoLink,
     /// The request failed; the error is on stderr.
     Failed,
     /// The Daemon accepted the request, with no Callback forward.
@@ -144,12 +134,14 @@ enum Outcome {
 /// the forward started, 1 otherwise.
 pub async fn run_forward<W: Write>(port: u16, env: &mut ShimEnv<W>) -> ExitCode {
     let request = Msg::Forward {
-        reported_host: env.reported_host.clone(),
         callback_ports: vec![port],
     };
     match request_forward(request, env).await {
-        Outcome::NoTunnel => {
-            let _ = writeln!(env.stderr, "rowser: no tunnel; cannot forward port {port}");
+        Outcome::NoLink => {
+            let _ = writeln!(
+                env.stderr,
+                "rowser: no Link to your Local machine; cannot forward port {port}\n{NO_LINK_HINT}"
+            );
             ExitCode::FAILURE
         }
         Outcome::Forwarded => {
@@ -165,10 +157,9 @@ pub async fn run_forward<W: Write>(port: u16, env: &mut ShimEnv<W>) -> ExitCode 
 
 /// Sends `request` and prints the reply's warnings and errors.
 async fn request_forward<W: Write>(request: Msg, env: &mut ShimEnv<W>) -> Outcome {
-    // ROWSER_SOCKET, else the Outpost socket, else the old directory search.
-    // The owner check applies to the Outpost socket only: ROWSER_SOCKET is
-    // the user's own choice.
-    let first = match env.socket_override.clone() {
+    // ROWSER_SOCKET, else the Outpost socket. The owner check applies to the
+    // Outpost socket only: ROWSER_SOCKET is the user's own choice.
+    let socket = match env.socket_override.clone() {
         Some(p) => Some(p),
         None => match env.outpost_socket.clone() {
             Some(p) if p.symlink_metadata().is_ok() => match crate::outpost::check_socket(&p) {
@@ -184,13 +175,13 @@ async fn request_forward<W: Write>(request: Msg, env: &mut ShimEnv<W>) -> Outcom
             _ => None,
         },
     };
-    let mut conn = match find_tunnel(&env.tunnel_dir, first).await {
-        Ok(found) => found,
+    let mut conn = match find_socket(socket.as_slice()).await {
+        Ok((conn, _)) => conn,
         Err(e) => {
             if let Some(mismatch) = e.mismatch {
                 let _ = writeln!(env.stderr, "rowser: {mismatch}");
             }
-            return Outcome::NoTunnel;
+            return Outcome::NoLink;
         }
     };
     if let Err(e) = conn.send(&request).await {
@@ -250,15 +241,4 @@ pub fn open_main(url: &Url) -> ExitCode {
 /// `rowser forward <port>` for the binary.
 pub fn forward_main(port: u16) -> ExitCode {
     block_on(run_forward(port, &mut ShimEnv::from_process()))
-}
-
-fn hostname() -> String {
-    let mut buf = [0u8; 256];
-    // SAFETY: buf is valid for buf.len() bytes; gethostname writes at most that.
-    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
-    if rc != 0 {
-        return "unknown".into();
-    }
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..end]).into_owned()
 }

@@ -6,21 +6,17 @@ use url::Url;
 
 use crate::config::Target;
 
-/// Where the host name in a notice comes from.
+/// The host of a notice: the Host alias of the Link the request came on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoticeHost {
-    /// A Host alias from a Host stamp on the relay socket: trusted.
     Alias(String),
-    /// A Reported host name from the Shim: never trusted.
-    Reported(String),
 }
 
 impl NoticeHost {
-    /// The host name, and `true` when it is an unverified Reported host name.
-    pub fn parts(&self) -> (&str, bool) {
+    /// The Host alias.
+    pub fn alias(&self) -> &str {
         match self {
-            NoticeHost::Alias(a) => (a, false),
-            NoticeHost::Reported(r) => (r, true),
+            NoticeHost::Alias(a) => a,
         }
     }
 }
@@ -105,8 +101,7 @@ impl Notice {
     }
 
     /// The notification body. Host names and the URL have control characters
-    /// removed and markup escaped, so a forged name cannot move or hide
-    /// "(unverified)".
+    /// removed and markup escaped, so a forged URL cannot move or hide text.
     pub fn body(&self) -> String {
         self.body_with(true)
     }
@@ -118,13 +113,7 @@ impl Notice {
     }
 
     fn body_with(&self, escape: bool) -> String {
-        let host = match &self.host {
-            NoticeHost::Alias(alias) => clean(alias, escape),
-            NoticeHost::Reported(name) => match clean(name, escape) {
-                n if n.trim().is_empty() => "unknown host (unverified)".into(),
-                n => format!("{n} (unverified)"),
-            },
-        };
+        let host = clean(self.host.alias(), escape);
         let what = match &self.subject {
             Subject::Url(url) => clean(url.as_str(), escape),
             Subject::Forward(ports) => {

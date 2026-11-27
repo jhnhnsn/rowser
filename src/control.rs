@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 
 use crate::protocol::{
     ActivityEntry, AnsweredBy, Conn, ForwardInfo, Hello, Msg, Outcome, PendingInfo, RequestKind,
-    SessionInfo, CONTROL_SOCKET,
+    CONTROL_SOCKET,
 };
 
 /// The line every control command prints when the Daemon does not answer.
@@ -78,7 +78,7 @@ async fn open_control(runtime_dir: &Path) -> Result<Conn<UnixStream>, RequestErr
 
 /// `rowser status` inputs.
 pub struct StatusArgs {
-    /// The runtime directory, found as `rowser ssh` finds it.
+    /// The runtime directory of the Daemon.
     pub runtime_dir: Result<PathBuf, String>,
     pub json: bool,
 }
@@ -107,7 +107,6 @@ pub fn run_status(args: StatusArgs, out: &mut impl Write, err: &mut impl Write) 
         paused,
         paused_until,
         forwards,
-        sessions,
         ..
     } = reply
     else {
@@ -126,7 +125,6 @@ pub fn run_status(args: StatusArgs, out: &mut impl Write, err: &mut impl Write) 
         config_file_exists,
         paused,
         paused_until,
-        sessions,
         forwards,
     };
     let written = if args.json {
@@ -153,7 +151,6 @@ struct StatusView {
     paused: bool,
     /// When a `rowser pause --for` ends, in seconds since the Unix epoch.
     paused_until: Option<u64>,
-    sessions: Vec<SessionInfo>,
     forwards: Vec<ForwardInfo>,
 }
 
@@ -173,25 +170,12 @@ fn write_text(out: &mut impl Write, s: &StatusView) -> std::io::Result<()> {
         (true, Some(u)) => format!("yes, until {}", local_time(u)),
     };
     writeln!(out, "paused:            {paused}")?;
-    if s.sessions.is_empty() {
-        writeln!(out, "sessions:          none")?;
-    } else {
-        writeln!(out, "sessions:")?;
-        for x in &s.sessions {
-            writeln!(out, "  {}  {}  {}", x.host, age(x.age_secs), x.target)?;
-        }
-    }
     if s.forwards.is_empty() {
         return writeln!(out, "callback forwards: none");
     }
     writeln!(out, "callback forwards:")?;
     for f in &s.forwards {
-        let host = if f.unverified {
-            format!("{} (unverified)", f.host)
-        } else {
-            f.host.clone()
-        };
-        writeln!(out, "  {}  {host}  {}", f.port, age(f.age_secs))?;
+        writeln!(out, "  {}  {}  {}", f.port, f.host, age(f.age_secs))?;
     }
     Ok(())
 }
@@ -422,11 +406,7 @@ pub fn run_pending(
 /// One `rowser pending` text line.
 fn pending_line(p: &PendingInfo) -> String {
     let mut parts = vec![p.id.to_string()];
-    parts.push(if p.unverified {
-        format!("{} (unverified)", p.host)
-    } else {
-        p.host.clone()
-    });
+    parts.push(p.host.clone());
     parts.push(match p.kind {
         RequestKind::Open => p.url.clone().unwrap_or_default(),
         RequestKind::Forward => format!(
@@ -519,7 +499,7 @@ pub fn deny_main(id: u64) -> ExitCode {
 
 /// `rowser activity` inputs.
 pub struct ActivityArgs {
-    /// The runtime directory, found as `rowser ssh` finds it.
+    /// The runtime directory of the Daemon.
     pub runtime_dir: Result<PathBuf, String>,
     pub json: bool,
     /// Keep printing new and changed entries until the process ends.
@@ -630,11 +610,7 @@ fn unexpected(err: &mut impl Write, reply: Msg) -> ExitCode {
 /// One `rowser activity` text line.
 fn activity_line(e: &ActivityEntry) -> String {
     let mut parts = vec![local_time(e.time)];
-    parts.push(if e.unverified {
-        format!("{} (unverified)", e.host)
-    } else {
-        e.host.clone()
-    });
+    parts.push(e.host.clone());
     let ports = || {
         e.ports
             .iter()

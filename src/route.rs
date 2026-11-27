@@ -10,7 +10,7 @@ use url::Url;
 use crate::browsers::{Browsers, Roots};
 use crate::config::{self, Route, Target};
 use crate::control;
-use crate::routes::{RequestHost, Routes};
+use crate::routes::Routes;
 
 /// One `rowser route` command.
 #[derive(Debug, Clone)]
@@ -33,8 +33,6 @@ pub enum RouteAction {
     Test {
         host: String,
         url: Url,
-        /// `host` is a Reported host name, not a Host alias.
-        unverified: bool,
     },
 }
 
@@ -77,7 +75,7 @@ fn io(e: std::io::Error) -> String {
     e.to_string()
 }
 
-/// `rowser route list`: one row per Route, then the two fallbacks.
+/// `rowser route list`: one row per Route, then `[default]`.
 fn list(file: &Path, out: &mut impl Write) -> Result<(), String> {
     let c = config::load(file)?;
     let routes = Routes::from_config(&c);
@@ -92,9 +90,7 @@ fn list(file: &Path, out: &mut impl Write) -> Result<(), String> {
         }
         writeln!(out, "{}", parts.join("  ")).map_err(io)?;
     }
-    let (unverified, default) = routes.fallbacks();
-    writeln!(out, "[unverified]  {unverified}").map_err(io)?;
-    writeln!(out, "[default]  {default}").map_err(io)
+    writeln!(out, "[default]  {}", routes.default_target()).map_err(io)
 }
 
 /// `rowser route test`: the Target and the Route that matched. A browser
@@ -102,21 +98,20 @@ fn list(file: &Path, out: &mut impl Write) -> Result<(), String> {
 /// a `warning:` line.
 fn test(
     file: &Path,
-    host: RequestHost,
+    host: &str,
     url: &Url,
     browsers: &Browsers,
     out: &mut impl Write,
 ) -> Result<(), String> {
     let routes = Routes::from_config(&config::load(file)?);
-    let pick = routes.pick(&host, url);
-    let label = match (pick.route, &host) {
-        (Some(i), _) => format!("route {}", i + 1),
-        (None, RequestHost::Unverified(_)) => "[unverified]".into(),
-        (None, RequestHost::Alias(_)) => "[default]".into(),
+    let pick = routes.pick(host, url);
+    let label = match pick.route {
+        Some(i) => format!("route {}", i + 1),
+        None => "[default]".into(),
     };
     let (target, ask, warnings) = match pick.target {
         Target::Browser { .. } => {
-            let r = routes.resolve(&host, url, browsers);
+            let r = routes.resolve(host, url, browsers);
             (r.target, r.ask, r.warnings)
         }
         // `system` and `ask` show as picked, as before.
@@ -140,17 +135,8 @@ fn run_inner(args: RouteArgs, out: &mut impl Write, err: &mut impl Write) -> Res
     let in_file = |e: String| format!("{}: {e}", file.display());
     let (text, done) = match args.action {
         RouteAction::List => return list(&file, out),
-        RouteAction::Test {
-            host,
-            url,
-            unverified,
-        } => {
-            let host = if unverified {
-                RequestHost::Unverified(host)
-            } else {
-                RequestHost::Alias(host)
-            };
-            return test(&file, host, &url, &args.browsers, out);
+        RouteAction::Test { host, url } => {
+            return test(&file, &host, &url, &args.browsers, out);
         }
         RouteAction::Add {
             host,

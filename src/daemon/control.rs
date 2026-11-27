@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::protocol::{Conn, Hello, Msg, SessionInfo};
+use crate::protocol::{Conn, Hello, Msg};
 use crate::routes::Routes;
 
 use super::pending::TerminalAnswer;
@@ -81,20 +81,6 @@ impl Inner {
                         }
                     }
                 }
-                Msg::Session { host } => {
-                    let _session = self.sessions.register(&host);
-                    conn.send(&Msg::OpenResult {
-                        forward_id: None,
-                        warnings: vec![],
-                        error: None,
-                    })
-                    .await?;
-                    // The Session lasts until the Wrapper closes the
-                    // connection (or the kernel does, for a killed
-                    // Wrapper); the guard drops it then.
-                    while let Ok(Some(_)) = conn.recv().await {}
-                    return Ok(());
-                }
                 _ => {
                     return conn
                         .send(&open_error(
@@ -126,6 +112,9 @@ impl Inner {
         match crate::config::load(path) {
             Ok(file) => {
                 let count = file.routes.len();
+                if file.has_unverified {
+                    tracing::warn!("{}", crate::config::UNVERIFIED_IGNORED);
+                }
                 self.sync_links(file.hosts.clone());
                 // A valid load means a file is there now.
                 *self.loaded.write().unwrap_or_else(|e| e.into_inner()) = Loaded {
@@ -249,16 +238,6 @@ impl Inner {
             paused: paused.is_paused(),
             paused_until: paused.until(),
             forwards: self.forwards.list(),
-            sessions: self
-                .sessions
-                .list()
-                .into_iter()
-                .map(|(host, start)| SessionInfo {
-                    target: self.current_routes().session_target(&host).to_string(),
-                    age_secs: start.elapsed().as_secs(),
-                    host,
-                })
-                .collect(),
             links: self.link_infos(),
         }
     }

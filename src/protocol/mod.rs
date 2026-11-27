@@ -40,12 +40,6 @@ impl Version {
         Version { major, minor }
     }
 
-    /// True for 1.1 and later: the peer knows the Wrapper's control
-    /// connection (`Msg::Session`).
-    pub fn has_sessions(self) -> bool {
-        self.major >= 2 || (self.major == 1 && self.minor >= 1)
-    }
-
     pub fn major(self) -> u32 {
         self.major
     }
@@ -87,19 +81,14 @@ impl Hello {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Msg {
-    HostStamp {
-        alias: String,
-    },
+    /// An Open request. The Host alias is the Link's, never a field.
     Open {
         url: String,
-        reported_host: String,
         callback_ports: Vec<u16>,
     },
     /// `rowser forward`: a Callback forward without a URL. The reply is an
-    /// `OpenResult`. `reported_host` plays the same part as in `Open`: the
-    /// notice shows it, and `--confirm-unverified` matches it.
+    /// `OpenResult`.
     Forward {
-        reported_host: String,
         callback_ports: Vec<u16>,
     },
     OpenResult {
@@ -122,13 +111,6 @@ pub enum Msg {
     /// success the stream then carries the connection's bytes.
     Dial {
         port: u16,
-    },
-    /// Control socket only (1.1): the Wrapper registers its Session for the
-    /// Host alias `host` it got from `ssh -G`. The reply is an `OpenResult`.
-    /// The Session lasts until the connection closes; no other message
-    /// follows. The relay socket refuses it, so a Remote host cannot add one.
-    Session {
-        host: String,
     },
     Ping,
     Pong {
@@ -165,8 +147,6 @@ pub enum Msg {
         paused_until: Option<u64>,
         #[serde(default)]
         forwards: Vec<ForwardInfo>,
-        #[serde(default)]
-        sessions: Vec<SessionInfo>,
         /// One entry for each Saved host, in Host alias order.
         #[serde(default)]
         links: Vec<LinkInfo>,
@@ -245,9 +225,8 @@ pub enum Msg {
 pub struct PendingInfo {
     pub id: u64,
     pub kind: RequestKind,
-    /// The Host alias, or the Reported host name when `unverified`.
+    /// The Host alias.
     pub host: String,
-    pub unverified: bool,
     #[serde(default)]
     pub url: Option<String>,
     /// The Callback ports of a `rowser forward` request.
@@ -318,13 +297,12 @@ pub struct ActivityEntry {
     /// Seconds since the Unix epoch.
     pub time: u64,
     pub kind: RequestKind,
-    /// The Host alias, or the Reported host name when `unverified`.
+    /// The Host alias.
     pub host: String,
-    pub unverified: bool,
     #[serde(default)]
     pub url: Option<String>,
-    /// The Route that matched: `route <n>` (from 1, in file order),
-    /// `[unverified]` or `[default]`. `None` for a forward, or a request
+    /// The Route that matched: `route <n>` (from 1, in file order) or
+    /// `[default]`. `None` for a forward, or a request
     /// refused before Route matching.
     #[serde(default)]
     pub route: Option<String>,
@@ -346,18 +324,6 @@ pub struct ActivityEntry {
     pub answered_by: Option<AnsweredBy>,
 }
 
-/// One connected Wrapper, as `rowser status` shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionInfo {
-    /// The Host alias the Wrapper got from `ssh -G`.
-    pub host: String,
-    /// Seconds since the Session registered.
-    pub age_secs: u64,
-    /// The Target the Host alias's Routes give an `https` URL that no
-    /// `match` list names.
-    pub target: String,
-}
-
 impl Msg {
     /// True for the messages that only the control socket accepts.
     pub fn is_control(&self) -> bool {
@@ -365,7 +331,6 @@ impl Msg {
             self,
             Msg::Status
                 | Msg::StatusReply { .. }
-                | Msg::Session { .. }
                 | Msg::Reload
                 | Msg::Reloaded { .. }
                 | Msg::Activity { .. }
@@ -439,9 +404,8 @@ pub fn rowser_version() -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForwardInfo {
     pub port: u16,
-    /// The Host alias, or the Reported host name when `unverified`.
+    /// The Host alias.
     pub host: String,
-    pub unverified: bool,
     pub age_secs: u64,
 }
 

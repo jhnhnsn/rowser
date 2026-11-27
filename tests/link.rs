@@ -82,14 +82,14 @@ fn start_daemon(
     notifier: impl Notifier,
 ) {
     let ssh = fake_ssh(dir, body);
-    let (direct, relay, control) = bind_sockets(&dir.join("run")).unwrap();
+    let control = bind_sockets(&dir.join("run")).unwrap();
     let config = DaemonConfig {
         ssh,
         link_dir: dir.join("run"),
         ..config
     };
     let daemon = Daemon::new(config, opener, notifier);
-    tokio::spawn(daemon.serve(direct, relay, control));
+    tokio::spawn(daemon.serve(control));
 }
 
 impl World {
@@ -173,13 +173,11 @@ async fn wait_connected(socket: &Path) {
     panic!("the Link did not connect");
 }
 
-/// A Shim environment with no Tunnels and no `/proc`.
+/// A Shim environment with no `/proc`.
 fn shim(dir: &Path, outpost_socket: Option<PathBuf>) -> ShimEnv<Vec<u8>> {
     ShimEnv {
-        tunnel_dir: dir.join("no-tunnels"),
         socket_override: None,
         outpost_socket,
-        reported_host: "g14-box".into(),
         procfs: Procfs::new(dir.join("no-proc")),
         caller_pid: 1,
         graphical: false,
@@ -457,7 +455,10 @@ async fn the_shim_skips_an_outpost_socket_in_a_folder_that_others_can_read() {
         stderr.contains("warning: not using the Outpost socket") && stderr.contains("0700"),
         "{stderr}"
     );
-    assert!(stderr.contains("no tunnel"), "{stderr}");
+    assert!(
+        stderr.contains("rowser: no Link to your Local machine; open this URL manually: https://example.com/skip"),
+        "{stderr}"
+    );
     assert!(w.opener.urls().is_empty());
 }
 
