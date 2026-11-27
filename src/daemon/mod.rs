@@ -438,23 +438,25 @@ impl Inner {
         ))
     }
 
-    fn forward(
+    async fn forward(
         &self,
         ports: &[u16],
         host: &NoticeHost,
         link: Option<&crate::mux::Opener>,
     ) -> forward::Created {
-        self.forwards.create(
-            ports,
-            host,
-            link,
-            &self.config.loopback,
-            self.config.forward_timeout,
-            {
-                let activity = self.activity.clone();
-                move |id: &str, open| activity.forward_closed(id, open)
-            },
-        )
+        self.forwards
+            .create(
+                ports,
+                host,
+                link,
+                &self.config.loopback,
+                self.config.forward_timeout,
+                {
+                    let activity = self.activity.clone();
+                    move |id: &str, open| activity.forward_closed(id, open)
+                },
+            )
+            .await
     }
 
     /// `rowser forward`: the same `--confirm-hosts` rules as an Open
@@ -484,7 +486,7 @@ impl Inner {
                 }
             }
         }
-        let created = self.forward(&ports, &notice.host, link);
+        let created = self.forward(&ports, &notice.host, link).await;
         let mut e = new_entry(RequestKind::Forward, &notice.host, Outcome::Opened);
         e.answered_by = answered_by;
         e.ports = ports.clone();
@@ -569,7 +571,7 @@ impl Inner {
         }
         // Bind the Callback forward only after approval, so a denied URL
         // never holds a local port.
-        let created = self.forward(ports, &host, link);
+        let created = self.forward(ports, &host, link).await;
         let opener = self.opener.clone();
         let notifier = self.notifier.clone();
         let forward_warned = !created.warnings.is_empty();

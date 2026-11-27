@@ -46,8 +46,9 @@ impl Forwards {
     /// Binds each port on every loopback address and starts a forward for the
     /// ports that bound, through the Link of `link`. Ports that cannot be
     /// bound give warnings. With no Link (a request on a socket), nothing is
-    /// forwarded and each port gives a warning.
-    pub fn create(
+    /// forwarded and each port gives a warning. When the Outpost's watch
+    /// stream cannot open, nothing is forwarded and a warning says so.
+    pub async fn create(
         self: &Arc<Self>,
         ports: &[u16],
         host: &NoticeHost,
@@ -103,6 +104,29 @@ impl Forwards {
         // One listener per loopback address: list each port once.
         bound.sort_unstable();
         bound.dedup();
+        // Open the watch stream before the reply: when it fails, no forward
+        // starts, and the reply says so.
+        let watch = match open(
+            link,
+            &Msg::Watch {
+                ports: bound.clone(),
+            },
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(e) => {
+                let list = bound
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                warnings.push(format!(
+                    "the Outpost cannot watch the callback ports ({e}); port {list} is not forwarded"
+                ));
+                return none(warnings);
+            }
+        };
         let ports = bound.clone();
         let (host, unverified) = host.parts();
         let host = host.to_string();
@@ -122,7 +146,7 @@ impl Forwards {
         let link = link.clone();
         let started = tokio::time::Instant::now();
         tokio::spawn(async move {
-            run(link, bound, listeners, stop, timeout).await;
+            run(link, watch, listeners, stop, timeout).await;
             this.stops.lock().unwrap().remove(&forward_id);
             this.active.lock().unwrap().remove(&forward_id);
             on_end(&forward_id, started.elapsed());
@@ -165,17 +189,13 @@ impl Forwards {
 /// connections already relayed go on until they close.
 async fn run(
     link: mux::Opener,
-    ports: Vec<u16>,
+    mut watch: Conn<mux::Stream>,
     listeners: Vec<(u16, TcpListener)>,
     stop: oneshot::Receiver<()>,
     timeout: Duration,
 ) {
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline, stop);
-    let mut watch = match open(&link, &Msg::Watch { ports }).await {
-        Ok(conn) => conn,
-        Err(e) => return tracing::debug!("forward: no watch stream: {e}"),
-    };
     let (tx, mut rx) = mpsc::channel(64);
     let mut accepts = JoinSet::new();
     for (port, listener) in listeners {

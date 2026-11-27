@@ -171,7 +171,7 @@ async fn wait_connected(socket: &Path) {
     panic!("the Link did not connect");
 }
 
-/// A Shim environment with no Tunnels, no `/proc` and no keeper.
+/// A Shim environment with no Tunnels and no `/proc`.
 fn shim(dir: &Path, outpost_socket: Option<PathBuf>) -> ShimEnv<Vec<u8>> {
     ShimEnv {
         tunnel_dir: dir.join("no-tunnels"),

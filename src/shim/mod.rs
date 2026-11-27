@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use url::Url;
 
 use crate::detect::{callback_ports, Procfs};
-use crate::discovery::find_tunnel_path;
+use crate::discovery::find_tunnel;
 use crate::platform::real_xdg_open;
 use crate::protocol::Msg;
 
@@ -184,7 +184,7 @@ async fn request_forward<W: Write>(request: Msg, env: &mut ShimEnv<W>) -> Outcom
             _ => None,
         },
     };
-    let (mut conn, _socket) = match find_tunnel_path(&env.tunnel_dir, first).await {
+    let mut conn = match find_tunnel(&env.tunnel_dir, first).await {
         Ok(found) => found,
         Err(e) => {
             if let Some(mismatch) = e.mismatch {

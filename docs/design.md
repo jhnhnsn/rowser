@@ -58,10 +58,10 @@ Messages (one enum, `Msg`): `HostStamp{alias}`, `Open{url, reported_host, callba
 `OpenResult{forward_id?, warnings, error?}`, `Watch{ports}`, `Dial{port}`, `Ping`,
 `Pong{version, rowser_version?}` (`rowser_version` is the answering side's `CARGO_PKG_VERSION`,
 protocol 2.0; the Daemon and the Outpost send it). `Watch` and `Dial` go from the Daemon to the
-Outpost on a new Link stream
-(#79). On a `Watch` stream the Outpost checks the remote ports every 2 seconds and closes the
-stream when none listens. On a `Dial` stream it dials `127.0.0.1`, then `[::1]`, replies with
-an `OpenResult` (an `error` when the dial fails or the port is below 1024), and then splices.
+Outpost on a new Link stream (#79). On a `Watch` stream the Outpost checks the remote ports every 2
+seconds and closes the stream when none listens. On a `Dial` stream it dials `127.0.0.1`, then
+`[::1]`, replies with an `OpenResult` (an `error` when the dial fails or the port is below 1024),
+and then splices.
 
 Control messages (protocol 1.1, control socket only; `Msg::is_control` names them, and the direct
 and relay sockets answer them with an `OpenResult` error and close the connection): `Status`,

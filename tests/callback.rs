@@ -269,6 +269,15 @@ async fn the_forward_ends_when_the_link_drops() {
 
 /// The `open_secs` of each Activity entry, from `rowser activity --json`.
 async fn open_secs(w: &World) -> Vec<Option<u64>> {
+    activity(w)
+        .await
+        .iter()
+        .map(|e| e["open_secs"].as_u64())
+        .collect()
+}
+
+/// Each entry of `rowser activity --json`.
+async fn activity(w: &World) -> Vec<serde_json::Value> {
     let run = w.dir.0.join("run");
     let out = tokio::task::spawn_blocking(move || {
         let mut out = Vec::new();
@@ -286,7 +295,7 @@ async fn open_secs(w: &World) -> Vec<Option<u64>> {
     .await
     .unwrap();
     out.lines()
-        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["open_secs"].as_u64())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
         .collect()
 }
 
@@ -350,6 +359,49 @@ async fn status_shows_the_forward_with_its_saved_host_until_it_ends() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("the forward is still in status");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_watch_stream_that_cannot_open_starts_no_forward_but_the_url_opens() {
+    let config = DaemonConfig {
+        confirm_hosts: vec!["g14".into()],
+        ..DaemonConfig::default()
+    };
+    let w = World::start(config, Answer::Hang).await;
+    let port = free_port();
+    let _remote = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    let url = auth_url(port);
+    let mut env = w.shim();
+    let shim = tokio::spawn({
+        let url = url.clone();
+        async move { run_open(&url, &mut env).await }
+    });
+    for _ in 0..100 {
+        if !w.notifier.confirms().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(w.notifier.confirms().len(), 1);
+    // The Link drops while the Notice waits: the watch stream cannot open.
+    w.kill_outpost();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    w.notifier.release(true);
+    let _ = shim.await;
+    for _ in 0..50 {
+        if w.opener.urls() == [url.clone()] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(w.opener.urls(), [url]);
+    assert!(!local_held(port), "the local port is still held");
+    assert_eq!(status_forwards(&w).await, serde_json::json!([]));
+    let entries = activity(&w).await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["open_secs"], 0);
+    let warnings = entries[0]["warnings"].to_string();
+    assert!(warnings.contains("cannot watch"), "{warnings}");
 }
 
 struct FailingOpener;
