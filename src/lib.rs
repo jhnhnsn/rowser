@@ -10,6 +10,8 @@ pub mod detect;
 pub mod discovery;
 pub mod doctor;
 pub mod logging;
+pub mod mux;
+pub mod outpost;
 pub mod platform;
 pub mod protocol;
 pub mod remote_install;

@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::net::{TcpListener, TcpStream, UnixStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
@@ -16,7 +16,7 @@ use crate::protocol::{Conn, ForwardInfo, Msg};
 /// Lowest port that may be a Callback port.
 const MIN_PORT: u16 = 1024;
 
-type Control = Conn<UnixStream>;
+type Control = Conn<super::BoxStream>;
 
 /// A browser connection that waits for the keeper's data connection.
 struct Pending {

@@ -345,6 +345,7 @@ fn shim_env(h: &Harness) -> ShimEnv<Vec<u8>> {
     ShimEnv {
         tunnel_dir: PathBuf::from("/nonexistent"),
         socket_override: Some(h.dir.0.join("run").join(DIRECT_SOCKET)),
+        outpost_socket: None,
         reported_host: "devbox".into(),
         procfs: Procfs::new("/nonexistent"),
         caller_pid: 1,

@@ -22,8 +22,11 @@ src/
     forward.rs       internal: local listeners, reverse-dial bookkeeping
     limit.rs         internal: per-connection rate limit
     confirm.rs       internal: `--confirm-hosts` matching and the confirmation timeout
+    link.rs          internal: one Link for each Saved host (ssh child, backoff, Link state)
     testing.rs       test adapters for the Opener and Notifier ports
   shim/              `rowser open`, `rowser forward`, `__keeper`
+  mux.rs             yamux over one byte pipe (the Link); the Daemon is the client side
+  outpost.rs         `rowser __outpost` on a Saved host: the Outpost socket and its relay
   wrapper/           `rowser ssh`: destination resolution, relay with Host stamp
   service.rs         `rowser daemon install|uninstall` (systemd unit, launchd plist, their paths)
   remote_install.rs  `rowser remote install <host>`
@@ -132,12 +135,35 @@ Ports (each has a production adapter and a test adapter, so both seams are real)
 Time is **not** a port: tests use tokio's paused clock (`start_paused`). Paths and ports are
 plain config values.
 
+### Links: `mux`, `outpost`, `daemon/link` (#77)
+
+Protocol 2.0. The Daemon keeps one Link to each `[[host]]`: it runs `ssh -T -o BatchMode=yes
+-o ControlMaster=no -o ControlPath=<runtime dir>/cm-%C -o ServerAliveInterval=15
+-o ServerAliveCountMax=3 <name> <remote_path> __outpost` and runs yamux over the child's stdio.
+
+- `mux::start(io, Side) -> (Opener, inbound streams, driver)`: one yamux connection. Each
+  stream carries the usual NDJSON handshake, so `Conn` is unchanged.
+- `outpost::serve(io, dir)`: binds `<dir>/outpost.sock` (mode 0600) in a folder that must be
+  mode 0700 and belong to the user (`prepare_dir` refuses others), and relays each Shim
+  connection, byte for byte, on a new stream to the Daemon. The handshake runs from end to
+  end, so a 1.x Shim gets the mismatch error from the Daemon. `outpost_dir()` is
+  `/tmp/rowser-<uid>`, or the hidden test hook `ROWSER_TEST_OUTPOST_DIR`.
+- `daemon/link`: `Backoff` (1 s, doubles, 60 s maximum; reset after a `Pong` on a control
+  stream), `LinkState` (`Connecting`, `Connected`, `NeedsLogin`). "Permission denied" on ssh
+  stderr before the first connection sets `NeedsLogin`, shows one notice and stops retries.
+  Requests from a Link carry the Host alias and share one rate limit for each Saved host.
+  `serve` and a reload call `sync_links` to add or remove Links.
+
+`DaemonConfig` adds `hosts`, `ssh` (the program; tests give a fake that runs `rowser __outpost`
+locally) and `link_dir` (the `ControlPath` folder). The Shim tries `ROWSER_SOCKET`, then the
+Outpost socket (`ShimEnv::outpost_socket`), then the Tunnel directory search.
+
 ### `shim` — deep
 
 Interface: `run_open(url, ShimEnv) -> ExitCode`, `run_forward(port, ShimEnv) -> ExitCode`,
 `run_keeper(KeeperArgs) -> ExitCode`.
 
-`ShimEnv`: tunnel directory, `ROWSER_SOCKET`, procfs root, caller pid, reported host name, path
+`ShimEnv`: tunnel directory, `ROWSER_SOCKET`, the Outpost socket, procfs root, caller pid, reported host name, path
 to the own executable (for the keeper re-exec), `graphical` (`WAYLAND_DISPLAY` or `DISPLAY` set),
 `search_path` (`PATH`, for the real `xdg-open`), `self_exe` (skipped as an `xdg-open`),
 `in_fallback` (the hidden `ROWSER_SHIM_FALLBACK` guard), stderr writer. Hidden: discovery,

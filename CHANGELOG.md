@@ -6,6 +6,20 @@ All notable changes to rowser are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Saved hosts and Links: each `[[host]]` in the config file gets one Link, an `ssh` connection
+  that the Daemon keeps open and runs `rowser __outpost` on the host. Programs on that host
+  open URLs through the Outpost socket `/tmp/rowser-<uid>/outpost.sock`, with no `rowser ssh`
+  session. A dropped Link reconnects after 1 s, then up to 60 s. A failed login shows one
+  notification and stops the retries. `rowser reload` adds or removes Links.
+  ([#77](https://github.com/jhnhnsn/rowser/issues/77))
+
+### Changed
+
+- Protocol 2.0. A rowser 1.x on the other side gets the version mismatch error; update both
+  sides. ([#77](https://github.com/jhnhnsn/rowser/issues/77))
+
 ## [1.0.0-rc.2] - 2026-11-26
 
 The second release candidate for v1.0.0, and the first Release with `rowser-installer.sh`.

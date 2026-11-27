@@ -129,6 +129,9 @@ pub enum Command {
         #[arg(long = "port", required = true)]
         ports: Vec<u16>,
     },
+    /// Internal: the far end of a Link, started by the Daemon over ssh.
+    #[command(name = "__outpost", hide = true)]
+    Outpost,
 }
 
 #[derive(Debug, Subcommand)]
@@ -245,6 +248,7 @@ impl Command {
             Command::Route { .. } => "route",
             Command::Remote { .. } => "remote install",
             Command::Keeper { .. } => "__keeper",
+            Command::Outpost => "__outpost",
         }
     }
 }
@@ -313,6 +317,7 @@ pub fn run(command: Command) -> ExitCode {
             forward_id,
             ports,
         } => crate::shim::keeper_main(socket, forward_id, ports),
+        Command::Outpost => crate::outpost::outpost_main(),
         Command::Remote {
             action:
                 RemoteAction::Install {

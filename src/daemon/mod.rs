@@ -6,6 +6,7 @@ mod confirm;
 mod control;
 mod forward;
 mod limit;
+mod link;
 mod notifier;
 mod opener;
 mod pending;
@@ -21,7 +22,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
 use url::Url;
 
 use crate::browsers::{Browsers, Roots};
@@ -39,7 +40,8 @@ pub use crate::protocol::CONTROL_SOCKET;
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
-    /// Most Open requests one connection may make in `rate_window`.
+    /// Most Open requests one Saved host (all streams of its Link) or one
+    /// socket connection may make in `rate_window`.
     pub rate_max: usize,
     pub rate_window: Duration,
     /// `--confirm-hosts` glob patterns (`*`, `?`; ASCII case is ignored).
@@ -64,6 +66,12 @@ pub struct DaemonConfig {
     /// Where browser discovery looks, for browser Targets. `None`: no
     /// browsers, so every browser Target falls back to `[default]`.
     pub browser_roots: Option<Roots>,
+    /// The Saved hosts: the Daemon keeps one Link to each.
+    pub hosts: Vec<crate::config::SavedHost>,
+    /// The `ssh` program a Link runs.
+    pub ssh: PathBuf,
+    /// Where a Link's control path (`cm-%C`) goes: the runtime directory.
+    pub link_dir: PathBuf,
 }
 
 impl Default for DaemonConfig {
@@ -79,17 +87,38 @@ impl Default for DaemonConfig {
             forward_timeout: crate::callback::FORWARD_TIMEOUT,
             loopback: crate::callback::LOOPBACK.to_vec(),
             browser_roots: None,
+            hosts: vec![],
+            ssh: PathBuf::from("ssh"),
+            link_dir: std::env::temp_dir(),
         }
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Socket {
+pub(crate) enum Socket {
     Direct,
     Relay,
     /// Local control commands only (ADR 0006).
     Control,
 }
+
+/// Where a request connection came from.
+pub(crate) enum Source {
+    Socket(Socket),
+    /// A stream on the Link to the Saved host `alias`; all its streams share `limit`.
+    Link {
+        alias: String,
+        limit: Arc<Mutex<Limit>>,
+    },
+}
+
+/// Any byte stream a request can arrive on: a Unix socket or a Link stream.
+pub(crate) trait AsyncStream:
+    tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send
+{
+}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> AsyncStream for T {}
+pub(crate) type BoxStream = Box<dyn AsyncStream>;
 
 pub struct Daemon {
     inner: Arc<Inner>,
@@ -120,6 +149,12 @@ struct Inner {
     pause: Mutex<Option<Pause>>,
     /// Requests that wait for an answer, for `rowser pending`.
     pending: Arc<pending::Pending>,
+    /// The running Links, by Host alias.
+    links: Mutex<
+        std::collections::HashMap<String, (crate::config::SavedHost, tokio::task::AbortHandle)>,
+    >,
+    /// This value, so a reload can start Link tasks that hold it.
+    me: std::sync::Weak<Inner>,
 }
 
 /// A pause in effect.
@@ -135,7 +170,9 @@ impl Daemon {
         config.loopback.retain(IpAddr::is_loopback);
         let config_file_exists = config.config_file.as_deref().is_some_and(Path::is_file);
         Daemon {
-            inner: Arc::new(Inner {
+            inner: Arc::new_cyclic(|me| Inner {
+                me: me.clone(),
+                links: Mutex::default(),
                 loaded: RwLock::new(Loaded {
                     routes: Arc::new(std::mem::take(&mut config.routes)),
                     config_file_exists,
@@ -152,13 +189,15 @@ impl Daemon {
         }
     }
 
-    /// Accepts connections on the three sockets until an accept fails.
+    /// Opens a Link to each Saved host, and accepts connections on the
+    /// three sockets until an accept fails.
     pub async fn serve(
         self,
         direct: UnixListener,
         relay: UnixListener,
         control: UnixListener,
     ) -> io::Result<()> {
+        self.inner.sync_links(self.inner.config.hosts.clone());
         loop {
             let (stream, socket) = tokio::select! {
                 r = direct.accept() => (r?.0, Socket::Direct),
@@ -169,7 +208,7 @@ impl Daemon {
             tokio::spawn(async move {
                 let result = match socket {
                     Socket::Control => inner.handle_control(stream).await,
-                    socket => inner.handle(stream, socket).await,
+                    socket => inner.handle(stream, Source::Socket(socket)).await,
                 };
                 if let Err(e) = result {
                     tracing::debug!("connection ended: {e}");
@@ -207,11 +246,42 @@ fn open_error(text: impl Into<String>) -> Msg {
 }
 
 impl Inner {
-    async fn handle(&self, stream: UnixStream, socket: Socket) -> crate::protocol::Result<()> {
-        let (mut conn, _) = Conn::accept(stream).await?;
-        let stamp = match socket {
-            Socket::Direct | Socket::Control => None,
-            Socket::Relay => match conn.recv().await? {
+    /// Starts a Link for each Saved host in `hosts` that has none (or whose
+    /// entry changed), and closes the Links of hosts no longer listed.
+    fn sync_links(&self, hosts: Vec<crate::config::SavedHost>) {
+        let Some(me) = self.me.upgrade() else { return };
+        let mut links = self.links.lock().unwrap_or_else(|e| e.into_inner());
+        links.retain(|name, (old, task)| {
+            let keep = hosts.iter().any(|h| h == old && h.name == *name);
+            if !keep {
+                tracing::info!("link {name}: closed");
+                task.abort();
+            }
+            keep
+        });
+        for host in hosts {
+            if links.contains_key(&host.name) {
+                continue;
+            }
+            let task = tokio::spawn(link::supervise(me.clone(), host.clone()));
+            links.insert(host.name.clone(), (host, task.abort_handle()));
+        }
+    }
+
+    async fn handle(
+        &self,
+        stream: impl AsyncStream + 'static,
+        source: Source,
+    ) -> crate::protocol::Result<()> {
+        let (mut conn, _) = Conn::accept(Box::new(stream) as BoxStream).await?;
+        let (socket, shared) = match source {
+            Source::Socket(s) => (s, None),
+            Source::Link { alias, limit } => (Socket::Relay, Some((alias, limit))),
+        };
+        let stamp = match (&shared, socket) {
+            (Some((alias, _)), _) => Some(alias.clone()),
+            (None, Socket::Direct | Socket::Control) => None,
+            (None, Socket::Relay) => match conn.recv().await? {
                 Some(Msg::HostStamp { alias }) => Some(alias),
                 Some(_) => {
                     return conn
@@ -221,7 +291,14 @@ impl Inner {
                 None => return Ok(()),
             },
         };
-        let mut limit = Limit::new(self.config.rate_max, self.config.rate_window);
+        let limit = match shared {
+            Some((_, l)) => l,
+            None => Arc::new(Mutex::new(Limit::new(
+                self.config.rate_max,
+                self.config.rate_window,
+            ))),
+        };
+        let allow = || limit.lock().unwrap_or_else(|e| e.into_inner()).allow();
         while let Some(msg) = conn.recv().await? {
             if msg.is_control() {
                 // ADR 0006: a Remote host never reaches the control socket.
@@ -247,7 +324,7 @@ impl Inner {
                         e.url = Some(url.clone());
                         self.record(e, callback_ports);
                         open_error(format!("paused; open this URL manually: {url}"))
-                    } else if limit.allow() {
+                    } else if allow() {
                         self.open(&url, host, &callback_ports).await
                     } else {
                         let mut e = new_entry(RequestKind::Open, &host, Outcome::RateLimited);
@@ -266,7 +343,7 @@ impl Inner {
                         let e = new_entry(RequestKind::Forward, &host, Outcome::Paused);
                         self.record(e, callback_ports);
                         open_error(text)
-                    } else if limit.allow() {
+                    } else if allow() {
                         self.manual_forward(host, callback_ports).await
                     } else {
                         let e = new_entry(RequestKind::Forward, &host, Outcome::RateLimited);
@@ -492,7 +569,10 @@ impl Inner {
     async fn confirm(&self, notice: Notice) -> Result<Confirmed, Refused> {
         let (not_approved, not_done) = match notice.subject {
             Subject::Url(_) => (NOT_APPROVED, "the URL was not opened"),
-            Subject::Forward(_) => (FORWARD_NOT_APPROVED, "the port was not forwarded"),
+            // A Link notice is never a confirmation.
+            Subject::Forward(_) | Subject::NeedsLogin => {
+                (FORWARD_NOT_APPROVED, "the port was not forwarded")
+            }
         };
         let paused = paused_text(&notice.subject);
         let dismiss = Dismiss::default();
@@ -608,6 +688,7 @@ fn paused_text(subject: &Subject) -> String {
                 .join(", ");
             format!("paused; port {ports} was not forwarded")
         }
+        Subject::NeedsLogin => "paused".into(),
     }
 }
 
@@ -758,6 +839,8 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
     let file = crate::config::load(&config_path)?;
     let mut config = DaemonConfig {
         browser_roots: Some(roots),
+        hosts: file.hosts.clone(),
+        link_dir: dir.clone(),
         routes: Routes::from_config(&file),
         config_file: Some(config_path),
         confirm_hosts: args.confirm_hosts,

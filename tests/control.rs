@@ -137,7 +137,7 @@ async fn status_shows_the_daemon_version_and_an_open_callback_forward() {
         lines[..5],
         [
             format!("daemon version:    {}", env!("CARGO_PKG_VERSION")),
-            "protocol version:  1.1".to_string(),
+            "protocol version:  2.0".to_string(),
             format!("runtime directory: {}", run.display()),
             "config file:       none".to_string(),
             "paused:            no".to_string(),
@@ -153,7 +153,7 @@ async fn status_shows_the_daemon_version_and_an_open_callback_forward() {
 
     let v = json_status(run.clone()).await;
     assert_eq!(v["daemon_version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(v["protocol_version"], "1.1");
+    assert_eq!(v["protocol_version"], "2.0");
     assert_eq!(v["runtime_dir"], run.display().to_string());
     assert_eq!(v["config_file"], serde_json::Value::Null);
     assert_eq!(v["config_file_exists"], false);
@@ -243,23 +243,14 @@ async fn status_shows_the_config_file_path_and_whether_it_exists() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_protocol_1_0_shim_still_opens_on_the_1_1_daemon() {
+async fn a_protocol_1_0_shim_is_refused_by_the_2_0_daemon() {
     let dir = TmpDir::new("ctl");
     let run = start(&dir).await;
     let s = UnixStream::connect(run.join(DIRECT_SOCKET)).await.unwrap();
-    let mut conn = Conn::connect(s, Hello::with_version(Version::new(1, 0)))
-        .await
-        .unwrap();
-    conn.send(&Msg::Open {
-        url: "https://example.com/".into(),
-        reported_host: "devbox".into(),
-        callback_ports: vec![],
-    })
-    .await
-    .unwrap();
+    let r = Conn::connect(s, Hello::with_version(Version::new(1, 0))).await;
     assert!(matches!(
-        conn.recv().await.unwrap(),
-        Some(Msg::OpenResult { error: None, .. })
+        r,
+        Err(rowser::protocol::Error::VersionMismatch { .. })
     ));
 }
 
@@ -590,7 +581,7 @@ fn status_reports_a_protocol_major_mismatch() {
         let mut line = String::new();
         BufReader::new(&stream).read_line(&mut line).unwrap();
         (&stream)
-            .write_all(b"{\"version\":{\"major\":2,\"minor\":0}}\n")
+            .write_all(b"{\"version\":{\"major\":3,\"minor\":0}}\n")
             .unwrap();
     });
     let (code, out, err) = status_blocking(run, false);
@@ -598,7 +589,7 @@ fn status_reports_a_protocol_major_mismatch() {
     assert_eq!(code, ExitCode::FAILURE);
     assert_eq!(out, "");
     assert!(err.contains("protocol version mismatch"), "{err}");
-    assert!(err.contains("2.0"), "{err}");
+    assert!(err.contains("3.0"), "{err}");
 }
 
 #[tokio::test]

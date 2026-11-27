@@ -80,9 +80,27 @@ pub struct Route {
     pub ask: bool,
 }
 
+/// One `[[host]]` entry: a Saved host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedHost {
+    /// The Host alias, given to `ssh` unchanged.
+    pub name: String,
+    /// Where rowser is on that host; default `~/.local/bin/rowser`.
+    pub remote_path: String,
+    /// Default `true`.
+    pub auto_update: bool,
+    /// Default `true`.
+    pub default_browser: bool,
+}
+
+/// The default `remote_path` of a Saved host.
+pub const DEFAULT_REMOTE_PATH: &str = "~/.local/bin/rowser";
+
 /// The parsed config file. `None` entries take the spec's defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
+    /// The Saved hosts, in file order.
+    pub hosts: Vec<SavedHost>,
     pub routes: Vec<Route>,
     /// `[unverified] open`; default `ask`.
     pub unverified: Option<Target>,
@@ -120,6 +138,8 @@ pub fn load(path: &Path) -> Result<Config, String> {
 #[serde(deny_unknown_fields)]
 struct RawFile {
     #[serde(default)]
+    host: Vec<RawHost>,
+    #[serde(default)]
     route: Vec<RawRoute>,
     unverified: Option<RawEntry>,
     default: Option<RawEntry>,
@@ -134,6 +154,21 @@ struct RawRoute {
     open: Spanned<String>,
     #[serde(default)]
     ask: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHost {
+    name: Spanned<String>,
+    remote_path: Option<String>,
+    #[serde(default = "yes")]
+    auto_update: bool,
+    #[serde(default = "yes")]
+    default_browser: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -169,7 +204,29 @@ pub fn parse(text: &str) -> Result<Config, String> {
             ask: r.ask,
         });
     }
+    let mut hosts: Vec<SavedHost> = Vec::new();
+    for h in &raw.host {
+        let line = line_of(h.name.span().start);
+        let name = h.name.get_ref();
+        // A name that starts with `-` would be an ssh option.
+        if name.trim().is_empty() || name.starts_with('-') {
+            return Err(format!("line {line}: invalid host name `{name}`"));
+        }
+        if hosts.iter().any(|o| o.name == *name) {
+            return Err(format!("line {line}: host `{name}` is listed twice"));
+        }
+        hosts.push(SavedHost {
+            name: name.clone(),
+            remote_path: h
+                .remote_path
+                .clone()
+                .unwrap_or_else(|| DEFAULT_REMOTE_PATH.into()),
+            auto_update: h.auto_update,
+            default_browser: h.default_browser,
+        });
+    }
     Ok(Config {
+        hosts,
         routes,
         unverified: raw
             .unverified
@@ -442,6 +499,39 @@ mod tests {
         assert!(c.routes[1].ask);
         assert_eq!(c.unverified, Some(Target::Ask));
         assert_eq!(c.default, Some(Target::System));
+    }
+
+    #[test]
+    fn saved_hosts_parse_with_defaults_and_bad_names_are_refused() {
+        let c = parse(
+            "[[host]]\nname = \"g14\"\n\n\
+             [[host]]\nname = \"pi\"\nremote_path = \"/opt/rowser\"\nauto_update = false\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.hosts,
+            [
+                SavedHost {
+                    name: "g14".into(),
+                    remote_path: "~/.local/bin/rowser".into(),
+                    auto_update: true,
+                    default_browser: true,
+                },
+                SavedHost {
+                    name: "pi".into(),
+                    remote_path: "/opt/rowser".into(),
+                    auto_update: false,
+                    default_browser: true,
+                },
+            ]
+        );
+        for bad in [
+            "[[host]]\nname = \"\"\n",
+            "[[host]]\nname = \"-oProxyCommand=x\"\n",
+            "[[host]]\nname = \"g14\"\n[[host]]\nname = \"g14\"\n",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

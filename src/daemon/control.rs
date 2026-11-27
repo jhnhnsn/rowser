@@ -119,6 +119,7 @@ impl Inner {
         match crate::config::load(path) {
             Ok(file) => {
                 let count = file.routes.len();
+                self.sync_links(file.hosts.clone());
                 // A valid load means a file is there now.
                 *self.loaded.write().unwrap_or_else(|e| e.into_inner()) = Loaded {
                     routes: Arc::new(Routes::from_config(&file)),

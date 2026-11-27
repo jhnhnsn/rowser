@@ -222,7 +222,8 @@ impl World {
             "-F".into(),
             self.path("ssh_config").into(),
             alias.into(),
-            command.into(),
+            // Never the real Outpost socket of this user.
+            format!("ROWSER_TEST_OUTPOST_DIR={} {command}", self.path("outpost")).into(),
         ];
         let env = self.env.clone();
         std::thread::spawn(move || run_ssh(args, env))
@@ -389,6 +390,8 @@ async fn after_a_reattach_the_shim_uses_the_newest_session_socket() {
     let out = Command::new(w.xdg_open())
         .arg("https://example.test/reattach")
         .env_remove("ROWSER_SOCKET")
+        // Never the real Outpost socket of this user.
+        .env("ROWSER_TEST_OUTPOST_DIR", w.path("outpost"))
         // With no tunnel, a graphical session would run the real xdg-open.
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")

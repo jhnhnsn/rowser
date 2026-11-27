@@ -183,6 +183,7 @@ fn env(tunnel_dir: &Path, over: Option<PathBuf>) -> ShimEnv<Vec<u8>> {
     ShimEnv {
         tunnel_dir: tunnel_dir.to_path_buf(),
         socket_override: over,
+        outpost_socket: None,
         reported_host: "devbox".into(),
         procfs: rowser::detect::Procfs::new("/nonexistent"),
         caller_pid: 1,
@@ -432,7 +433,7 @@ async fn open_reports_a_version_mismatch_then_no_tunnel() {
     assert_eq!(run_open(&url, &mut env).await, ExitCode::FAILURE);
     assert_eq!(
         String::from_utf8(env.stderr).unwrap(),
-        "rowser: protocol version mismatch: this rowser speaks 1.1, the peer speaks 99.0; \
+        "rowser: protocol version mismatch: this rowser speaks 2.0, the peer speaks 99.0; \
          update the remote with `rowser remote install <host>` or reinstall rowser locally\n\
          rowser: no tunnel; open this URL manually: https://example.com/\n"
     );

@@ -111,10 +111,22 @@ async fn major_mismatch_fails_on_both_sides_with_both_versions() {
         e => panic!("unexpected error: {e}"),
     }
     let text = err.to_string();
+    assert!(text.contains("3.0"), "{text}");
     assert!(text.contains("2.0"), "{text}");
-    assert!(text.contains("1.1"), "{text}");
     assert!(text.contains("rowser remote install <host>"), "{text}");
     assert!(text.contains("reinstall"), "{text}");
+}
+
+#[tokio::test]
+async fn this_build_speaks_protocol_2_0_and_refuses_a_1_x_peer() {
+    assert_eq!(current(), Version::new(2, 0));
+    let (a, b) = duplex(1 << 16);
+    let (client, server) = tokio::join!(
+        Conn::connect(a, Hello::with_version(Version::new(1, 1))),
+        Conn::accept(b)
+    );
+    assert!(matches!(server, Err(Error::VersionMismatch { .. })));
+    assert!(matches!(client, Err(Error::VersionMismatch { .. })));
 }
 
 #[tokio::test]

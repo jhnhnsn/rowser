@@ -432,7 +432,7 @@ async fn status_lists_the_session_while_ssh_runs_and_drops_it_after() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_1_0_daemon_gets_no_session_and_the_tunnel_still_works() {
+async fn a_1_0_daemon_is_refused_and_ssh_runs_without_the_forward() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let dir = TmpDir::new();
     let run = dir.0.join("run");
@@ -464,8 +464,8 @@ async fn a_1_0_daemon_gets_no_session_and_the_tunnel_still_works() {
         session_dir: run,
     };
     let wrapper = spawn_wrapper(&["g14"], env);
-    let got = argv(&dir.0);
-    assert_eq!(got[0], "-R");
+    // Protocol 2.0 refuses a 1.x peer, so no Tunnel is made.
+    assert_eq!(argv(&dir.0), ["g14"]);
     std::fs::write(dir.0.join("done"), "").unwrap();
     assert_eq!(wrapper.join().unwrap(), ExitCode::SUCCESS);
     let seen = lines.lock().unwrap().clone();

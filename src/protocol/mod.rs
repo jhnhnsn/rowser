@@ -22,7 +22,8 @@ pub fn printable(text: &str) -> String {
 }
 
 /// The protocol version this build speaks.
-const VERSION: Version = Version { major: 1, minor: 1 };
+/// 2.0 (*v1.0 Links*): the Link carries `yamux` streams; a 1.x peer is refused.
+const VERSION: Version = Version { major: 2, minor: 0 };
 
 /// A protocol version `major.minor`. Peers with the same major interoperate.
 ///
@@ -39,9 +40,9 @@ impl Version {
         Version { major, minor }
     }
 
-    /// True for 1.1 and later of the same major: the peer knows Sessions.
+    /// True for 1.1 and later: the peer knows Sessions.
     pub fn has_sessions(self) -> bool {
-        self.major == VERSION.major && self.minor >= 1
+        self.major >= 2 || (self.major == 1 && self.minor >= 1)
     }
 
     pub fn major(self) -> u32 {

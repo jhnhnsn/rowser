@@ -95,6 +95,7 @@ fn shim_env(run: &Path) -> ShimEnv<Vec<u8>> {
     ShimEnv {
         tunnel_dir: run.join("no-tunnels"),
         socket_override: Some(run.join(DIRECT_SOCKET)),
+        outpost_socket: None,
         reported_host: "devbox".into(),
         procfs: rowser::detect::Procfs::new("/nonexistent"),
         caller_pid: 1,

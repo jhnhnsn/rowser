@@ -210,7 +210,7 @@ async fn local_daemon_answers_with_its_version() {
     assert_eq!(
         line(&out, "daemon"),
         format!(
-            "ok   daemon: rowser {} answers on {} (protocol 1.1)",
+            "ok   daemon: rowser {} answers on {} (protocol 2.0)",
             env!("CARGO_PKG_VERSION"),
             run.display()
         )
@@ -257,11 +257,11 @@ async fn round_trip_against_a_daemon_is_ok_and_exits_0() {
     assert!(out.iter().all(|l| l.starts_with("ok ")), "{out:?}");
     assert_eq!(
         line(&out, "tunnel"),
-        format!("ok   tunnel: {}: daemon protocol 1.1", socket.display())
+        format!("ok   tunnel: {}: daemon protocol 2.0", socket.display())
     );
     assert_eq!(
         line(&out, "version"),
-        "ok   version: daemon and this rowser speak 1.1"
+        "ok   version: daemon and this rowser speak 2.0"
     );
 }
 
@@ -370,12 +370,12 @@ fn fake_daemon(path: PathBuf, version: Version) {
 async fn minor_version_skew_warns_and_exits_0() {
     let dir = TmpDir::new("doc");
     let sock = dir.0.join("skew.sock");
-    fake_daemon(sock.clone(), Version::new(1, 7));
+    fake_daemon(sock.clone(), Version::new(2, 7));
     let mut e = env(&dir, Some(sock));
     assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
     assert_eq!(
         lines(e).last().unwrap(),
-        "warn version: version skew: daemon speaks 1.7, this rowser speaks 1.1; \
+        "warn version: version skew: daemon speaks 2.7, this rowser speaks 2.0; \
          update with `rowser remote install <host>` or reinstall rowser locally"
     );
 }
@@ -396,7 +396,7 @@ async fn major_version_mismatch_fails_and_exits_1() {
     let out = lines(e);
     assert!(
         out[out.len() - 1].starts_with(
-            "fail version: protocol version mismatch: this rowser speaks 1.1, the peer speaks 99.0"
+            "fail version: protocol version mismatch: this rowser speaks 2.0, the peer speaks 99.0"
         ),
         "{out:?}"
     );

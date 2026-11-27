@@ -32,6 +32,8 @@ pub enum Subject {
     Url(Url),
     /// A `rowser forward` request for these Callback ports.
     Forward(Vec<u16>),
+    /// The Link to the host cannot log in with `BatchMode`.
+    NeedsLogin,
 }
 
 /// What the Daemon tells the user about an Open request or a `rowser
@@ -53,6 +55,7 @@ impl Notice {
         match self.subject {
             Subject::Url(_) => "rowser: opened a URL".into(),
             Subject::Forward(_) => "rowser: forwarded a port".into(),
+            Subject::NeedsLogin => "rowser: needs login".into(),
         }
     }
 
@@ -61,6 +64,8 @@ impl Notice {
         match self.subject {
             Subject::Url(_) => "Open this URL?",
             Subject::Forward(_) => "Forward this port?",
+            // Never a confirmation.
+            Subject::NeedsLogin => "Log in?",
         }
     }
 
@@ -90,6 +95,9 @@ impl Notice {
             Subject::Forward(ports) => {
                 let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
                 format!("forward local port {}", ports.join(", "))
+            }
+            Subject::NeedsLogin => {
+                format!("cannot log in; run \"rowser host connect {host}\"")
             }
         };
         let mut body = format!("From {host}: {what}");

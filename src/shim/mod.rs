@@ -24,6 +24,9 @@ pub struct ShimEnv<W: Write> {
     pub tunnel_dir: PathBuf,
     /// `ROWSER_SOCKET`, tried before the directory.
     pub socket_override: Option<PathBuf>,
+    /// The Outpost socket, tried after `ROWSER_SOCKET` and before the
+    /// directory search.
+    pub outpost_socket: Option<PathBuf>,
     /// This host's own name, sent as the Reported host name.
     pub reported_host: String,
     /// Root of `/proc`, for Callback port detection.
@@ -60,6 +63,7 @@ impl ShimEnv<std::io::Stderr> {
             socket_override: std::env::var_os("ROWSER_SOCKET")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
+            outpost_socket: Some(crate::outpost::socket_path(&crate::outpost::outpost_dir())),
             reported_host: hostname(),
             procfs: Procfs::default(),
             // SAFETY: getppid has no preconditions and cannot fail.
@@ -171,16 +175,21 @@ pub async fn run_forward<W: Write>(port: u16, env: &mut ShimEnv<W>) -> ExitCode 
 /// Sends `request`, prints warnings and errors, and starts a keeper when the
 /// reply has a forward id.
 async fn request_forward<W: Write>(request: Msg, ports: &[u16], env: &mut ShimEnv<W>) -> Outcome {
-    let (mut conn, socket) =
-        match find_tunnel_path(&env.tunnel_dir, env.socket_override.clone()).await {
-            Ok(found) => found,
-            Err(e) => {
-                if let Some(mismatch) = e.mismatch {
-                    let _ = writeln!(env.stderr, "rowser: {mismatch}");
-                }
-                return Outcome::NoTunnel;
+    // ROWSER_SOCKET, else the Outpost socket, else the old directory search.
+    let first = env.socket_override.clone().or_else(|| {
+        env.outpost_socket
+            .clone()
+            .filter(|p| p.symlink_metadata().is_ok())
+    });
+    let (mut conn, socket) = match find_tunnel_path(&env.tunnel_dir, first).await {
+        Ok(found) => found,
+        Err(e) => {
+            if let Some(mismatch) = e.mismatch {
+                let _ = writeln!(env.stderr, "rowser: {mismatch}");
             }
-        };
+            return Outcome::NoTunnel;
+        }
+    };
     if let Err(e) = conn.send(&request).await {
         let _ = writeln!(env.stderr, "rowser: {e}");
         return Outcome::Failed;
