@@ -206,7 +206,7 @@ fn run_inner(args: RouteArgs, out: &mut impl Write, err: &mut impl Write) -> Res
 }
 
 /// What to say about the Daemon after a change.
-fn reload_note(runtime_dir: Result<&Path, String>) -> String {
+pub(crate) fn reload_note(runtime_dir: Result<&Path, String>) -> String {
     match runtime_dir
         .map_err(RequestError::Other)
         .and_then(control::reload)

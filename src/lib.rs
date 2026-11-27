@@ -9,6 +9,7 @@ pub mod daemon;
 pub mod detect;
 pub mod discovery;
 pub mod doctor;
+pub mod host;
 pub mod logging;
 pub mod mux;
 pub mod outpost;

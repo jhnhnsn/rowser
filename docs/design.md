@@ -156,6 +156,23 @@ one value.
   `rowser __outpost:` line) sets `NeedsLogin`, shows one notice and stops retries.
   Requests from a Link carry the Host alias and share one rate limit for each Saved host.
   `serve` and a reload call `sync_links` to add or remove Links.
+- Link status (#78): each Link task shares a `LinkStatus` (`protocol::LinkInfo`: state, since,
+  last connection, the Outpost's protocol version) with the control handler. `LinkState` is in
+  `protocol` and adds `VersionMismatch` (a major mismatch on the first stream; the Link keeps
+  retrying with backoff). `StatusReply.links` lists them. `Msg::Reconnect { host }` aborts the
+  Link task and starts a new one at once with the same status, which also ends `NeedsLogin`.
+
+### Host commands: `host` (#78)
+
+`rowser host add <host>` runs `ssh <host> exec "$SHELL" -lc 'command -v rowser'` and saves the
+path as `remote_path` with `config::add_host` (an entry of the same name is updated in place, so a
+second `add` changes nothing). No path (or a name, not a path) is the error that names
+`rowser remote install <host>`. `remove` uses `config::remove_host`; a file header above the
+removed entry moves to the next table. Both then reload a running Daemon. `list` reads the file
+and the Daemon's `StatusReply.links`, or prints `daemon not running`. `connect` runs `ssh -o
+ControlMaster=yes -o ControlPersist=yes -o ControlPath="<runtime dir>/cm-%C" -N -f <host>` in the
+terminal (`host::master_args`, the same `daemon::control_path_option` as the Link), then sends
+`Reconnect`.
 
 `DaemonConfig` adds `hosts`, `ssh` (the program; tests give a fake that runs `rowser __outpost`
 locally) and `link_dir` (the `ControlPath` folder; empty by default, and a Link refuses an
@@ -238,6 +255,8 @@ src/
   routes/            Route matching: (Host alias or unverified, URL) -> (Route index, Target); pure
   browsers/          browser + Profile discovery per OS; resolves a Target to an argv
   route.rs           `rowser route list|add|remove|move|test`: edits the config file, then reloads
+  host.rs            `rowser host add|remove|list|connect` (#78): edits `[[host]]`, then reloads
+                     or reconnects; runs the `ssh` on `PATH`
   control.rs         client side of the control socket: status, reload, pause, resume,
                      pending, approve, deny, activity
   daemon/control.rs  internal: control socket handlers (status, activity, pause, pending, reload)

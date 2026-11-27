@@ -108,6 +108,7 @@ pub fn run_status(args: StatusArgs, out: &mut impl Write, err: &mut impl Write) 
         paused_until,
         forwards,
         sessions,
+        ..
     } = reply
     else {
         let text = match reply {
@@ -656,7 +657,7 @@ fn activity_line(e: &ActivityEntry) -> String {
 }
 
 /// Unix seconds as local `YYYY-MM-DD HH:MM:SS`.
-fn local_time(secs: u64) -> String {
+pub(crate) fn local_time(secs: u64) -> String {
     let t = secs as libc::time_t;
     // SAFETY: `tm` is plain data; localtime_r only writes into it.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };

@@ -44,6 +44,13 @@ impl Inner {
                 Msg::Ping => pong(),
                 Msg::Status => self.status(),
                 Msg::Reload => self.reload(),
+                Msg::Reconnect { host } => {
+                    if self.reconnect_link(&host) {
+                        Msg::Reconnected { host }
+                    } else {
+                        open_error(format!("no Link to `{host}`"))
+                    }
+                }
                 Msg::Pause { for_secs } => self.start_pause(for_secs),
                 Msg::Resume => self.resume(),
                 Msg::Pending => Msg::PendingReply {
@@ -252,6 +259,7 @@ impl Inner {
                     host,
                 })
                 .collect(),
+            links: self.link_infos(),
         }
     }
 }

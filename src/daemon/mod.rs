@@ -152,12 +152,19 @@ struct Inner {
     /// Requests that wait for an answer, for `rowser pending`.
     pending: Arc<pending::Pending>,
     /// The running Links, by Host alias.
-    links: Mutex<
-        std::collections::HashMap<String, (crate::config::SavedHost, tokio::task::AbortHandle)>,
-    >,
+    links: Mutex<std::collections::HashMap<String, RunningLink>>,
     /// This value, so a reload can start Link tasks that hold it.
     me: std::sync::Weak<Inner>,
 }
+
+/// One Link task and what it shares with `rowser status`.
+struct RunningLink {
+    host: crate::config::SavedHost,
+    task: tokio::task::AbortHandle,
+    status: link::LinkStatus,
+}
+
+pub use link::control_path_option;
 
 /// A pause in effect.
 struct Pause {
@@ -253,11 +260,11 @@ impl Inner {
     fn sync_links(&self, hosts: Vec<crate::config::SavedHost>) {
         let Some(me) = self.me.upgrade() else { return };
         let mut links = self.links.lock().unwrap_or_else(|e| e.into_inner());
-        links.retain(|name, (old, task)| {
-            let keep = hosts.iter().any(|h| h == old && h.name == *name);
+        links.retain(|name, l| {
+            let keep = hosts.iter().any(|h| *h == l.host && h.name == *name);
             if !keep {
                 tracing::info!("link {name}: closed");
-                task.abort();
+                l.task.abort();
             }
             keep
         });
@@ -265,9 +272,45 @@ impl Inner {
             if links.contains_key(&host.name) {
                 continue;
             }
-            let task = tokio::spawn(link::supervise(me.clone(), host.clone()));
-            links.insert(host.name.clone(), (host, task.abort_handle()));
+            let status = link::new_status(&host.name);
+            let task = tokio::spawn(link::supervise(me.clone(), host.clone(), status.clone()));
+            links.insert(
+                host.name.clone(),
+                RunningLink {
+                    host,
+                    task: task.abort_handle(),
+                    status,
+                },
+            );
         }
+    }
+
+    /// `rowser host connect`: closes the Link to `name` and starts it again
+    /// at once, with a fresh backoff. False when `name` has no Link.
+    fn reconnect_link(&self, name: &str) -> bool {
+        let Some(me) = self.me.upgrade() else {
+            return false;
+        };
+        let mut links = self.links.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(l) = links.get_mut(name) else {
+            return false;
+        };
+        l.task.abort();
+        tracing::info!("link {name}: connecting again");
+        let task = tokio::spawn(link::supervise(me, l.host.clone(), l.status.clone()));
+        l.task = task.abort_handle();
+        true
+    }
+
+    /// Each Link's status, in Host alias order.
+    fn link_infos(&self) -> Vec<crate::protocol::LinkInfo> {
+        let links = self.links.lock().unwrap_or_else(|e| e.into_inner());
+        let mut infos: Vec<_> = links
+            .values()
+            .map(|l| l.status.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .collect();
+        infos.sort_by(|a, b| a.host.cmp(&b.host));
+        infos
     }
 
     async fn handle(

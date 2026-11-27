@@ -8,6 +8,12 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- `rowser host add|remove|list|connect`. `add` finds rowser on the host and saves it as a Saved
+  host (`--no-default-browser` for a host with its own desktop). `list` shows each Link's state,
+  last connection and Outpost version. `connect` logs in from your terminal (passphrase or key
+  touch) and connects a Link that needs login again. `remove` closes the Link. The commands keep
+  your config comments and work without a running daemon.
+  ([#78](https://github.com/jhnhnsn/rowser/issues/78))
 - Saved hosts and Links: each `[[host]]` in the config file gets one Link, an `ssh` connection
   that the Daemon keeps open and runs `rowser __outpost` on the host. Programs on that host
   open URLs through the Outpost socket `/tmp/rowser-<uid>/outpost.sock`, without `rowser ssh`.

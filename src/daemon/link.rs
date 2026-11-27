@@ -12,7 +12,7 @@ use super::limit::Limit;
 use super::{Inner, Notice, NoticeHost, Source, Subject};
 use crate::config::SavedHost;
 use crate::mux::{self, Side};
-use crate::protocol::{Conn, Hello, Msg};
+use crate::protocol::{Conn, Error, Hello, LinkInfo, LinkState, Msg};
 
 /// The first wait after a drop.
 pub(super) const BACKOFF_START: Duration = Duration::from_secs(1);
@@ -50,25 +50,36 @@ impl Backoff {
     }
 }
 
-/// The state of a Link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LinkState {
-    Connecting,
-    Connected,
-    /// `BatchMode` could not log in: no more attempts.
-    NeedsLogin,
+/// What the Daemon knows of one Link, shared by its task and `rowser status`.
+pub(super) type LinkStatus = Arc<Mutex<LinkInfo>>;
+
+/// A new status for the Link to `host`: connecting, never connected.
+pub(super) fn new_status(host: &str) -> LinkStatus {
+    Arc::new(Mutex::new(LinkInfo {
+        host: host.into(),
+        state: LinkState::Connecting,
+        since: super::unix_now(),
+        last_connected: None,
+        outpost_version: None,
+    }))
 }
 
-impl LinkState {
-    /// The state after the `ssh` process ended. `connected`: the Outpost
-    /// answered on this attempt. `status`: the exit status of `ssh`, if it
-    /// exited. `stderr`: what `ssh` wrote.
-    pub(super) fn after_exit(connected: bool, status: Option<i32>, stderr: &str) -> LinkState {
-        if !connected && is_login_failure(status, stderr) {
-            LinkState::NeedsLogin
-        } else {
-            LinkState::Connecting
-        }
+fn set_state(status: &LinkStatus, state: LinkState) {
+    let mut s = status.lock().unwrap_or_else(|e| e.into_inner());
+    if s.state != state {
+        s.state = state;
+        s.since = super::unix_now();
+    }
+}
+
+/// The state after the `ssh` process ended. `connected`: the Outpost
+/// answered on this attempt. `status`: the exit status of `ssh`, if it
+/// exited. `stderr`: what `ssh` wrote.
+pub(super) fn after_exit(connected: bool, status: Option<i32>, stderr: &str) -> LinkState {
+    if !connected && is_login_failure(status, stderr) {
+        LinkState::NeedsLogin
+    } else {
+        LinkState::Connecting
     }
 }
 
@@ -93,9 +104,14 @@ fn ssh_quoted(path: &Path) -> String {
     format!("\"{}\"", path.display())
 }
 
+/// The `ControlPath=…` option value of rowser's own control path in
+/// `runtime_dir`. `rowser host connect` starts its master there.
+pub fn control_path_option(runtime_dir: &Path) -> String {
+    format!("ControlPath={}", ssh_quoted(&runtime_dir.join("cm-%C")))
+}
+
 /// The `ssh` arguments of the Link to `host`.
 pub(super) fn ssh_args(host: &SavedHost, runtime_dir: &Path) -> Vec<String> {
-    let cm = runtime_dir.join("cm-%C");
     vec![
         "-T".into(),
         "-o".into(),
@@ -103,7 +119,7 @@ pub(super) fn ssh_args(host: &SavedHost, runtime_dir: &Path) -> Vec<String> {
         "-o".into(),
         "ControlMaster=no".into(),
         "-o".into(),
-        format!("ControlPath={}", ssh_quoted(&cm)),
+        control_path_option(runtime_dir),
         "-o".into(),
         "ServerAliveInterval=15".into(),
         "-o".into(),
@@ -116,7 +132,7 @@ pub(super) fn ssh_args(host: &SavedHost, runtime_dir: &Path) -> Vec<String> {
 
 /// Keeps the Link to `host` open until it needs a login. The caller
 /// aborts the task to close the Link.
-pub(super) async fn supervise(inner: Arc<Inner>, host: SavedHost) {
+pub(super) async fn supervise(inner: Arc<Inner>, host: SavedHost, link: LinkStatus) {
     // One limit for all streams of this Saved host, across reconnections.
     let limit = Arc::new(Mutex::new(Limit::new(
         inner.config.rate_max,
@@ -125,8 +141,20 @@ pub(super) async fn supervise(inner: Arc<Inner>, host: SavedHost) {
     let mut backoff = Backoff::default();
     loop {
         tracing::debug!("link {}: {:?}", host.name, LinkState::Connecting);
-        let (connected, status, stderr) = connect_once(&inner, &host, &limit, &mut backoff).await;
-        match LinkState::after_exit(connected, status, &stderr) {
+        let mismatch =
+            link.lock().unwrap_or_else(|e| e.into_inner()).state == LinkState::VersionMismatch;
+        if !mismatch {
+            set_state(&link, LinkState::Connecting);
+        }
+        let (connected, status, stderr) =
+            connect_once(&inner, &host, &limit, &mut backoff, &link).await;
+        let state = after_exit(connected, status, &stderr);
+        if state == LinkState::NeedsLogin
+            || link.lock().unwrap_or_else(|e| e.into_inner()).state != LinkState::VersionMismatch
+        {
+            set_state(&link, state);
+        }
+        match state {
             LinkState::NeedsLogin => {
                 tracing::warn!("link {}: needs login: {}", host.name, stderr.trim());
                 let notifier = inner.notifier.clone();
@@ -159,6 +187,7 @@ async fn connect_once(
     host: &SavedHost,
     limit: &Arc<Mutex<Limit>>,
     backoff: &mut Backoff,
+    link: &LinkStatus,
 ) -> (bool, Option<i32>, String) {
     if inner.config.link_dir.as_os_str().is_empty() {
         return (false, None, "no runtime directory for the Link".into());
@@ -194,7 +223,15 @@ async fn connect_once(
     let mut connected = false;
     let hello = async {
         let stream = opener.open().await.ok()?;
-        let mut conn = Conn::connect(stream, Hello::current()).await.ok()?;
+        let mut conn = match Conn::connect(stream, Hello::current()).await {
+            Ok(c) => c,
+            Err(e @ Error::VersionMismatch { .. }) => {
+                tracing::warn!("link {}: {e}", host.name);
+                set_state(link, LinkState::VersionMismatch);
+                return None;
+            }
+            Err(_) => return None,
+        };
         conn.send(&Msg::Ping).await.ok()?;
         match conn.recv().await.ok()? {
             Some(Msg::Pong { version }) => Some((conn, version)),
@@ -221,6 +258,12 @@ async fn connect_once(
             if let Ok(Some((_control, version))) = r {
                 connected = true;
                 backoff.reset();
+                {
+                    let mut s = link.lock().unwrap_or_else(|e| e.into_inner());
+                    s.last_connected = Some(super::unix_now());
+                    s.outpost_version = Some(version);
+                }
+                set_state(link, LinkState::Connected);
                 tracing::info!("link {}: {:?} (outpost {version})", host.name, LinkState::Connected);
                 (&mut serve).await;
             }
@@ -260,68 +303,38 @@ mod tests {
     #[test]
     fn a_login_failure_before_the_outpost_answers_needs_login() {
         let err = "g14: Permission denied (publickey).\n";
-        assert_eq!(
-            LinkState::after_exit(false, Some(255), err),
-            LinkState::NeedsLogin
-        );
+        assert_eq!(after_exit(false, Some(255), err), LinkState::NeedsLogin);
         let err = "user@g14: Permission denied (publickey,password).\n";
-        assert_eq!(
-            LinkState::after_exit(false, Some(255), err),
-            LinkState::NeedsLogin
-        );
+        assert_eq!(after_exit(false, Some(255), err), LinkState::NeedsLogin);
     }
 
     #[test]
     fn a_drop_after_a_connection_retries() {
         let err = "Connection to g14 closed by remote host.\n";
-        assert_eq!(
-            LinkState::after_exit(true, Some(255), err),
-            LinkState::Connecting
-        );
-        assert_eq!(
-            LinkState::after_exit(false, Some(255), err),
-            LinkState::Connecting
-        );
+        assert_eq!(after_exit(true, Some(255), err), LinkState::Connecting);
+        assert_eq!(after_exit(false, Some(255), err), LinkState::Connecting);
     }
 
     #[test]
     fn a_permission_error_from_the_outpost_retries() {
         let err =
             "rowser __outpost: /tmp/rowser-1000/outpost.sock: Permission denied (os error 13)\n";
-        assert_eq!(
-            LinkState::after_exit(false, Some(1), err),
-            LinkState::Connecting
-        );
-        assert_eq!(
-            LinkState::after_exit(false, Some(255), err),
-            LinkState::Connecting
-        );
+        assert_eq!(after_exit(false, Some(1), err), LinkState::Connecting);
+        assert_eq!(after_exit(false, Some(255), err), LinkState::Connecting);
     }
 
     #[test]
     fn a_remote_shell_permission_error_retries() {
         let err = "bash: line 1: /home/u/.local/bin/rowser: Permission denied\n";
-        assert_eq!(
-            LinkState::after_exit(false, Some(126), err),
-            LinkState::Connecting
-        );
-        assert_eq!(
-            LinkState::after_exit(false, Some(255), err),
-            LinkState::Connecting
-        );
+        assert_eq!(after_exit(false, Some(126), err), LinkState::Connecting);
+        assert_eq!(after_exit(false, Some(255), err), LinkState::Connecting);
     }
 
     #[test]
     fn a_login_text_without_the_ssh_error_status_retries() {
         let err = "g14: Permission denied (publickey).\n";
-        assert_eq!(
-            LinkState::after_exit(false, Some(1), err),
-            LinkState::Connecting
-        );
-        assert_eq!(
-            LinkState::after_exit(false, None, err),
-            LinkState::Connecting
-        );
+        assert_eq!(after_exit(false, Some(1), err), LinkState::Connecting);
+        assert_eq!(after_exit(false, None, err), LinkState::Connecting);
     }
 
     #[test]

@@ -114,6 +114,11 @@ pub enum Command {
         #[command(subcommand)]
         action: RouteCmd,
     },
+    /// Add, remove, list and log in to the Saved hosts.
+    Host {
+        #[command(subcommand)]
+        action: HostCmd,
+    },
     /// Manage rowser on a remote host.
     Remote {
         #[command(subcommand)]
@@ -206,6 +211,42 @@ impl From<RouteCmd> for crate::route::RouteAction {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum HostCmd {
+    /// Find rowser on <host> and save it as a Saved host.
+    Add {
+        /// A Host alias from ssh_config, or user@host.
+        host: String,
+        /// The host has its own desktop: installs skip the default-browser part.
+        #[arg(long)]
+        no_default_browser: bool,
+    },
+    /// Remove a Saved host and close its Link.
+    Remove { host: String },
+    /// Each Saved host with its Link state.
+    List,
+    /// Log in to <host> in this terminal, then connect its Link again.
+    Connect { host: String },
+}
+
+impl From<HostCmd> for crate::host::HostAction {
+    fn from(c: HostCmd) -> Self {
+        use crate::host::HostAction as A;
+        match c {
+            HostCmd::Add {
+                host,
+                no_default_browser,
+            } => A::Add {
+                host,
+                default_browser: !no_default_browser,
+            },
+            HostCmd::Remove { host } => A::Remove { host },
+            HostCmd::List => A::List,
+            HostCmd::Connect { host } => A::Connect { host },
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
 pub enum RemoteAction {
     /// Install rowser on a remote host.
     Install {
@@ -246,6 +287,7 @@ impl Command {
             Command::Deny { .. } => "deny",
             Command::Activity { .. } => "activity",
             Command::Route { .. } => "route",
+            Command::Host { .. } => "host",
             Command::Remote { .. } => "remote install",
             Command::Keeper { .. } => "__keeper",
             Command::Outpost => "__outpost",
@@ -312,6 +354,7 @@ pub fn run(command: Command) -> ExitCode {
         Command::Deny { id } => crate::control::deny_main(id),
         Command::Activity { follow, json } => crate::control::activity_main(follow, json),
         Command::Route { action } => crate::route::route_main(action.into()),
+        Command::Host { action } => crate::host::host_main(action.into()),
         Command::Keeper {
             socket,
             forward_id,

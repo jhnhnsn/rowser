@@ -52,6 +52,11 @@ rowser is a CLI; test it from the terminal.
   `<remote_path> __outpost` on this machine, with HOME and `ROWSER_TEST_OUTPOST_DIR` set to temp
   dirs. It must never run the real `ssh`. See `tests/link.rs`. A Link retries after 1 s, 2 s, 4 s
   and so on, so wait for the Outpost socket to answer before you send a URL.
+- `rowser host add|remove|list|connect` (#78) runs the `ssh` on `PATH`: put a fake `ssh` first on
+  `PATH` that logs its arguments, prints a path for `command -v rowser` (or exits 1 for a missing
+  rowser), exits 0 for `-N -f` (the master), and never runs the real `ssh`. Set `HOME`,
+  `XDG_CONFIG_HOME` and `ROWSER_RUNTIME_DIR` to short temp dirs. For a running Daemon, start one
+  in that runtime dir as `tests/link.rs` does. See `tests/host.rs`.
 - `rowser ssh` uses the `ssh` on `PATH` and the Daemon in `$ROWSER_RUNTIME_DIR` (absolute) or
   else `$XDG_RUNTIME_DIR/rowser/`: put a fake `ssh` script first on `PATH` and set one of them to
   a short temp dir to test it. Unset `ROWSER_RUNTIME_DIR` when a test relies on the default.

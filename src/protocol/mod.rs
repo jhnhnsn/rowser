@@ -163,6 +163,20 @@ pub enum Msg {
         forwards: Vec<ForwardInfo>,
         #[serde(default)]
         sessions: Vec<SessionInfo>,
+        /// One entry for each Saved host, in Host alias order.
+        #[serde(default)]
+        links: Vec<LinkInfo>,
+    },
+    /// Control socket only: `rowser host connect`, the Daemon connects the
+    /// Link to `host` again at once (a Link that needs login too). The
+    /// reply is `Reconnected`, or an `OpenResult` error for a host with no
+    /// Link.
+    Reconnect {
+        host: String,
+    },
+    /// The Daemon's answer to a valid `Reconnect`.
+    Reconnected {
+        host: String,
     },
     /// Control socket only (1.1): `rowser pause [--for]`. The Daemon refuses
     /// each Open request and `rowser forward` until `Resume`, until
@@ -361,8 +375,51 @@ impl Msg {
                 | Msg::PendingReply { .. }
                 | Msg::AnswerPending { .. }
                 | Msg::Answered { .. }
+                | Msg::Reconnect { .. }
+                | Msg::Reconnected { .. }
         )
     }
+}
+
+/// The state of a Link, as `rowser host list` and `rowser status` show it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkState {
+    Connecting,
+    Connected,
+    /// `BatchMode` could not log in: no more attempts until
+    /// `rowser host connect`.
+    NeedsLogin,
+    /// The Outpost speaks another protocol major version.
+    VersionMismatch,
+}
+
+impl LinkState {
+    /// The words `rowser host list` prints.
+    pub fn label(self) -> &'static str {
+        match self {
+            LinkState::Connecting => "connecting",
+            LinkState::Connected => "connected",
+            LinkState::NeedsLogin => "needs login",
+            LinkState::VersionMismatch => "version mismatch",
+        }
+    }
+}
+
+/// The Link to one Saved host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkInfo {
+    /// The Host alias.
+    pub host: String,
+    pub state: LinkState,
+    /// When the Link took this state, in seconds since the Unix epoch.
+    pub since: u64,
+    /// When the Link last connected, in seconds since the Unix epoch.
+    #[serde(default)]
+    pub last_connected: Option<u64>,
+    /// The protocol version the Outpost gave at its last connection.
+    #[serde(default)]
+    pub outpost_version: Option<Version>,
 }
 
 /// One local port of an open Callback forward, as `rowser status` shows it.

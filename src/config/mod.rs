@@ -447,6 +447,101 @@ pub fn move_route(text: &str, n: usize, to: usize) -> Result<String, String> {
     finish(&doc)
 }
 
+/// The `[[host]]` array of `doc`, created when missing.
+fn host_array(doc: &mut toml_edit::DocumentMut) -> &mut toml_edit::ArrayOfTables {
+    if doc.get("host").is_none() {
+        doc.insert(
+            "host",
+            toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
+        );
+    }
+    // `parse` refuses a `host` key that is not `[[host]]`.
+    doc["host"]
+        .as_array_of_tables_mut()
+        .expect("a valid file has `host` as [[host]]")
+}
+
+/// The index of the Saved host `name` in the `[[host]]` array.
+fn host_index(doc: &mut toml_edit::DocumentMut, name: &str) -> Option<usize> {
+    host_array(doc)
+        .iter()
+        .position(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
+}
+
+/// Adds the Saved host `host` to the config text, or updates the entry of
+/// the same name in place (its `remote_path` and `default_browser`; other
+/// keys and comments stay). `default_browser = false` is written only when
+/// false. So the same `add` twice gives the same text.
+pub fn add_host(text: &str, host: &SavedHost) -> Result<String, String> {
+    let (mut doc, _) = edit_doc(text)?;
+    let was_empty = text.trim().is_empty();
+    let found = host_index(&mut doc, &host.name);
+    let hosts = host_array(&mut doc);
+    let t = match found {
+        Some(i) => hosts.get_mut(i).expect("found above"),
+        None => {
+            let mut t = toml_edit::Table::new();
+            t["name"] = toml_edit::value(host.name.as_str());
+            if !was_empty {
+                t.decor_mut().set_prefix("\n");
+            }
+            hosts.push(t);
+            hosts.iter_mut().last().expect("pushed above")
+        }
+    };
+    t["remote_path"] = toml_edit::value(host.remote_path.as_str());
+    if host.default_browser {
+        t.remove("default_browser");
+    } else {
+        t["default_browser"] = toml_edit::value(false);
+    }
+    finish(&doc)
+}
+
+/// Removes the Saved host `name` from the config text. Its comments go with
+/// it, except a file header (the comments above a blank line), which moves
+/// to the table that follows.
+pub fn remove_host(text: &str, name: &str) -> Result<String, String> {
+    let (mut doc, _) = edit_doc(text)?;
+    let i = host_index(&mut doc, name).ok_or_else(|| format!("no Saved host `{name}`"))?;
+    let removed = host_array(&mut doc).get(i).expect("found above").clone();
+    host_array(&mut doc).remove(i);
+    if host_array(&mut doc).is_empty() {
+        doc.remove("host");
+    }
+    let p = prefix(&removed);
+    if let Some(cut) = p.rfind("\n\n") {
+        let header = &p[..cut + 2];
+        let pos = removed.position().unwrap_or(0);
+        // The table that renders next after the removed one.
+        let mut next: Option<(usize, &mut toml_edit::Table)> = None;
+        for (_, item) in doc.iter_mut() {
+            let tables: Vec<&mut toml_edit::Table> = match item {
+                toml_edit::Item::Table(t) => vec![t],
+                toml_edit::Item::ArrayOfTables(a) => a.iter_mut().collect(),
+                _ => vec![],
+            };
+            for t in tables {
+                let tp = t.position().unwrap_or(usize::MAX);
+                if tp > pos && next.as_ref().is_none_or(|(np, _)| tp < *np) {
+                    next = Some((tp, t));
+                }
+            }
+        }
+        match next {
+            Some((_, t)) => {
+                let rest = trim_blank_lines(&prefix(t)).to_string();
+                t.decor_mut().set_prefix(format!("{header}{rest}"));
+            }
+            None => {
+                let trailing = doc.trailing().as_str().unwrap_or("").to_string();
+                doc.set_trailing(format!("{header}{trailing}"));
+            }
+        }
+    }
+    finish(&doc)
+}
+
 /// Writes `text` to `path` through a temp file and a rename, so the file is
 /// never half written. Creates the directory when missing. A symlinked
 /// file stays a symlink (the write goes to its target), and the file keeps

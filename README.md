@@ -343,6 +343,36 @@ direct socket (the `ssh_config` setup below) carries only the name the remote ho
 itself, so it never matches a `[[route]]`: it goes to `[unverified]`, whose default is `ask`. A
 remote host that reports a false name therefore cannot reach a named Route.
 
+### `rowser host`
+
+A Saved host is a `[[host]]` entry in the config file. The daemon keeps one Link (an `ssh`
+connection) to each Saved host, so programs there open URLs without `rowser ssh`. The `host`
+commands edit the config file in place, keep your comments, and work when the daemon is stopped.
+
+```sh
+rowser host add g14                       # finds rowser on g14 and saves its path
+rowser host add desk --no-default-browser # a host with its own desktop
+rowser host list
+rowser host connect g14                   # log in once, for a key that needs a touch or passphrase
+rowser host remove g14
+```
+
+```
+g14  connected  since 2026-11-27 10:02:11  last connected 2026-11-27 10:02:11  outpost 2.0
+desk  needs login  since 2026-11-27 10:02:12  last connected never  outpost -
+```
+
+- `host add` runs `command -v rowser` in your login shell on the host and saves the path as
+  `remote_path`. If rowser is not there, it stops and tells you to run
+  `rowser remote install <host>` first. Adding a Saved host again changes nothing.
+- `host list` shows each Saved host's Link state: `connected`, `connecting`, `needs login` or
+  `version mismatch`, and `daemon not running` when the daemon is stopped.
+- A Link logs in with `BatchMode`. If that fails, the Link shows `needs login` and stops
+  retrying. `host connect` runs `ssh` in your terminal, so it can ask for a passphrase or a key
+  touch, and keeps a background master connection on rowser's own control path. The Link then
+  connects again through it.
+- `host remove` removes the entry and closes the Link.
+
 ### `rowser route`
 
 Change and check the Routes from the terminal. The commands edit the config file in place and
