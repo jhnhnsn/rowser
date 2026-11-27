@@ -158,7 +158,8 @@ one value.
 
 - `mux::start(io, Side) -> (Opener, inbound streams, driver)`: one yamux connection. Each
   stream carries the usual NDJSON handshake, so `Conn` is unchanged.
-- `outpost::serve(io, dir)`: binds `<dir>/outpost.sock` (mode 0600) in a folder that must be
+- `outpost::serve(io, dir)`: listens on its own socket file (mode 0600) and points
+  `<dir>/outpost.sock` at it (see Two Links below), in a folder that must be
   mode 0700 and belong to the user (`prepare_dir` refuses others), and relays each Shim
   connection, byte for byte, on a new stream to the Daemon. The handshake runs from end to
   end, so a 1.x Shim gets the mismatch error from the Daemon. `outpost_dir()` is
@@ -202,11 +203,15 @@ belongs to the user. On a failed check it prints a warning and goes on to the ne
 not check `ROWSER_SOCKET`.
 
 Two Links to one host (#80): each Outpost listens on its own socket file
-`link-<start nanos>-<pid>.sock` in the Outpost socket folder, and `outpost.sock` is a hard link
-to the newest live one, swapped in by an atomic rename, so the socket never goes missing. Every
-500 ms each Outpost removes the files of dead Outposts (by pid) and points `outpost.sock` at the
-newest live file; on exit it hands the socket on, or removes it when no Outpost is left. A killed
-Outpost hands nothing on, so the next check of another Outpost repairs the socket.
+`link-<start nanos>-<pid>-<n>.sock` in the Outpost socket folder (the start time is from the
+boot clock, which does not step back), and `outpost.sock` is a hard link to the newest live one,
+swapped in by an atomic rename, so the socket never goes missing. While it runs, each Outpost
+holds an `flock` on its own `link-….lock` file; a file whose lock nobody holds is dead (a pid
+can be used again). Every 500 ms each Outpost removes the files of dead Outposts and points
+`outpost.sock` at the newest live file; on exit it closes its listener first, then hands the
+socket on, or removes it when no Outpost is left. All changes to the folder happen under an
+`flock` on `outpost.lock`. A killed Outpost hands nothing on, so the next check of another
+Outpost repairs the socket.
 
 ### `shim` — deep
 

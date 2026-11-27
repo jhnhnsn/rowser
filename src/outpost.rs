@@ -121,14 +121,43 @@ where
     let path = socket_path(dir);
     // Each Outpost listens on its own socket file and the Outpost socket is
     // a hard link to the newest one: the Link that connected last takes the
-    // Open requests, and the next newest gets them when it goes.
-    let own = dir.join(own_name(std::process::id()));
-    let listener = UnixListener::bind(&own).map_err(|e| format!("{}: {e}", own.display()))?;
-    let _own = RemoveOnDrop(own.clone());
-    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("{}: {e}", own.display()))?;
-    point_at(dir, &own)?;
+    // Open requests, and the next newest gets them when it goes. While the
+    // Outpost runs it holds an flock on its own lock file: that is how the
+    // others know it is live (a pid can be used again).
+    let base = own_base();
+    let own = dir.join(format!("{base}.sock"));
+    let own_lock = dir.join(format!("{base}.lock"));
+    let (listener, held, own_guard, lock_guard) = {
+        let _dir_lock = lock_dir(dir)?;
+        let held = take_lock(&own_lock, true)
+            .map_err(|e| format!("{}: {e}", own_lock.display()))?
+            .ok_or_else(|| format!("{} is locked", own_lock.display()))?;
+        let lock_guard = RemoveOnDrop(own_lock.clone());
+        let listener = UnixListener::bind(&own).map_err(|e| format!("{}: {e}", own.display()))?;
+        let own_guard = RemoveOnDrop(own.clone());
+        std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("{}: {e}", own.display()))?;
+        point_at(dir, &own)?;
+        (listener, held, own_guard, lock_guard)
+    };
 
+    serve_on(io, &listener, &path, dir).await;
+    // Hand the socket to the next newest Outpost, or remove it. No Shim can
+    // connect to this Outpost from now on.
+    drop(listener);
+    let _dir_lock = lock_dir(dir)?;
+    drop(own_guard);
+    drop(lock_guard);
+    drop(held);
+    repair_locked(dir)
+}
+
+/// The Outpost's work until `io` closes: relays Shims from `listener`,
+/// answers control streams and repairs the Outpost socket.
+async fn serve_on<T>(io: T, listener: &UnixListener, path: &Path, dir: &Path)
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let (opener, mut inbound, driver) = mux::start(io, Side::Outpost);
     let accept = async {
         loop {
@@ -174,41 +203,109 @@ where
         _ = driver => {}
         _ = repairs => {}
     }
-    // Hand the socket to the next newest Outpost, or remove it.
-    drop(_own);
-    repair(dir)
 }
 
 /// How often an Outpost checks that the Outpost socket leads to the newest
 /// live Outpost.
 const REPAIR_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Prefix of each Outpost's own socket file (and its temporary link).
+/// Prefix of each Outpost's own files: its socket (`.sock`), its lock
+/// (`.lock`) and its temporary link (`.tmp`).
 const OWN_PREFIX: &str = "link-";
 
-/// The own socket file name of the Outpost `pid`: the start time first, so
-/// names sort from oldest to newest.
-fn own_name(pid: u32) -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{OWN_PREFIX}{nanos:020}-{pid}.sock")
+/// The lock file in the Outpost socket folder that each Outpost holds while
+/// it changes the folder.
+const DIR_LOCK: &str = "outpost.lock";
+
+/// A boot clock in nanoseconds. It does not step back, it counts sleep,
+/// and all processes on one boot share it, so start times keep their order.
+fn boot_nanos() -> u128 {
+    #[cfg(target_os = "linux")]
+    let clock = libc::CLOCK_BOOTTIME;
+    // On macOS CLOCK_MONOTONIC counts sleep too.
+    #[cfg(not(target_os = "linux"))]
+    let clock = libc::CLOCK_MONOTONIC;
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: ts is a valid timespec for clock_gettime to fill.
+    unsafe { libc::clock_gettime(clock, &mut ts) };
+    ts.tv_sec as u128 * 1_000_000_000 + ts.tv_nsec as u128
 }
 
-/// The pid in an own socket file name (or its `.tmp` link), if it is one.
-fn pid_of(name: &str) -> Option<i32> {
-    let rest = name.strip_prefix(OWN_PREFIX)?;
-    let rest = rest
-        .strip_suffix(".sock")
-        .or_else(|| rest.strip_suffix(".tmp"))?;
-    rest.split_once('-')?.1.parse().ok().filter(|p| *p > 1)
+/// The base name of this Outpost's own files: the start time first, so
+/// names sort from oldest to newest, then the pid and a counter, so two
+/// Outposts in one process do not clash.
+fn own_base() -> String {
+    static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(
+        "{OWN_PREFIX}{:020}-{}-{n}",
+        boot_nanos(),
+        std::process::id()
+    )
 }
 
-/// True while the process `pid` exists.
-fn alive(pid: i32) -> bool {
-    // SAFETY: signal 0 only checks that the process exists.
-    unsafe { libc::kill(pid, 0) == 0 }
+/// The base name of an own file `name` of some Outpost, if it is one.
+fn base_of(name: &str) -> Option<&str> {
+    if !name.starts_with(OWN_PREFIX) {
+        return None;
+    }
+    [".sock", ".lock", ".tmp"]
+        .iter()
+        .find_map(|s| name.strip_suffix(s))
+}
+
+/// An exclusive `flock`, released when dropped.
+struct Flock(#[allow(dead_code)] std::fs::File);
+
+/// Takes an exclusive `flock` on `path`, which is made when missing. With
+/// `wait` false, a lock that another holds gives `None`.
+fn take_lock(path: &Path, wait: bool) -> io::Result<Option<Flock>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    let op = if wait {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_EX | libc::LOCK_NB
+    };
+    // SAFETY: the fd is open for as long as `file` lives.
+    if unsafe { libc::flock(file.as_raw_fd(), op) } == 0 {
+        return Ok(Some(Flock(file)));
+    }
+    let e = io::Error::last_os_error();
+    if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Ok(None)
+    } else {
+        Err(e)
+    }
+}
+
+/// Locks the Outpost socket folder `dir` against the changes of other
+/// Outposts.
+fn lock_dir(dir: &Path) -> Result<Flock, String> {
+    let path = dir.join(DIR_LOCK);
+    take_lock(&path, true)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .ok_or_else(|| format!("{} is locked", path.display()))
+}
+
+/// True while the Outpost with the base name `base` in `dir` runs: it holds
+/// the flock on its lock file. Call with the folder lock held.
+fn alive(dir: &Path, base: &str) -> bool {
+    let path = dir.join(format!("{base}.lock"));
+    if std::fs::symlink_metadata(&path).is_err() {
+        return false;
+    }
+    matches!(take_lock(&path, false), Ok(None))
 }
 
 /// Removes a file when dropped.
@@ -221,9 +318,10 @@ impl Drop for RemoveOnDrop {
 }
 
 /// Points the Outpost socket in `dir` at the socket file `own`, in one
-/// atomic rename: the socket never goes missing.
+/// atomic rename: the socket never goes missing. Call with the folder lock
+/// held.
 fn point_at(dir: &Path, own: &Path) -> Result<(), String> {
-    let tmp = dir.join(format!("{OWN_PREFIX}0-{}.tmp", std::process::id()));
+    let tmp = own.with_extension("tmp");
     let _ = std::fs::remove_file(&tmp);
     std::fs::hard_link(own, &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
     let path = socket_path(dir);
@@ -236,12 +334,22 @@ fn point_at(dir: &Path, own: &Path) -> Result<(), String> {
 /// Removes the files of Outposts that are gone, and points the Outpost
 /// socket at the newest live Outpost, or removes it when none is left.
 fn repair(dir: &Path) -> Result<(), String> {
+    let _dir_lock = lock_dir(dir)?;
+    repair_locked(dir)
+}
+
+/// `repair` with the folder lock held.
+fn repair_locked(dir: &Path) -> Result<(), String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut live = std::collections::HashMap::new();
     let mut newest: Option<String> = None;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(pid) = pid_of(&name) else { continue };
-        if !alive(pid) {
+        let Some(base) = base_of(&name) else { continue };
+        let is_live = *live
+            .entry(base.to_owned())
+            .or_insert_with(|| alive(dir, base));
+        if !is_live {
             let _ = std::fs::remove_file(entry.path());
         } else if name.ends_with(".sock") && newest.as_ref().is_none_or(|n| name > *n) {
             newest = Some(name);

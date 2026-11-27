@@ -39,8 +39,21 @@ impl Local {
     /// Starts a Daemon whose fake `ssh` puts the Outpost socket in
     /// `outpost`. The `ssh` fails while the file `dir/down` exists.
     fn start(outpost: &Path) -> Local {
+        Local::start_with(outpost, "echo $$ > {pid}\nexec \"$@\"")
+    }
+
+    /// Like `start`, but the Outpost reads its stdin through a `cat`, so
+    /// `close_link` can close the Outpost's stdin without a kill.
+    fn start_closable(outpost: &Path) -> Local {
+        Local::start_with(outpost, "{ cat <&0 & echo $! > {pid}; wait; } | \"$@\"")
+    }
+
+    /// `run` is the end of the fake `ssh`: it runs `"$@"`, the Outpost, and
+    /// writes a pid to `{pid}`.
+    fn start_with(outpost: &Path, run: &str) -> Local {
         let dir = TmpDir::new("2l");
         let ssh = dir.0.join("ssh");
+        let run = run.replace("{pid}", &dir.0.join("pid").display().to_string());
         write_script(
             &ssh,
             &format!(
@@ -48,13 +61,11 @@ impl Local {
                  export HOME={home}\n\
                  export XDG_CONFIG_HOME={home}/cfg\n\
                  export ROWSER_TEST_OUTPOST_DIR={outpost}\n\
-                 echo $$ > {pid}\n\
                  shift $(($# - 2))\n\
-                 exec \"$@\"",
+                 {run}",
                 down = dir.0.join("down").display(),
                 home = dir.0.display(),
                 outpost = outpost.display(),
-                pid = dir.0.join("pid").display(),
             ),
         );
         let (direct, relay, control) = bind_sockets(&dir.0.join("run")).unwrap();
@@ -78,6 +89,16 @@ impl Local {
 
     /// Drops this Link: the `ssh` fails from now on, and the Outpost is killed.
     fn drop_link(&self) {
+        self.signal(libc::SIGKILL);
+    }
+
+    /// Ends this Link cleanly (a `start_closable` Local only): the `ssh`
+    /// fails from now on, and the Outpost's stdin closes.
+    fn close_link(&self) {
+        self.signal(libc::SIGTERM);
+    }
+
+    fn signal(&self, sig: i32) {
         std::fs::write(self.dir.0.join("down"), "").unwrap();
         let pid: i32 = std::fs::read_to_string(self.dir.0.join("pid"))
             .unwrap()
@@ -86,7 +107,7 @@ impl Local {
             .unwrap();
         // Never signal init or a process group.
         assert!(pid > 1, "{pid}");
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        unsafe { libc::kill(pid, sig) };
     }
 }
 
@@ -215,6 +236,39 @@ async fn the_newer_link_keeps_the_socket_when_the_older_one_drops() {
     remote.open(&c).await;
     assert_eq!(newer.opener.urls(), [c]);
     assert!(older.opener.urls().is_empty());
+}
+
+/// The names of the files in the Outpost socket folder, sorted.
+fn files(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_outpost_that_exits_cleanly_hands_the_socket_on_and_the_last_one_removes_it() {
+    let remote = Remote::new();
+    let older = Local::start_closable(&remote.outpost());
+    remote.wait_connected().await;
+    let first = remote.ino().unwrap();
+    let newer = Local::start_closable(&remote.outpost());
+    remote.wait_ino(|i| i.is_some() && i != Some(first)).await;
+    remote.wait_connected().await;
+
+    newer.close_link();
+    remote.wait_ino(|i| i == Some(first)).await;
+    remote.wait_connected().await;
+    let d = Url::parse("https://example.com/d").unwrap();
+    remote.open(&d).await;
+    assert_eq!(older.opener.urls(), [d]);
+
+    // A killed Outpost leaves the socket; only a clean exit removes it.
+    older.close_link();
+    remote.wait_ino(|i| i.is_none()).await;
+    assert_eq!(files(&remote.outpost()), ["outpost.lock"]);
 }
 
 /// The fake remote program's listener on 127.0.0.1, on a port that is also
