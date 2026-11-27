@@ -87,6 +87,11 @@ impl World {
 
     /// Runs `rowser host <args>`; `found` is what `command -v rowser` gives.
     fn host(&self, args: &[&str], found: Option<&str>) -> Output {
+        self.host_in(args, found, &self.run_dir())
+    }
+
+    /// `host`, with `ROWSER_RUNTIME_DIR` set to `run_dir`.
+    fn host_in(&self, args: &[&str], found: Option<&str>, run_dir: &Path) -> Output {
         let d = &self.dir.0;
         let mut c = std::process::Command::new(ROWSER);
         c.arg("host")
@@ -94,7 +99,7 @@ impl World {
             .env("PATH", format!("{}:/usr/bin:/bin", d.join("bin").display()))
             .env("HOME", d)
             .env("XDG_CONFIG_HOME", d.join("cfg"))
-            .env("ROWSER_RUNTIME_DIR", self.run_dir())
+            .env("ROWSER_RUNTIME_DIR", run_dir)
             .env_remove("FAKE_FOUND")
             .stdin(std::process::Stdio::null());
         if let Some(f) = found {
@@ -196,6 +201,47 @@ fn add_of_a_saved_host_is_idempotent() {
 }
 
 #[test]
+fn a_second_add_updates_the_path_and_default_browser() {
+    let w = World::new("h2");
+    assert!(w
+        .host(&["add", "g14"], Some("/opt/rowser"))
+        .status
+        .success());
+    let out = w.host(&["add", "g14", "--no-default-browser"], Some("/new/rowser"));
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let c = rowser::config::parse(&w.config()).unwrap();
+    assert_eq!(c.hosts.len(), 1);
+    assert_eq!(c.hosts[0].remote_path, "/new/rowser");
+    assert!(!c.hosts[0].default_browser);
+
+    // A plain add means default_browser true (spec).
+    assert!(w
+        .host(&["add", "g14"], Some("/new/rowser"))
+        .status
+        .success());
+    let c = rowser::config::parse(&w.config()).unwrap();
+    assert_eq!(c.hosts.len(), 1);
+    assert!(c.hosts[0].default_browser);
+}
+
+#[test]
+fn add_reads_the_last_line_of_a_chatty_login_shell() {
+    let w = World::new("hl");
+    let out = w.host(&["add", "g14"], Some("Welcome to g14\n\n/opt/rowser\n"));
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let c = rowser::config::parse(&w.config()).unwrap();
+    assert_eq!(c.hosts[0].remote_path, "/opt/rowser");
+}
+
+#[test]
+fn list_with_no_saved_hosts_says_so() {
+    let w = World::new("he");
+    let out = w.host(&["list"], None);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "no Saved hosts\n");
+}
+
+#[test]
 fn add_with_no_default_browser_records_it() {
     let w = World::new("hn");
     let out = w.host(&["add", "pi", "--no-default-browser"], Some("/opt/rowser"));
@@ -256,7 +302,8 @@ async fn add_list_and_remove_with_a_running_daemon() {
     wait_connected(&w.socket("g14")).await;
     let list = wait_list(&w, "connected").await;
     assert!(list.contains("g14  connected"), "{list}");
-    assert!(list.contains("outpost 2."), "{list}");
+    let outpost = format!("outpost {}", env!("CARGO_PKG_VERSION"));
+    assert!(list.trim_end().ends_with(&outpost), "{list}");
 
     // The pid of this test's own Outpost, which the fake ssh wrote.
     let pid: i32 = std::fs::read_to_string(w.dir.0.join("pid-g14"))
@@ -307,6 +354,38 @@ async fn connect_starts_a_master_and_the_link_connects_again() {
     wait_connected(&w.socket("g14")).await;
     let list = wait_list(&w, "g14  connected").await;
     assert!(list.contains("g14  connected"), "{list}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connect_to_a_host_the_daemon_has_not_loaded_asks_for_reload() {
+    let w = World::new("hk");
+    w.start_daemon();
+    w.write_config("[[host]]\nname = \"g14\"\nremote_path = \"/a\"\n");
+    let out = host_async(&w, &["connect", "g14"], None).await;
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains("rowser reload"), "{err}");
+}
+
+#[test]
+fn connect_quotes_a_runtime_dir_with_a_space() {
+    let w = World::new("hs");
+    w.write_config("[[host]]\nname = \"g14\"\nremote_path = \"/a\"\n");
+    let run = w.dir.0.join("Application Support");
+    let out = w.host_in(&["connect", "g14"], None, &run);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let master = w
+        .ssh_args()
+        .into_iter()
+        .find(|a| a.contains("-N -f"))
+        .expect("no master ssh");
+    assert_eq!(
+        master,
+        format!(
+            "-o ControlMaster=yes -o ControlPersist=yes -o ControlPath=\"{}/Application Support/cm-%C\" -N -f g14",
+            w.dir.0.display()
+        )
+    );
 }
 
 #[test]

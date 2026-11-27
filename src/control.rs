@@ -217,6 +217,19 @@ pub fn reload(runtime_dir: &Path) -> Result<usize, RequestError> {
     }
 }
 
+/// What the `rowser route` and `rowser host` commands say about the Daemon
+/// after they change the config file. A reload the Daemon refuses is only
+/// a note.
+pub fn reload_note(runtime_dir: Result<&Path, String>) -> String {
+    match runtime_dir.map_err(RequestError::Other).and_then(reload) {
+        Ok(n) => reloaded_line(n),
+        Err(RequestError::NotRunning) => {
+            "rowser: the daemon is not running; the change applies when it starts".into()
+        }
+        Err(RequestError::Other(e)) => format!("rowser: the daemon did not reload: {e}"),
+    }
+}
+
 /// The line `rowser reload` and the `rowser route` commands print after a
 /// reload: `rowser: config reloaded (<n> routes)`, `(1 route)` for one.
 pub fn reloaded_line(routes: usize) -> String {

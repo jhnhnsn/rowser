@@ -489,7 +489,12 @@ pub fn add_host(text: &str, host: &SavedHost) -> Result<String, String> {
             hosts.iter_mut().last().expect("pushed above")
         }
     };
-    t["remote_path"] = toml_edit::value(host.remote_path.as_str());
+    // Keep the decor (such as an end-of-line comment) of an old value.
+    let mut path = toml_edit::Value::from(host.remote_path.as_str());
+    if let Some(old) = t.get("remote_path").and_then(|i| i.as_value()) {
+        *path.decor_mut() = old.decor().clone();
+    }
+    t["remote_path"] = toml_edit::Item::Value(path);
     if host.default_browser {
         t.remove("default_browser");
     } else {
@@ -658,5 +663,61 @@ mod tests {
         assert!(e.starts_with("line 5:"), "{e}");
         let e = parse("[default]\nopen = \"system\"\nbrowser = \"x\"\n").unwrap_err();
         assert!(e.starts_with("line 3:"), "{e}");
+    }
+
+    fn saved(name: &str, path: &str, default_browser: bool) -> SavedHost {
+        SavedHost {
+            name: name.into(),
+            remote_path: path.into(),
+            auto_update: true,
+            default_browser,
+        }
+    }
+
+    #[test]
+    fn add_host_keeps_the_header_and_appends() {
+        let text = "# my config\n\n[default]\nopen = \"system\"\n";
+        let out = add_host(text, &saved("g14", "/opt/rowser", true)).unwrap();
+        assert_eq!(
+            out,
+            "# my config\n\n[default]\nopen = \"system\"\n\n\
+             [[host]]\nname = \"g14\"\nremote_path = \"/opt/rowser\"\n"
+        );
+    }
+
+    #[test]
+    fn add_host_updates_an_entry_in_place_and_keeps_its_comments() {
+        let text = "[[host]]\nname = \"g14\" # laptop\nremote_path = \"/a\" # old path\n\
+                    auto_update = false\n\n[[host]]\nname = \"pi\"\nremote_path = \"/b\"\n";
+        let out = add_host(text, &saved("g14", "/new", false)).unwrap();
+        assert_eq!(
+            out,
+            "[[host]]\nname = \"g14\" # laptop\nremote_path = \"/new\" # old path\n\
+             auto_update = false\ndefault_browser = false\n\n\
+             [[host]]\nname = \"pi\"\nremote_path = \"/b\"\n"
+        );
+        let out = add_host(&out, &saved("g14", "/new", true)).unwrap();
+        assert!(!out.contains("default_browser"), "{out}");
+        assert_eq!(add_host(&out, &saved("g14", "/new", true)).unwrap(), out);
+    }
+
+    #[test]
+    fn remove_host_keeps_the_header_and_removes_the_last_entry() {
+        let text = "# my config\n\n[[host]]\nname = \"g14\"\nremote_path = \"/a\"\n";
+        let out = remove_host(text, "g14").unwrap();
+        assert_eq!(out, "# my config\n\n");
+        assert!(parse(&out).unwrap().hosts.is_empty());
+        assert!(remove_host(&out, "g14").is_err());
+    }
+
+    #[test]
+    fn remove_host_moves_the_header_to_the_next_table() {
+        let text = "# my config\n\n# g14 notes\n[[host]]\nname = \"g14\"\nremote_path = \"/a\"\n\n\
+                    [[host]]\nname = \"pi\"\nremote_path = \"/b\"\n";
+        let out = remove_host(text, "g14").unwrap();
+        assert_eq!(
+            out,
+            "# my config\n\n[[host]]\nname = \"pi\"\nremote_path = \"/b\"\n"
+        );
     }
 }

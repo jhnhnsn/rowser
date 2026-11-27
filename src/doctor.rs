@@ -433,7 +433,7 @@ pub async fn check_tunnel(tunnel_dir: &Path, socket_override: Option<PathBuf>) -
         return fail(format!("{}: {e}", socket.display()));
     }
     let version = match conn.recv().await {
-        Ok(Some(Msg::Pong { version })) => version,
+        Ok(Some(Msg::Pong { version, .. })) => version,
         Ok(Some(other)) => return fail(format!("unexpected reply from daemon: {other:?}")),
         Ok(None) => return fail("daemon closed the connection".into()),
         Err(e) => return fail(format!("{}: {e}", socket.display())),

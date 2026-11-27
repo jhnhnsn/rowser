@@ -61,6 +61,7 @@ pub(super) fn new_status(host: &str) -> LinkStatus {
         since: super::unix_now(),
         last_connected: None,
         outpost_version: None,
+        outpost_rowser_version: None,
     }))
 }
 
@@ -234,7 +235,10 @@ async fn connect_once(
         };
         conn.send(&Msg::Ping).await.ok()?;
         match conn.recv().await.ok()? {
-            Some(Msg::Pong { version }) => Some((conn, version)),
+            Some(Msg::Pong {
+                version,
+                rowser_version,
+            }) => Some((conn, version, rowser_version)),
             _ => None,
         }
     };
@@ -255,13 +259,14 @@ async fn connect_once(
     tokio::pin!(serve);
     tokio::select! {
         r = tokio::time::timeout(HELLO_TIMEOUT, hello) => {
-            if let Ok(Some((_control, version))) = r {
+            if let Ok(Some((_control, version, rowser_version))) = r {
                 connected = true;
                 backoff.reset();
                 {
                     let mut s = link.lock().unwrap_or_else(|e| e.into_inner());
                     s.last_connected = Some(super::unix_now());
                     s.outpost_version = Some(version);
+                    s.outpost_rowser_version = rowser_version;
                 }
                 set_state(link, LinkState::Connected);
                 tracing::info!("link {}: {:?} (outpost {version})", host.name, LinkState::Connected);

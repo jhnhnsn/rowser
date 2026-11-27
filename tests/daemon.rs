@@ -180,14 +180,16 @@ async fn ping_answers_pong_with_the_version_on_both_sockets() {
     assert_eq!(
         request(&mut direct, Msg::Ping).await,
         Msg::Pong {
-            version: Hello::current().version()
+            version: Hello::current().version(),
+            rowser_version: Some(env!("CARGO_PKG_VERSION").into()),
         }
     );
     let mut relay = h.connect_relay("b").await;
     assert_eq!(
         request(&mut relay, Msg::Ping).await,
         Msg::Pong {
-            version: Hello::current().version()
+            version: Hello::current().version(),
+            rowser_version: Some(env!("CARGO_PKG_VERSION").into()),
         }
     );
 }

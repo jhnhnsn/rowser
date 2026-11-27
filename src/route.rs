@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::browsers::{Browsers, Roots};
 use crate::config::{self, Route, Target};
-use crate::control::{self, RequestError};
+use crate::control;
 use crate::routes::{RequestHost, Routes};
 
 /// One `rowser route` command.
@@ -201,22 +201,8 @@ fn run_inner(args: RouteArgs, out: &mut impl Write, err: &mut impl Write) -> Res
     writeln!(out, "rowser: {done}").map_err(io)?;
     // The file change is done, so a reload the Daemon refuses is only a
     // note: the command still exits 0.
-    let note = reload_note(args.runtime_dir.as_deref().map_err(String::clone));
+    let note = control::reload_note(args.runtime_dir.as_deref().map_err(String::clone));
     writeln!(out, "{note}").map_err(io)
-}
-
-/// What to say about the Daemon after a change.
-pub(crate) fn reload_note(runtime_dir: Result<&Path, String>) -> String {
-    match runtime_dir
-        .map_err(RequestError::Other)
-        .and_then(control::reload)
-    {
-        Ok(n) => control::reloaded_line(n),
-        Err(RequestError::NotRunning) => {
-            "rowser: the daemon is not running; the change applies when it starts".into()
-        }
-        Err(RequestError::Other(e)) => format!("rowser: the daemon did not reload: {e}"),
-    }
 }
 
 /// `rowser route …` from the command line.

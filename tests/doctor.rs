@@ -359,7 +359,12 @@ fn fake_daemon(path: PathBuf, version: Version) {
                     return;
                 };
                 if let Ok(Some(Msg::Ping)) = conn.recv().await {
-                    let _ = conn.send(&Msg::Pong { version }).await;
+                    let _ = conn
+                        .send(&Msg::Pong {
+                            version,
+                            rowser_version: None,
+                        })
+                        .await;
                 }
             });
         }

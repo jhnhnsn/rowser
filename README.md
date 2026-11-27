@@ -358,15 +358,20 @@ rowser host remove g14
 ```
 
 ```
-g14  connected  since 2026-11-27 10:02:11  last connected 2026-11-27 10:02:11  outpost 2.0
+g14  connected  since 2026-11-27 10:02:11  last connected 2026-11-27 10:02:11  outpost 1.0.0
 desk  needs login  since 2026-11-27 10:02:12  last connected never  outpost -
 ```
 
 - `host add` runs `command -v rowser` in your login shell on the host and saves the path as
   `remote_path`. If rowser is not there, it stops and tells you to run
-  `rowser remote install <host>` first. Adding a Saved host again changes nothing.
+  `rowser remote install <host>` first. Adding a Saved host again updates its `remote_path` and
+  `default_browser` (a plain `add` sets `default_browser` back to true); other keys and comments
+  stay.
 - `host list` shows each Saved host's Link state: `connected`, `connecting`, `needs login` or
-  `version mismatch`, and `daemon not running` when the daemon is stopped.
+  `version mismatch`, and `daemon not running` when the daemon is stopped. `outpost` is the
+  rowser version on the host. With no Saved hosts it prints `no Saved hosts`.
+- `host connect` exits 1 when the daemon has not loaded the host; run `rowser reload`, then
+  connect again.
 - A Link logs in with `BatchMode`. If that fails, the Link shows `needs login` and stops
   retrying. `host connect` runs `ssh` in your terminal, so it can ask for a passphrase or a key
   touch, and keeps a background master connection on rowser's own control path. The Link then

@@ -242,6 +242,7 @@ pub const CONTROL_ONLY: &str = "control messages are accepted only on the contro
 fn pong() -> Msg {
     Msg::Pong {
         version: Hello::current().version(),
+        rowser_version: crate::protocol::rowser_version(),
     }
 }
 

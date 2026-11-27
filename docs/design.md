@@ -54,14 +54,19 @@ Interface:
 Messages (one enum, `Msg`): `HostStamp{alias}`, `Open{url, reported_host, callback_ports}`,
 `Forward{reported_host, callback_ports}` (`rowser forward`; the reply is an `OpenResult`),
 `OpenResult{forward_id?, warnings, error?}`, `AttachForward{forward_id}`, `Dial{conn_id, port}`,
-`DataConn{forward_id, conn_id}`, `Ping`, `Pong{version}`. A `conn_id` is random, and the Daemon
-accepts a `DataConn` only when its `forward_id` is the forward that sent that `Dial`.
+`DataConn{forward_id, conn_id}`, `Ping`, `Pong{version, rowser_version?}` (`rowser_version` is
+the answering side's `CARGO_PKG_VERSION`, protocol 2.0; the Daemon and the Outpost send it). A
+`conn_id` is random, and the Daemon accepts a `DataConn` only when its `forward_id` is the
+forward that sent that `Dial`.
 
 Control messages (protocol 1.1, control socket only; `Msg::is_control` names them, and the direct
 and relay sockets answer them with an `OpenResult` error and close the connection): `Status`,
 `StatusReply{daemon_version, protocol_version, config_file?, config_file_exists, paused,
 paused_until?, forwards: [ForwardInfo{port, host, unverified, age_secs}],
-sessions: [SessionInfo{host, age_secs, target}]}`, and `Session{host}` (the Wrapper registers
+sessions: [SessionInfo{host, age_secs, target}], links: [LinkInfo{host, state, since,
+last_connected?, outpost_version?, outpost_rowser_version?}]}` (2.0: one entry for each Saved
+host), `Reconnect{host}` (2.0, `rowser host connect`; the reply is `Reconnected{host}`, or an
+`OpenResult` error when the Daemon has no Link to `host`), and `Session{host}` (the Wrapper registers
 its Session; the reply is an `OpenResult`, and the Session lasts until that connection closes),
 `Reload` (the Daemon reads the config file again; the reply is `Reloaded{routes}` with the number
 of Routes, or an `OpenResult` error with the file, line and reason, and the old Routes stay).
@@ -157,7 +162,8 @@ one value.
   Requests from a Link carry the Host alias and share one rate limit for each Saved host.
   `serve` and a reload call `sync_links` to add or remove Links.
 - Link status (#78): each Link task shares a `LinkStatus` (`protocol::LinkInfo`: state, since,
-  last connection, the Outpost's protocol version) with the control handler. `LinkState` is in
+  last connection, the Outpost's protocol version and rowser version from its `Pong`) with the
+  control handler. `LinkState` is in
   `protocol` and adds `VersionMismatch` (a major mismatch on the first stream; the Link keeps
   retrying with backoff). `StatusReply.links` lists them. `Msg::Reconnect { host }` aborts the
   Link task and starts a new one at once with the same status, which also ends `NeedsLogin`.
@@ -165,14 +171,19 @@ one value.
 ### Host commands: `host` (#78)
 
 `rowser host add <host>` runs `ssh <host> exec "$SHELL" -lc 'command -v rowser'` and saves the
-path as `remote_path` with `config::add_host` (an entry of the same name is updated in place, so a
-second `add` changes nothing). No path (or a name, not a path) is the error that names
+last non-empty stdout line (a login-shell profile can print lines before it) as `remote_path`
+with `config::add_host`. An entry of the same name is updated in place: `remote_path` (its decor
+stays) and `default_browser` (a plain `add` means true, spec); other keys and comments stay, so
+the same `add` twice gives the same text. No path (or a name, not a path) is the error that names
 `rowser remote install <host>`. `remove` uses `config::remove_host`; a file header above the
 removed entry moves to the next table. Both then reload a running Daemon. `list` reads the file
-and the Daemon's `StatusReply.links`, or prints `daemon not running`. `connect` runs `ssh -o
+and the Daemon's `StatusReply.links` (`outpost <rowser version>`), or prints `daemon not
+running`, or `no Saved hosts` for an empty list. The reload note is `control::reload_note`,
+shared with `route`. `connect` runs `ssh -o
 ControlMaster=yes -o ControlPersist=yes -o ControlPath="<runtime dir>/cm-%C" -N -f <host>` in the
 terminal (`host::master_args`, the same `daemon::control_path_option` as the Link), then sends
-`Reconnect`.
+`Reconnect`; an `OpenResult` error (no Link: the Daemon has not loaded the host) exits 1 and
+names `rowser reload`.
 
 `DaemonConfig` adds `hosts`, `ssh` (the program; tests give a fake that runs `rowser __outpost`
 locally) and `link_dir` (the `ControlPath` folder; empty by default, and a Link refuses an
@@ -258,8 +269,9 @@ src/
   host.rs            `rowser host add|remove|list|connect` (#78): edits `[[host]]`, then reloads
                      or reconnects; runs the `ssh` on `PATH`
   control.rs         client side of the control socket: status, reload, pause, resume,
-                     pending, approve, deny, activity
-  daemon/control.rs  internal: control socket handlers (status, activity, pause, pending, reload)
+                     pending, approve, deny, activity; `reload_note` for `route` and `host`
+  daemon/control.rs  internal: control socket handlers (status, activity, pause, pending, reload,
+                     reconnect)
   daemon/activity.rs internal: in-memory ring of the last 200 requests
   daemon/session.rs  internal: Sessions, one per Wrapper control connection
   daemon/pending.rs  internal: confirmations that wait, with ids, for `rowser pending|approve|deny`

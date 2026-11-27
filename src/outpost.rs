@@ -170,6 +170,7 @@ async fn answer_control(stream: mux::Stream) -> crate::protocol::Result<()> {
         let reply = match msg {
             Msg::Ping => Msg::Pong {
                 version: Hello::current().version(),
+                rowser_version: crate::protocol::rowser_version(),
             },
             _ => Msg::OpenResult {
                 forward_id: None,

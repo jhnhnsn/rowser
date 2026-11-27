@@ -52,7 +52,14 @@ fn all_messages() -> Vec<Msg> {
             conn_id: 7,
         },
         Msg::Ping,
-        Msg::Pong { version: current() },
+        Msg::Pong {
+            version: current(),
+            rowser_version: None,
+        },
+        Msg::Pong {
+            version: current(),
+            rowser_version: Some("1.0.0".into()),
+        },
     ]
 }
 

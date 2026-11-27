@@ -12,7 +12,6 @@ use std::process::{Command, ExitCode, Stdio};
 use crate::config::{self, SavedHost};
 use crate::control::{self, RequestError};
 use crate::protocol::{LinkInfo, Msg};
-use crate::route::reload_note;
 
 /// One `rowser host` command.
 #[derive(Debug, Clone)]
@@ -101,18 +100,21 @@ fn run_inner(args: HostArgs, out: &mut impl Write) -> Result<(), String> {
             let text = config::add_host(&text, &saved).map_err(in_file)?;
             config::write(&file, &text)?;
             writeln!(out, "rowser: saved host {host} (rowser at {remote_path})").map_err(io)?;
-            let note = reload_note(args.runtime_dir.as_deref().map_err(String::clone));
+            let note = control::reload_note(args.runtime_dir.as_deref().map_err(String::clone));
             writeln!(out, "{note}").map_err(io)
         }
         HostAction::Remove { host } => {
             let text = config::remove_host(&read(&file)?, &host).map_err(in_file)?;
             config::write(&file, &text)?;
             writeln!(out, "rowser: removed host {host}").map_err(io)?;
-            let note = reload_note(args.runtime_dir.as_deref().map_err(String::clone));
+            let note = control::reload_note(args.runtime_dir.as_deref().map_err(String::clone));
             writeln!(out, "{note}").map_err(io)
         }
         HostAction::List => {
             let c = config::load(&file)?;
+            if c.hosts.is_empty() {
+                return writeln!(out, "no Saved hosts").map_err(io);
+            }
             let links = args
                 .runtime_dir
                 .map_err(RequestError::Other)
@@ -148,7 +150,12 @@ fn run_inner(args: HostArgs, out: &mut impl Write) -> Result<(), String> {
             writeln!(out, "rowser: logged in to {host}").map_err(io)?;
             let note = match control::request(&dir, &Msg::Reconnect { host: host.clone() }) {
                 Ok(Msg::Reconnected { .. }) => format!("rowser: the Link to {host} connects again"),
-                Ok(Msg::OpenResult { error: Some(e), .. }) => format!("rowser: {e}"),
+                // The only error: the Daemon has not loaded this Saved host.
+                Ok(Msg::OpenResult { error: Some(e), .. }) => {
+                    return Err(format!(
+                        "{e}: the daemon has not loaded {host}; run \"rowser reload\", then connect again"
+                    ))
+                }
                 Ok(other) => format!("rowser: unexpected reply {other:?}"),
                 Err(RequestError::NotRunning) => {
                     "rowser: the daemon is not running; the Link connects when it starts".into()
@@ -189,7 +196,14 @@ fn find_rowser(host: &str) -> Result<String, String> {
     if out.status.code() == Some(255) {
         return Err(format!("ssh to {host} failed ({})", out.status));
     }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // A login-shell profile can print lines before the path.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let path = stdout
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or_default()
+        .to_string();
     // `command -v` gives a name, not a path, for an alias or a function.
     if !out.status.success() || !(path.starts_with('/') || path.starts_with('~')) {
         return Err(format!(
@@ -199,10 +213,11 @@ fn find_rowser(host: &str) -> Result<String, String> {
     Ok(path)
 }
 
-/// `g14  connected  since <time>  last connected <time>  outpost 2.0`.
+/// `g14  connected  since <time>  last connected <time>  outpost 1.0.0`: the
+/// Outpost's rowser version.
 fn link_line(l: &LinkInfo) -> String {
     let last = l.last_connected.map_or("never".into(), control::local_time);
-    let version = l.outpost_version.map_or("-".into(), |v| v.to_string());
+    let version = l.outpost_rowser_version.as_deref().unwrap_or("-");
     format!(
         "{}  {}  since {}  last connected {last}  outpost {version}",
         l.host,

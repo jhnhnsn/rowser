@@ -133,6 +133,10 @@ pub enum Msg {
     Ping,
     Pong {
         version: Version,
+        /// The rowser version of the side that answers
+        /// (`CARGO_PKG_VERSION`), such as `1.0.0`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rowser_version: Option<String>,
     },
     /// Control socket only (1.1): `rowser status`. The reply is a `StatusReply`.
     Status,
@@ -420,6 +424,15 @@ pub struct LinkInfo {
     /// The protocol version the Outpost gave at its last connection.
     #[serde(default)]
     pub outpost_version: Option<Version>,
+    /// The rowser version the Outpost gave in its `Pong` at its last
+    /// connection.
+    #[serde(default)]
+    pub outpost_rowser_version: Option<String>,
+}
+
+/// This build's rowser version, as a `Pong` gives it.
+pub fn rowser_version() -> Option<String> {
+    Some(env!("CARGO_PKG_VERSION").into())
 }
 
 /// One local port of an open Callback forward, as `rowser status` shows it.
