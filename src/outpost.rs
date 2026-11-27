@@ -6,6 +6,10 @@
 //! of each Callback forward: it watches the Callback ports and dials them
 //! for each browser connection. It exits when stdio closes, which ends its
 //! forwards.
+//!
+//! Several Outposts of one user (one per Local machine with a Link here)
+//! share the Outpost socket: it is a hard link to the own socket file of
+//! the newest live Outpost (`repair`).
 
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -115,16 +119,15 @@ where
 {
     prepare_dir(dir)?;
     let path = socket_path(dir);
-    // The Link that connected last takes the Open requests.
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-    }
-    let listener = UnixListener::bind(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    let ino = std::fs::symlink_metadata(&path).map(|m| m.ino()).ok();
+    // Each Outpost listens on its own socket file and the Outpost socket is
+    // a hard link to the newest one: the Link that connected last takes the
+    // Open requests, and the next newest gets them when it goes.
+    let own = dir.join(own_name(std::process::id()));
+    let listener = UnixListener::bind(&own).map_err(|e| format!("{}: {e}", own.display()))?;
+    let _own = RemoveOnDrop(own.clone());
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("{}: {e}", own.display()))?;
+    point_at(dir, &own)?;
 
     let (opener, mut inbound, driver) = mux::start(io, Side::Outpost);
     let accept = async {
@@ -154,15 +157,110 @@ where
             });
         }
     };
+    // An Outpost that was killed cannot hand the socket back: each one
+    // checks often that the socket leads to the newest live Outpost.
+    let repairs = async {
+        let mut tick = tokio::time::interval(REPAIR_INTERVAL);
+        loop {
+            tick.tick().await;
+            if let Err(e) = repair(dir) {
+                tracing::warn!("{e}");
+            }
+        }
+    };
     tokio::select! {
         _ = accept => {}
         _ = control => {}
         _ = driver => {}
+        _ = repairs => {}
     }
-    // Remove the socket only when it is still ours: a newer Link's Outpost
-    // may have bound the same path.
-    if std::fs::symlink_metadata(&path).map(|m| m.ino()).ok() == ino {
-        let _ = std::fs::remove_file(&path);
+    // Hand the socket to the next newest Outpost, or remove it.
+    drop(_own);
+    repair(dir)
+}
+
+/// How often an Outpost checks that the Outpost socket leads to the newest
+/// live Outpost.
+const REPAIR_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Prefix of each Outpost's own socket file (and its temporary link).
+const OWN_PREFIX: &str = "link-";
+
+/// The own socket file name of the Outpost `pid`: the start time first, so
+/// names sort from oldest to newest.
+fn own_name(pid: u32) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{OWN_PREFIX}{nanos:020}-{pid}.sock")
+}
+
+/// The pid in an own socket file name (or its `.tmp` link), if it is one.
+fn pid_of(name: &str) -> Option<i32> {
+    let rest = name.strip_prefix(OWN_PREFIX)?;
+    let rest = rest
+        .strip_suffix(".sock")
+        .or_else(|| rest.strip_suffix(".tmp"))?;
+    rest.split_once('-')?.1.parse().ok().filter(|p| *p > 1)
+}
+
+/// True while the process `pid` exists.
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Removes a file when dropped.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Points the Outpost socket in `dir` at the socket file `own`, in one
+/// atomic rename: the socket never goes missing.
+fn point_at(dir: &Path, own: &Path) -> Result<(), String> {
+    let tmp = dir.join(format!("{OWN_PREFIX}0-{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::hard_link(own, &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let path = socket_path(dir);
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("{}: {e}", path.display())
+    })
+}
+
+/// Removes the files of Outposts that are gone, and points the Outpost
+/// socket at the newest live Outpost, or removes it when none is left.
+fn repair(dir: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut newest: Option<String> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(pid) = pid_of(&name) else { continue };
+        if !alive(pid) {
+            let _ = std::fs::remove_file(entry.path());
+        } else if name.ends_with(".sock") && newest.as_ref().is_none_or(|n| name > *n) {
+            newest = Some(name);
+        }
+    }
+    let path = socket_path(dir);
+    let current = std::fs::symlink_metadata(&path).map(|m| m.ino()).ok();
+    match newest {
+        Some(name) => {
+            let own = dir.join(name);
+            let want = std::fs::symlink_metadata(&own).map(|m| m.ino()).ok();
+            if want.is_some() && want != current {
+                point_at(dir, &own)?;
+            }
+        }
+        None if current.is_some() => {
+            let _ = std::fs::remove_file(&path);
+        }
+        None => {}
     }
     Ok(())
 }

@@ -201,6 +201,13 @@ Shim checks `outpost::check_socket`: the folder belongs to the user with mode 07
 belongs to the user. On a failed check it prints a warning and goes on to the next step. It does
 not check `ROWSER_SOCKET`.
 
+Two Links to one host (#80): each Outpost listens on its own socket file
+`link-<start nanos>-<pid>.sock` in the Outpost socket folder, and `outpost.sock` is a hard link
+to the newest live one, swapped in by an atomic rename, so the socket never goes missing. Every
+500 ms each Outpost removes the files of dead Outposts (by pid) and points `outpost.sock` at the
+newest live file; on exit it hands the socket on, or removes it when no Outpost is left. A killed
+Outpost hands nothing on, so the next check of another Outpost repairs the socket.
+
 ### `shim` — deep
 
 Interface: `run_open(url, ShimEnv) -> ExitCode`, `run_forward(port, ShimEnv) -> ExitCode`.

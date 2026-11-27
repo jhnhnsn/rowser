@@ -55,7 +55,9 @@ rowser is a CLI; test it from the terminal.
   `DaemonConfig::ssh` field in tests) that drops its options and alias and execs
   `<remote_path> __outpost` on this machine, with HOME and `ROWSER_TEST_OUTPOST_DIR` set to temp
   dirs. It must never run the real `ssh`. See `tests/link.rs`. A Link retries after 1 s, 2 s, 4 s
-  and so on, so wait for the Outpost socket to answer before you send a URL.
+  and so on, so wait for the Outpost socket to answer before you send a URL. Two Local
+  machines (#80): run two Daemons with separate runtime dirs whose fake `ssh` set the same
+  `ROWSER_TEST_OUTPOST_DIR`; see `tests/two_links.rs`.
 - `rowser host add|remove|list|connect` (#78) runs the `ssh` on `PATH`: put a fake `ssh` first on
   `PATH` that logs its arguments, prints a path for `command -v rowser` (or exits 1 for a missing
   rowser), exits 0 for `-N -f` (the master), and never runs the real `ssh`. Set `HOME`,

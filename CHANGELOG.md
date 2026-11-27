@@ -8,6 +8,9 @@ All notable changes to rowser are listed here. The format follows
 
 ### Added
 
+- Two Local machines with a Link to one Remote host share its Outpost socket: the Link that
+  connected last gets the URLs, and the other Link gets them again when it drops. Each Link
+  keeps its own Callback forwards. ([#80](https://github.com/jhnhnsn/rowser/issues/80))
 - `rowser host add|remove|list|connect`. `add` finds rowser on the host and saves it as a Saved
   host (`--no-default-browser` for a host with its own desktop). `list` shows each Link's state,
   last connection and Outpost version. `connect` logs in from your terminal (passphrase or key
