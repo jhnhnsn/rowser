@@ -116,6 +116,19 @@ fn launchd_plist_path() -> Result<PathBuf, String> {
         .join(format!("{LAUNCHD_LABEL}.plist")))
 }
 
+/// The service file `rowser daemon install` writes on this OS: the
+/// LaunchAgent plist on macOS, else the systemd user unit.
+pub fn service_file() -> Result<PathBuf, String> {
+    if cfg!(target_os = "macos") {
+        launchd_plist_path()
+    } else {
+        systemd_unit_path()
+    }
+}
+
+/// The removed flag `rowser doctor` looks for in an installed service file.
+pub const REMOVED_FLAG: &str = "--confirm-unverified";
+
 /// Runs a program from `PATH`; Err names the command and its failure.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn run(program: &str, args: &[&str]) -> Result<(), String> {

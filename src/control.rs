@@ -10,8 +10,8 @@ use serde::Serialize;
 use tokio::net::UnixStream;
 
 use crate::protocol::{
-    ActivityEntry, AnsweredBy, Conn, ForwardInfo, Hello, Msg, Outcome, PendingInfo, RequestKind,
-    CONTROL_SOCKET,
+    ActivityEntry, AnsweredBy, Conn, ForwardInfo, Hello, LinkInfo, Msg, Outcome, PendingInfo,
+    RequestKind, CONTROL_SOCKET,
 };
 
 /// The line every control command prints when the Daemon does not answer.
@@ -107,7 +107,7 @@ pub fn run_status(args: StatusArgs, out: &mut impl Write, err: &mut impl Write) 
         paused,
         paused_until,
         forwards,
-        ..
+        links,
     } = reply
     else {
         let text = match reply {
@@ -125,6 +125,7 @@ pub fn run_status(args: StatusArgs, out: &mut impl Write, err: &mut impl Write) 
         config_file_exists,
         paused,
         paused_until,
+        links: links.into_iter().map(StatusLink::from).collect(),
         forwards,
     };
     let written = if args.json {
@@ -151,7 +152,39 @@ struct StatusView {
     paused: bool,
     /// When a `rowser pause --for` ends, in seconds since the Unix epoch.
     paused_until: Option<u64>,
+    /// One entry for each Saved host, in Host alias order.
+    links: Vec<StatusLink>,
     forwards: Vec<ForwardInfo>,
+}
+
+/// One Link in `rowser status`: a `LinkInfo` with the versions as text.
+#[derive(Serialize)]
+struct StatusLink {
+    host: String,
+    state: crate::protocol::LinkState,
+    /// When the Link took this state, in seconds since the Unix epoch.
+    since: u64,
+    last_connected: Option<u64>,
+    /// The Outpost's protocol version, such as `2.0`.
+    outpost_version: Option<String>,
+    /// The Outpost's rowser version, such as `1.0.0`.
+    outpost_rowser_version: Option<String>,
+    /// The Target of the Saved host's Route.
+    target: Option<String>,
+}
+
+impl From<LinkInfo> for StatusLink {
+    fn from(l: LinkInfo) -> StatusLink {
+        StatusLink {
+            host: l.host,
+            state: l.state,
+            since: l.since,
+            last_connected: l.last_connected,
+            outpost_version: l.outpost_version.map(|v| v.to_string()),
+            outpost_rowser_version: l.outpost_rowser_version,
+            target: l.target,
+        }
+    }
 }
 
 fn write_text(out: &mut impl Write, s: &StatusView) -> std::io::Result<()> {
@@ -170,6 +203,14 @@ fn write_text(out: &mut impl Write, s: &StatusView) -> std::io::Result<()> {
         (true, Some(u)) => format!("yes, until {}", local_time(u)),
     };
     writeln!(out, "paused:            {paused}")?;
+    if s.links.is_empty() {
+        writeln!(out, "links:             none")?;
+    } else {
+        writeln!(out, "links:")?;
+        for l in &s.links {
+            writeln!(out, "  {}", status_link_line(l))?;
+        }
+    }
     if s.forwards.is_empty() {
         return writeln!(out, "callback forwards: none");
     }
@@ -178,6 +219,19 @@ fn write_text(out: &mut impl Write, s: &StatusView) -> std::io::Result<()> {
         writeln!(out, "  {}  {}  {}", f.port, f.host, age(f.age_secs))?;
     }
     Ok(())
+}
+
+/// `g14  connected  since <time>  outpost 1.0.0  target safari`: one Link
+/// in `rowser status`, with the Outpost's rowser version.
+fn status_link_line(l: &StatusLink) -> String {
+    format!(
+        "{}  {}  since {}  outpost {}  target {}",
+        l.host,
+        l.state.label(),
+        local_time(l.since),
+        l.outpost_rowser_version.as_deref().unwrap_or("-"),
+        l.target.as_deref().unwrap_or("-"),
+    )
 }
 
 /// An age as `42s`, `3m 05s` or `1h 02m`.

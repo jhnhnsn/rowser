@@ -395,6 +395,10 @@ pub struct LinkInfo {
     /// connection.
     #[serde(default)]
     pub outpost_rowser_version: Option<String>,
+    /// The Target of this Saved host's Route (`Routes::host_target`), as
+    /// `rowser status` shows it. The Daemon sets it in each `StatusReply`.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 /// This build's rowser version, as a `Pong` gives it.

@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/script.rs"]
+mod script;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -8,7 +10,7 @@ use rowser::browsers::{Os, Roots};
 use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
 use rowser::daemon::{bind_sockets, Daemon, DaemonConfig};
 use rowser::doctor::{run_doctor, DoctorEnv, FIX};
-use rowser::protocol::{Conn, Hello, Msg, Version};
+use rowser::protocol::{Conn, Hello, LinkInfo, LinkState, Msg, Version, CONTROL_SOCKET};
 use tokio::net::UnixListener;
 
 /// A home whose PATH and BROWSER checks pass.
@@ -59,6 +61,8 @@ fn env(dir: &TmpDir, over: Option<PathBuf>) -> DoctorEnv<Vec<u8>> {
         // Missing: no Local checks unless a test adds them.
         config_file: Ok(dir.0.join("cfg/rowser/config.toml")),
         runtime_dir: Ok(dir.0.join("rt")),
+        // Missing: no installed service unless a test writes one.
+        service_file: Ok(dir.0.join("svc/rowser.service")),
         browser_roots: empty_roots(dir),
         ssh: false,
         stdout: Vec::new(),
@@ -229,6 +233,7 @@ async fn local_daemon_answers_with_its_version() {
     );
     assert!(line(&out, "config").starts_with("ok   config: no file at "));
     assert!(!out.iter().any(|l| l.contains("tunnel")), "{out:?}");
+    assert!(!out.iter().any(|l| l.contains("ok   link:")), "{out:?}");
 }
 
 #[tokio::test]
@@ -239,7 +244,7 @@ async fn ssh_runs_the_remote_checks_too() {
     assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
     let out = lines(e);
     assert!(line(&out, "config").starts_with("ok   "), "{out:?}");
-    assert!(line(&out, "tunnel").starts_with("fail "), "{out:?}");
+    assert!(line(&out, "link").starts_with("fail "), "{out:?}");
 }
 
 fn lines(env: DoctorEnv<Vec<u8>>) -> Vec<String> {
@@ -269,9 +274,14 @@ async fn round_trip_against_a_daemon_is_ok_and_exits_0() {
     assert_eq!(out.len(), 9, "{out:?}");
     assert!(out.iter().all(|l| l.starts_with("ok ")), "{out:?}");
     assert_eq!(
-        line(&out, "tunnel"),
-        format!("ok   tunnel: {}: daemon protocol 2.0", socket.display())
+        line(&out, "link"),
+        format!(
+            "ok   link: {}: daemon rowser {} (protocol 2.0)",
+            socket.display(),
+            env!("CARGO_PKG_VERSION")
+        )
     );
+    assert!(!out.iter().any(|l| l.contains("tunnel")), "{out:?}");
     assert_eq!(
         line(&out, "version"),
         "ok   version: daemon and this rowser speak 2.0"
@@ -351,13 +361,13 @@ async fn a_graphical_session_without_a_real_xdg_open_warns() {
 }
 
 #[tokio::test]
-async fn no_tunnel_fails_clearly_and_exits_1() {
+async fn no_link_fails_clearly_and_exits_1() {
     let dir = TmpDir::new("doc");
     let mut e = env(&dir, Some(dir.0.join("missing.sock")));
     assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
     assert_eq!(
         lines(e).last().unwrap(),
-        "fail tunnel: no Link to your Local machine; run \"rowser host add <host>\" there, \
+        "fail link: no Link to your Local machine; run \"rowser host add <host>\" there, \
          or check \"rowser host list\""
     );
 }
@@ -419,7 +429,307 @@ async fn major_version_mismatch_fails_and_exits_1() {
         ),
         "{out:?}"
     );
-    assert!(!out.iter().any(|l| l.contains("no tunnel")), "{out:?}");
+    assert!(!out.iter().any(|l| l.starts_with("fail link")), "{out:?}");
+}
+
+#[tokio::test]
+async fn the_no_default_browser_marker_skips_the_default_browser_checks() {
+    let dir = TmpDir::new("dn");
+    let sock = dir.0.join("ok.sock");
+    fake_daemon(sock.clone(), Version::new(2, 0));
+    let mut e = env(&dir, Some(sock));
+    let home = e.home.clone().unwrap();
+    // A host added with --no-default-browser: no symlinks, no setup files.
+    std::fs::remove_dir_all(home.join(".config")).unwrap();
+    std::fs::remove_dir_all(home.join(".local/share")).unwrap();
+    for n in rowser::platform::BROWSER_NAMES {
+        std::fs::remove_file(home.join(".local/bin").join(n)).unwrap();
+    }
+    e.browser = None;
+    let marker = home.join(rowser::remote_install::NO_DEFAULT_BROWSER_MARKER);
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, "").unwrap();
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    assert!(!out.iter().any(|l| l.starts_with("warn")), "{out:?}");
+    for name in [
+        "PATH",
+        "symlinks",
+        "BROWSER",
+        "environment.d",
+        "rowser.desktop",
+    ] {
+        assert!(
+            !out.iter().any(|l| l[5..].starts_with(&format!("{name}: "))),
+            "{name}: {out:?}"
+        );
+    }
+    assert_eq!(
+        line(&out, "default browser"),
+        format!(
+            "ok   default browser: not checked: {} says rowser was installed \
+             with --no-default-browser",
+            marker.display()
+        )
+    );
+    assert!(line(&out, "link").starts_with("ok   "), "{out:?}");
+}
+
+/// An Outpost socket folder `dir/o` with `dir_mode`, and a fake Daemon on
+/// its `outpost.sock` with `sock_mode`.
+fn outpost_socket(dir: &TmpDir, dir_mode: u32, sock_mode: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let o = dir.0.join("o");
+    std::fs::create_dir_all(&o).unwrap();
+    std::fs::set_permissions(&o, std::fs::Permissions::from_mode(dir_mode)).unwrap();
+    let sock = o.join("outpost.sock");
+    fake_daemon(sock.clone(), Version::new(2, 0));
+    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(sock_mode)).unwrap();
+    sock
+}
+
+#[tokio::test]
+async fn an_outpost_socket_of_this_user_with_private_modes_is_ok() {
+    let dir = TmpDir::new("do");
+    let sock = outpost_socket(&dir, 0o700, 0o600);
+    let mut e = env(&dir, None);
+    e.outpost_socket = Some(sock.clone());
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    assert_eq!(
+        line(&out, "outpost socket"),
+        format!(
+            "ok   outpost socket: {} belongs to you, mode 0600, in a folder with mode 0700",
+            sock.display()
+        )
+    );
+    assert!(line(&out, "link").starts_with("ok   "), "{out:?}");
+}
+
+#[tokio::test]
+async fn an_outpost_socket_in_a_folder_others_can_read_fails() {
+    let dir = TmpDir::new("dO");
+    let sock = outpost_socket(&dir, 0o755, 0o600);
+    let mut e = env(&dir, None);
+    e.outpost_socket = Some(sock.clone());
+    assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
+    let out = lines(e);
+    assert_eq!(
+        line(&out, "outpost socket"),
+        format!(
+            "fail outpost socket: {} has mode 755; it must be 0700; the Shim does not use \
+             this socket",
+            sock.parent().unwrap().display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn an_outpost_socket_that_others_can_use_fails() {
+    let dir = TmpDir::new("dp");
+    let sock = outpost_socket(&dir, 0o700, 0o666);
+    let mut e = env(&dir, None);
+    e.outpost_socket = Some(sock.clone());
+    assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
+    let out = lines(e);
+    assert_eq!(
+        line(&out, "outpost socket"),
+        format!(
+            "fail outpost socket: {} has mode 0666, not 0600",
+            sock.display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn rowser_socket_skips_the_outpost_socket_check() {
+    let dir = TmpDir::new("dr");
+    let sock = dir.0.join("ok.sock");
+    fake_daemon(sock.clone(), Version::new(2, 0));
+    let mut e = env(&dir, Some(sock));
+    // An Outpost socket folder others can read, which ROWSER_SOCKET skips.
+    e.outpost_socket = Some(outpost_socket(&dir, 0o755, 0o666));
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    assert!(!out.iter().any(|l| l.contains("outpost socket")), "{out:?}");
+}
+
+#[tokio::test]
+async fn an_installed_service_with_confirm_unverified_warns() {
+    let dir = TmpDir::new("dv");
+    let mut e = local_env(&dir, "");
+    let unit = dir.0.join("svc/rowser.service");
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    std::fs::write(
+        &unit,
+        "[Service]\nExecStart=\"/usr/bin/rowser\" daemon \"--confirm-unverified\"\n",
+    )
+    .unwrap();
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    assert_eq!(
+        line(&out, "service"),
+        format!(
+            "warn service: {} still has --confirm-unverified, which is removed; \
+             the daemon does not start with it; run `rowser daemon install` again",
+            unit.display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn an_installed_service_without_confirm_unverified_is_ok() {
+    let dir = TmpDir::new("dV");
+    let mut e = local_env(&dir, "");
+    let unit = dir.0.join("svc/rowser.service");
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    std::fs::write(&unit, "[Service]\nExecStart=\"/usr/bin/rowser\" daemon\n").unwrap();
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    assert_eq!(
+        line(&out, "service"),
+        format!("ok   service: {}", unit.display())
+    );
+    // No service file: no line.
+    let dir = TmpDir::new("dW");
+    let mut e = local_env(&dir, "");
+    let _ = run_doctor(&mut e).await;
+    assert!(!lines(e).iter().any(|l| l.contains("service:")));
+}
+
+/// A fake Daemon on the control socket in `run` that answers `Status` with
+/// `links`.
+fn fake_control(run: &std::path::Path, links: Vec<LinkInfo>) {
+    std::fs::create_dir_all(run).unwrap();
+    let listener = UnixListener::bind(run.join(CONTROL_SOCKET)).unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let links = links.clone();
+            tokio::spawn(async move {
+                let Ok((mut conn, _)) = Conn::accept(stream).await else {
+                    return;
+                };
+                if let Ok(Some(Msg::Status)) = conn.recv().await {
+                    let _ = conn
+                        .send(&Msg::StatusReply {
+                            daemon_version: "9.9.9".into(),
+                            protocol_version: Version::new(2, 0),
+                            config_file: None,
+                            config_file_exists: false,
+                            paused: false,
+                            paused_until: None,
+                            forwards: vec![],
+                            links,
+                        })
+                        .await;
+                }
+            });
+        }
+    });
+}
+
+fn link(host: &str, state: LinkState) -> LinkInfo {
+    LinkInfo {
+        host: host.into(),
+        state,
+        since: 1,
+        last_connected: None,
+        outpost_version: None,
+        outpost_rowser_version: None,
+        target: None,
+    }
+}
+
+/// A fake `ssh` in `dir/fakebin` that never reaches a host: it logs its
+/// arguments to `dir/ssh-args` and fails (exit 255) for the host `bad`.
+fn fake_ssh(dir: &TmpDir) -> std::ffi::OsString {
+    let bin = dir.0.join("fakebin");
+    std::fs::create_dir_all(&bin).unwrap();
+    script::write_script(
+        &bin.join("ssh"),
+        &format!(
+            "printf '%s\\n' \"$*\" >> {}\n\
+             case \"$3\" in bad) echo 'bad: Permission denied (publickey).' >&2; exit 255;; esac\n\
+             exit 0",
+            dir.0.join("ssh-args").display()
+        ),
+    );
+    bin.into_os_string()
+}
+
+const HOSTS: &str = "[[host]]\nname = \"bad\"\n[[host]]\nname = \"g14\"\n\
+                     [[host]]\nname = \"new\"\n[[host]]\nname = \"old\"\n\
+                     [[host]]\nname = \"pi\"\n";
+
+#[tokio::test]
+async fn local_doctor_reports_each_saved_hosts_link_and_ssh_login() {
+    let dir = TmpDir::new("dh");
+    fake_control(
+        &dir.0.join("rt"),
+        vec![
+            link("bad", LinkState::NeedsLogin),
+            link("g14", LinkState::Connected),
+            link("old", LinkState::VersionMismatch),
+            link("pi", LinkState::Connecting),
+        ],
+    );
+    let mut e = local_env(&dir, HOSTS);
+    e.path = Some(fake_ssh(&dir));
+    assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
+    let out = lines(e);
+    let hosts: Vec<&String> = out.iter().filter(|l| l[5..].starts_with("host ")).collect();
+    assert_eq!(
+        hosts,
+        vec![
+            "warn host bad: the Link needs login; run `rowser host connect bad`",
+            "fail host bad: `ssh -o BatchMode=yes bad true` failed (exit status: 255): \
+             bad: Permission denied (publickey).",
+            "ok   host g14: the Link is connected",
+            "ok   host g14: `ssh -o BatchMode=yes g14 true` succeeds",
+            "warn host new: the daemon has no Link to new; run `rowser reload`",
+            "ok   host new: `ssh -o BatchMode=yes new true` succeeds",
+            "warn host old: the Link has a version mismatch; run `rowser remote install old`",
+            "ok   host old: `ssh -o BatchMode=yes old true` succeeds",
+            "warn host pi: the Link is connecting",
+            "ok   host pi: `ssh -o BatchMode=yes pi true` succeeds",
+        ],
+        "{out:?}"
+    );
+    let args = std::fs::read_to_string(dir.0.join("ssh-args")).unwrap();
+    assert_eq!(
+        args,
+        "-o BatchMode=yes bad true\n-o BatchMode=yes g14 true\n-o BatchMode=yes new true\n\
+         -o BatchMode=yes old true\n-o BatchMode=yes pi true\n"
+    );
+}
+
+#[tokio::test]
+async fn local_doctor_without_a_daemon_still_checks_ssh() {
+    let dir = TmpDir::new("dH");
+    let mut e = local_env(&dir, "[[host]]\nname = \"g14\"\n");
+    e.path = Some(fake_ssh(&dir));
+    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    let out = lines(e);
+    let hosts: Vec<&String> = out.iter().filter(|l| l[5..].starts_with("host ")).collect();
+    assert_eq!(
+        hosts,
+        vec!["ok   host g14: `ssh -o BatchMode=yes g14 true` succeeds"],
+        "{out:?}"
+    );
+}
+
+#[tokio::test]
+async fn local_doctor_without_ssh_on_path_fails_for_each_saved_host() {
+    let dir = TmpDir::new("dS");
+    let mut e = local_env(&dir, "[[host]]\nname = \"g14\"\n");
+    e.path = Some(dir.0.join("empty-bin").into_os_string());
+    assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
+    let out = lines(e);
+    assert_eq!(
+        line(&out, "host g14"),
+        "fail host g14: cannot run `ssh -o BatchMode=yes g14 true`: ssh is not on PATH"
+    );
 }
 
 #[tokio::test]

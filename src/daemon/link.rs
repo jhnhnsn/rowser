@@ -62,6 +62,7 @@ pub(super) fn new_status(host: &str) -> LinkStatus {
         last_connected: None,
         outpost_version: None,
         outpost_rowser_version: None,
+        target: None,
     }))
 }
 

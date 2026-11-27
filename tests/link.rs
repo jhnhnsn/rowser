@@ -282,6 +282,86 @@ async fn routes_on_the_link_use_the_host_alias() {
     );
 }
 
+/// Runs `rowser status` against the Daemon in `dir`; gives (exit, stdout).
+async fn status(dir: &Path, json: bool) -> (ExitCode, String) {
+    let run = dir.join("run");
+    tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let args = rowser::control::StatusArgs {
+            runtime_dir: Ok(run),
+            json,
+        };
+        let code = rowser::control::run_status(args, &mut out, &mut err);
+        (code, String::from_utf8(out).unwrap())
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_shows_each_link_with_its_state_outpost_and_target() {
+    let dir = TmpDir::new("ls");
+    let file = dir.0.join("config.toml");
+    std::fs::write(&file, "[[route]]\nhost = \"g14\"\nopen = \"safari\"\n").unwrap();
+    let w = World::start_with(
+        "",
+        DaemonConfig {
+            hosts: vec![saved_host("g14")],
+            routes: Routes::from_config(&rowser::config::load(&file).unwrap()),
+            ..DaemonConfig::default()
+        },
+    );
+    w.wait_connected().await;
+    // The Daemon marks the Link connected after the Outpost's Pong.
+    let out = status_until(&w.dir.0, |o| o.contains("  g14  connected  since ")).await;
+    let lines: Vec<&str> = out.lines().collect();
+    let at = lines.iter().position(|l| *l == "links:").expect(&out);
+    let g14 = lines[at + 1];
+    assert!(g14.starts_with("  g14  connected  since "), "{out}");
+    assert!(
+        g14.ends_with(&format!(
+            "  outpost {}  target safari",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{out}"
+    );
+    assert!(lines[at + 2].starts_with("callback forwards"), "{out}");
+
+    let (code, json) = status(&w.dir.0, true).await;
+    assert_eq!(code, ExitCode::SUCCESS);
+    let v: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+    let link = &v["links"][0];
+    assert_eq!(link["host"], "g14", "{v}");
+    assert_eq!(link["state"], "connected", "{v}");
+    assert!(link["since"].as_u64().unwrap() > 0, "{v}");
+    assert_eq!(link["outpost_rowser_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(link["outpost_version"], "2.0", "{v}");
+    assert_eq!(link["target"], "safari", "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_without_saved_hosts_says_no_links() {
+    let w = World::start_with("", DaemonConfig::default());
+    let out = status_until(&w.dir.0, |o| !o.is_empty()).await;
+    assert!(out.contains("\nlinks:             none\n"), "{out}");
+    let v: serde_json::Value = serde_json::from_str(&status(&w.dir.0, true).await.1).unwrap();
+    assert_eq!(v["links"], serde_json::json!([]), "{v}");
+}
+
+/// The `rowser status` text once `done` is true for it, at most 20 s.
+async fn status_until(dir: &Path, done: impl Fn(&str) -> bool) -> String {
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        let out = status(dir, false).await.1;
+        if done(&out) || Instant::now() >= end {
+            assert!(done(&out), "{out}");
+            return out;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn confirm_hosts_on_the_link_match_the_host_alias() {
     let dir = TmpDir::new("lc");

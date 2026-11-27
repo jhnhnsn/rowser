@@ -212,18 +212,34 @@ the remote checks inside an SSH session or when neither side is found:
 rowser doctor
 ```
 
-It warns when the browser symlinks in `~/.local/bin` do not resolve to rowser, when
-`~/.local/bin` is not before `/usr/bin` on `PATH` or `BROWSER` is not set or does not resolve to rowser, and
-does a live round trip to the daemon. It also checks the default-browser setup: that
-`rowser.conf` sets `BROWSER=rowser` and `PATH`, that `rowser.desktop` exists and is the default
-for `http` and `https` (from `xdg-mime query default`, else `mimeapps.list`), and, with a
-graphical session, that a real `xdg-open` exists for the fallback (see Usage). Each failed
-check prints one warning with its fix.
+On the remote host, it checks the Outpost socket (that it and its folder belong to you, the
+folder with mode 0700 and the socket with mode 0600) and does a live round trip through the
+Link to the daemon (`link`, with the daemon's version). It warns when the browser symlinks in
+`~/.local/bin` do not resolve to rowser, when `~/.local/bin` is not before `/usr/bin` on `PATH`
+or `BROWSER` is not set or does not resolve to rowser. It also checks the default-browser
+setup: that `rowser.conf` sets `BROWSER=rowser` and `PATH`, that `rowser.desktop` exists and is
+the default for `http` and `https` (from `xdg-mime query default`, else `mimeapps.list`), and,
+with a graphical session, that a real `xdg-open` exists for the fallback (see Usage). Each
+failed check prints one warning with its fix. On a host installed with `--no-default-browser`
+(the marker `~/.local/share/rowser/no-default-browser`), it skips the symlinks, `PATH`,
+`BROWSER` and default-browser checks.
 
 On the local machine, `rowser doctor` checks that the config file parses (or prints the file and
 line of the error), that the browser and Profile of each Route and of `[default]` exist (and
-where the request falls back if not), and that the daemon answers, with its version. It warns
-once when the file still has an `[unverified]` entry, which is ignored.
+where the request falls back if not), and that the daemon answers, with its version. For each
+Saved host it prints the Link state (with the fix for `needs login` and `version mismatch`) and
+whether `ssh -o BatchMode=yes <host> true` succeeds. It warns once when the file still has an
+`[unverified]` entry, which is ignored, and when the installed service still runs the daemon
+with the removed `--confirm-unverified` (run `rowser daemon install` again).
+
+```
+ok   config: /home/me/.config/rowser/config.toml parses; 2 routes
+ok   routes: every browser Target is found
+ok   daemon: rowser 1.0.0 answers on /run/user/1000/rowser (protocol 2.0)
+ok   service: /home/me/.config/systemd/user/rowser.service
+ok   host g14: the Link is connected
+ok   host g14: `ssh -o BatchMode=yes g14 true` succeeds
+```
 
 ## Usage
 
@@ -465,14 +481,22 @@ rowser status            # --json for one JSON object
 ```
 
 ```
-daemon version:    0.1.0
-protocol version:  1.1
+daemon version:    1.0.0
+protocol version:  2.0
 runtime directory: /run/user/1000/rowser
 config file:       /home/me/.config/rowser/config.toml
 paused:            no
+links:
+  g14  connected  since 2026-11-20 13:58:02  outpost 1.0.0  target chrome:Profile 2
+  pi  needs login  since 2026-11-20 13:58:03  outpost -  target system
 callback forwards:
   8085  g14  41s
 ```
+
+Each Link shows its Saved host's Host alias, Link state, since when, the Outpost's rowser
+version and the Target of its Route (the first Route for that host without `match`, else
+`[default]`). With `--json`, `links` has `host`, `state`, `since`, `last_connected`,
+`outpost_version`, `outpost_rowser_version` and `target` for each one.
 
 ### `rowser activity`
 

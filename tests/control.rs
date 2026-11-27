@@ -95,7 +95,9 @@ async fn status_shows_the_daemon_version() {
             "paused:            no".to_string(),
         ]
     );
-    assert_eq!(lines[5], "callback forwards: none");
+    // Test Links are not Saved hosts, so no Link shows.
+    assert_eq!(lines[5], "links:             none");
+    assert_eq!(lines[6], "callback forwards: none");
     assert!(!out.contains("sessions"), "{out}");
 
     let v = json_status(run.clone()).await;

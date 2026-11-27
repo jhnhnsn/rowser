@@ -12,7 +12,7 @@ use crate::config::{Config, Target};
 use crate::control::{request_async, RequestError};
 use crate::discovery::find_socket;
 use crate::platform::{find_on_path, real_xdg_open, BROWSER_NAMES, ENVIRONMENT_D_MARK};
-use crate::protocol::{Hello, Msg};
+use crate::protocol::{Hello, LinkInfo, LinkState, Msg};
 
 /// The result of one check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,15 +36,15 @@ impl Status {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Check {
     pub status: Status,
-    pub name: &'static str,
+    pub name: String,
     pub detail: String,
 }
 
 impl Check {
-    fn new(status: Status, name: &'static str, detail: impl Into<String>) -> Check {
+    fn new(status: Status, name: impl Into<String>, detail: impl Into<String>) -> Check {
         Check {
             status,
-            name,
+            name: name.into(),
             detail: detail.into(),
         }
     }
@@ -70,6 +70,9 @@ pub struct DoctorEnv<W: Write> {
     pub config_file: Result<PathBuf, String>,
     /// The Daemon's runtime directory (`platform::runtime_dir`).
     pub runtime_dir: Result<PathBuf, String>,
+    /// The service file `rowser daemon install` writes
+    /// (`service::service_file`).
+    pub service_file: Result<PathBuf, String>,
     /// Where to look for the browsers that Route Targets name.
     pub browser_roots: Roots,
     /// `SSH_CONNECTION` is set: this is a Remote host.
@@ -97,6 +100,7 @@ impl DoctorEnv<std::io::Stdout> {
                 .map(PathBuf::from),
             config_file: crate::config::path(),
             runtime_dir: crate::platform::runtime_dir(),
+            service_file: crate::service::service_file(),
             browser_roots: Roots::from_env(),
             ssh: std::env::var_os("SSH_CONNECTION").is_some_and(|v| !v.is_empty()),
             stdout: std::io::stdout(),
@@ -407,10 +411,10 @@ pub fn check_fallback(graphical: bool, path: Option<&OsStr>, self_exe: Option<&P
     }
 }
 
-/// Connects to `socket` (the Shim's socket) and sends `Ping`; reports the
-/// Daemon's protocol version and any version skew.
-pub async fn check_tunnel(socket: Option<PathBuf>) -> Vec<Check> {
-    const NAME: &str = "tunnel";
+/// Connects to `socket` (the Shim's socket) and sends `Ping` through the
+/// Link; reports the Daemon's version and any version skew.
+pub async fn check_link(socket: Option<PathBuf>) -> Vec<Check> {
+    const NAME: &str = "link";
     let mut conn = match find_socket(socket.as_deref()).await {
         Ok(conn) => conn,
         Err(e) => {
@@ -433,17 +437,24 @@ pub async fn check_tunnel(socket: Option<PathBuf>) -> Vec<Check> {
     if let Err(e) = conn.send(&Msg::Ping).await {
         return fail(format!("{}: {e}", socket.display()));
     }
-    let version = match conn.recv().await {
-        Ok(Some(Msg::Pong { version, .. })) => version,
+    let (version, rowser_version) = match conn.recv().await {
+        Ok(Some(Msg::Pong {
+            version,
+            rowser_version,
+        })) => (version, rowser_version),
         Ok(Some(other)) => return fail(format!("unexpected reply from daemon: {other:?}")),
         Ok(None) => return fail("daemon closed the connection".into()),
         Err(e) => return fail(format!("{}: {e}", socket.display())),
     };
     let ours = Hello::current().version();
+    let daemon = match rowser_version {
+        Some(v) => format!("daemon rowser {v} (protocol {version})"),
+        None => format!("daemon protocol {version}"),
+    };
     let mut out = vec![Check::new(
         Status::Ok,
         NAME,
-        format!("{}: daemon protocol {version}", socket.display()),
+        format!("{}: {daemon}", socket.display()),
     )];
     if version == ours {
         out.push(Check::new(
@@ -543,26 +554,31 @@ pub fn check_routes(config: &Config, roots: &Roots) -> Vec<Check> {
     }
 }
 
-/// The Daemon must answer `status` on the control socket.
-pub async fn check_daemon(runtime_dir: &Result<PathBuf, String>) -> Check {
+/// The Daemon must answer `status` on the control socket. Gives its Links
+/// when it does.
+pub async fn check_daemon(runtime_dir: &Result<PathBuf, String>) -> (Check, Option<Vec<LinkInfo>>) {
     const NAME: &str = "daemon";
     let dir = match runtime_dir {
         Ok(d) => d,
-        Err(e) => return Check::new(Status::Warn, NAME, e.clone()),
+        Err(e) => return (Check::new(Status::Warn, NAME, e.clone()), None),
     };
-    match request_async(dir, &Msg::Status).await {
+    let check = match request_async(dir, &Msg::Status).await {
         Ok(Msg::StatusReply {
             daemon_version,
             protocol_version,
+            links,
             ..
-        }) => Check::new(
-            Status::Ok,
-            NAME,
-            format!(
-                "rowser {daemon_version} answers on {} (protocol {protocol_version})",
-                dir.display()
-            ),
-        ),
+        }) => {
+            let c = Check::new(
+                Status::Ok,
+                NAME,
+                format!(
+                    "rowser {daemon_version} answers on {} (protocol {protocol_version})",
+                    dir.display()
+                ),
+            );
+            return (c, Some(links));
+        }
         Ok(other) => Check::new(
             Status::Fail,
             NAME,
@@ -574,7 +590,83 @@ pub async fn check_daemon(runtime_dir: &Result<PathBuf, String>) -> Check {
             "the daemon is not running; start it with `rowser daemon`",
         ),
         Err(RequestError::Other(e)) => Check::new(Status::Fail, NAME, e),
+    };
+    (check, None)
+}
+
+/// The Link state of the Saved host `host`, from the Daemon's `links`.
+pub fn check_link_state(host: &str, links: &[LinkInfo]) -> Check {
+    let name = "host";
+    let (status, detail) = match links.iter().find(|l| l.host == host).map(|l| l.state) {
+        Some(LinkState::Connected) => (Status::Ok, "the Link is connected".to_string()),
+        Some(LinkState::Connecting) => (Status::Warn, "the Link is connecting".to_string()),
+        Some(LinkState::NeedsLogin) => (
+            Status::Warn,
+            format!("the Link needs login; run `rowser host connect {host}`"),
+        ),
+        Some(LinkState::VersionMismatch) => (
+            Status::Warn,
+            format!("the Link has a version mismatch; run `rowser remote install {host}`"),
+        ),
+        None => (
+            Status::Warn,
+            format!("the daemon has no Link to {host}; run `rowser reload`"),
+        ),
+    };
+    Check::new(status, format!("{name} {host}"), detail)
+}
+
+/// `ssh -o BatchMode=yes <host> true` must succeed: the Link logs in the
+/// same way. `ssh` comes from `path`.
+pub fn check_ssh_login(host: &str, path: Option<&OsStr>) -> Check {
+    let name = format!("host {host}");
+    let shown = format!("`ssh -o BatchMode=yes {host} true`");
+    let Some(ssh) = path.and_then(|p| find_on_path(p, "ssh", |_| true)) else {
+        return Check::new(
+            Status::Fail,
+            name,
+            format!("cannot run {shown}: ssh is not on PATH"),
+        );
+    };
+    let out = std::process::Command::new(ssh)
+        .args(["-o", "BatchMode=yes", host, "true"])
+        .stdin(std::process::Stdio::null())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => Check::new(Status::Ok, name, format!("{shown} succeeds")),
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            let last = err.lines().map(str::trim).rfind(|l| !l.is_empty());
+            let detail = match last {
+                Some(l) => format!("{shown} failed ({}): {l}", o.status),
+                None => format!("{shown} failed ({})", o.status),
+            };
+            Check::new(Status::Fail, name, crate::protocol::printable(&detail))
+        }
+        Err(e) => Check::new(Status::Fail, name, format!("cannot run {shown}: {e}")),
     }
+}
+
+/// An installed service file must not have the removed
+/// `--confirm-unverified`. `None` when no service is installed.
+pub fn check_service(file: &Result<PathBuf, String>) -> Option<Check> {
+    const NAME: &str = "service";
+    let f = file.as_ref().ok()?;
+    let text = std::fs::read_to_string(f).ok()?;
+    Some(if text.contains(crate::service::REMOVED_FLAG) {
+        Check::new(
+            Status::Warn,
+            NAME,
+            format!(
+                "{} still has {}, which is removed; the daemon does not start with it; \
+                 run `rowser daemon install` again",
+                f.display(),
+                crate::service::REMOVED_FLAG
+            ),
+        )
+    } else {
+        Check::new(Status::Ok, NAME, f.display().to_string())
+    })
 }
 
 /// The socket the Shim uses: `ROWSER_SOCKET`, else the Outpost socket.
@@ -598,7 +690,7 @@ pub async fn run_doctor<W: Write>(env: &mut DoctorEnv<W>) -> ExitCode {
     if local {
         let (c, config) = check_config(&env.config_file);
         checks.push(c);
-        if let Some(config) = config {
+        if let Some(config) = &config {
             if config.has_unverified {
                 checks.push(Check::new(
                     Status::Warn,
@@ -606,9 +698,17 @@ pub async fn run_doctor<W: Write>(env: &mut DoctorEnv<W>) -> ExitCode {
                     crate::config::UNVERIFIED_IGNORED,
                 ));
             }
-            checks.extend(check_routes(&config, &env.browser_roots));
+            checks.extend(check_routes(config, &env.browser_roots));
         }
-        checks.push(check_daemon(&env.runtime_dir).await);
+        let (c, links) = check_daemon(&env.runtime_dir).await;
+        checks.push(c);
+        checks.extend(check_service(&env.service_file));
+        for h in config.iter().flat_map(|c| &c.hosts) {
+            if let Some(links) = &links {
+                checks.push(check_link_state(&h.name, links));
+            }
+            checks.push(check_ssh_login(&h.name, env.path.as_deref()));
+        }
     }
     if remote {
         remote_checks(env, &mut checks).await;
@@ -631,6 +731,38 @@ pub async fn run_doctor<W: Write>(env: &mut DoctorEnv<W>) -> ExitCode {
 
 /// Runs the Remote host checks: PATH, Shim symlinks, `BROWSER` and the rest.
 async fn remote_checks<W: Write>(env: &DoctorEnv<W>, checks: &mut Vec<Check>) {
+    let marker = env
+        .home
+        .as_ref()
+        .map(|h| h.join(crate::remote_install::NO_DEFAULT_BROWSER_MARKER))
+        .filter(|m| m.exists());
+    match marker {
+        Some(m) => checks.push(Check::new(
+            Status::Ok,
+            "default browser",
+            format!(
+                "not checked: {} says rowser was installed with --no-default-browser",
+                m.display()
+            ),
+        )),
+        None => default_browser_checks(env, checks),
+    }
+    checks.push(check_fallback(
+        env.graphical,
+        env.path.as_deref(),
+        env.self_exe.as_deref(),
+    ));
+    if env.socket_override.is_none() {
+        if let Some(c) = env.outpost_socket.as_deref().and_then(check_outpost_socket) {
+            checks.push(c);
+        }
+    }
+    checks.extend(check_link(shim_socket(env)).await);
+}
+
+/// The default-browser part: PATH, the browser symlinks, `BROWSER`, and
+/// each part of Default browser on a Remote host.
+fn default_browser_checks<W: Write>(env: &DoctorEnv<W>, checks: &mut Vec<Check>) {
     match &env.home {
         Some(home) => {
             checks.push(check_path(env.path.as_deref(), home));
@@ -655,12 +787,43 @@ async fn remote_checks<W: Write>(env: &DoctorEnv<W>, checks: &mut Vec<Check>) {
             "HOME is not set; cannot check the default browser",
         )),
     }
-    checks.push(check_fallback(
-        env.graphical,
-        env.path.as_deref(),
-        env.self_exe.as_deref(),
-    ));
-    checks.extend(check_tunnel(shim_socket(env)).await);
+}
+
+/// The Outpost socket at `path`, when it exists: its folder must belong to
+/// this user with mode 0700 (as the Shim checks), and the socket must have
+/// mode 0600. `None` for a missing socket: the `link` check reports it.
+pub fn check_outpost_socket(path: &Path) -> Option<Check> {
+    use std::os::unix::fs::PermissionsExt;
+    const NAME: &str = "outpost socket";
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if let Err(e) = crate::outpost::check_socket(path) {
+        return Some(Check::new(
+            Status::Fail,
+            NAME,
+            format!("{e}; the Shim does not use this socket"),
+        ));
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    let dir_mode = path
+        .parent()
+        .and_then(|d| std::fs::metadata(d).ok())
+        .map_or(0, |m| m.permissions().mode() & 0o777);
+    Some(if mode == 0o600 {
+        Check::new(
+            Status::Ok,
+            NAME,
+            format!(
+                "{} belongs to you, mode 0600, in a folder with mode {dir_mode:04o}",
+                path.display()
+            ),
+        )
+    } else {
+        Check::new(
+            Status::Fail,
+            NAME,
+            format!("{} has mode {mode:04o}, not 0600", path.display()),
+        )
+    })
 }
 
 /// `rowser doctor` for the binary.
