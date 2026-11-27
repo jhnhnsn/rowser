@@ -325,6 +325,17 @@ impl Inner {
         infos
     }
 
+    /// `link_infos`, each with the Target of its Saved host's Route
+    /// (`Routes::host_target`).
+    fn link_infos_with_targets(&self) -> Vec<crate::protocol::LinkInfo> {
+        let routes = self.current_routes();
+        let mut links = self.link_infos();
+        for l in &mut links {
+            l.target = Some(routes.host_target(&l.host).to_string());
+        }
+        links
+    }
+
     async fn handle(
         &self,
         stream: impl AsyncStream + 'static,

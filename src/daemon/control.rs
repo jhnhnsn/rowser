@@ -242,14 +242,7 @@ impl Inner {
             paused: paused.is_paused(),
             paused_until: paused.until(),
             forwards: self.forwards.list(),
-            links: {
-                let routes = self.current_routes();
-                let mut links = self.link_infos();
-                for l in &mut links {
-                    l.target = Some(routes.host_target(&l.host).to_string());
-                }
-                links
-            },
+            links: self.link_infos_with_targets(),
         }
     }
 }

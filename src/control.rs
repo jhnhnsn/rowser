@@ -207,8 +207,8 @@ fn write_text(out: &mut impl Write, s: &StatusView) -> std::io::Result<()> {
         writeln!(out, "links:             none")?;
     } else {
         writeln!(out, "links:")?;
-        for l in &s.links {
-            writeln!(out, "  {}", status_link_line(l))?;
+        for l in status_link_lines(&s.links) {
+            writeln!(out, "  {l}")?;
         }
     }
     if s.forwards.is_empty() {
@@ -221,17 +221,36 @@ fn write_text(out: &mut impl Write, s: &StatusView) -> std::io::Result<()> {
     Ok(())
 }
 
-/// `g14  connected  since <time>  outpost 1.0.0  target safari`: one Link
-/// in `rowser status`, with the Outpost's rowser version.
-fn status_link_line(l: &StatusLink) -> String {
-    format!(
-        "{}  {}  since {}  outpost {}  target {}",
-        l.host,
-        l.state.label(),
-        local_time(l.since),
-        l.outpost_rowser_version.as_deref().unwrap_or("-"),
-        l.target.as_deref().unwrap_or("-"),
-    )
+/// `g14  connected  since <time>  outpost 1.0.0  target safari`: one line
+/// for each Link in `rowser status`, with the Outpost's rowser version.
+/// The alias, state and outpost columns are padded to the widest value.
+fn status_link_lines(links: &[StatusLink]) -> Vec<String> {
+    let outpost = |l: &StatusLink| {
+        l.outpost_rowser_version
+            .as_deref()
+            .unwrap_or("-")
+            .to_string()
+    };
+    let host_w = links.iter().map(|l| l.host.len()).max().unwrap_or(0);
+    let state_w = links
+        .iter()
+        .map(|l| l.state.label().len())
+        .max()
+        .unwrap_or(0);
+    let outpost_w = links.iter().map(|l| outpost(l).len()).max().unwrap_or(0);
+    links
+        .iter()
+        .map(|l| {
+            format!(
+                "{:<host_w$}  {:<state_w$}  since {}  outpost {:<outpost_w$}  target {}",
+                l.host,
+                l.state.label(),
+                local_time(l.since),
+                outpost(l),
+                l.target.as_deref().unwrap_or("-"),
+            )
+        })
+        .collect()
 }
 
 /// An age as `42s`, `3m 05s` or `1h 02m`.
@@ -751,5 +770,31 @@ mod tests {
         assert_eq!(super::age(42), "42s");
         assert_eq!(super::age(185), "3m 05s");
         assert_eq!(super::age(3720), "1h 02m");
+    }
+
+    #[test]
+    fn link_rows_line_up_in_columns() {
+        use crate::protocol::LinkState;
+        let link = |host: &str, state, outpost: Option<&str>, target: &str| super::StatusLink {
+            host: host.into(),
+            state,
+            since: 0,
+            last_connected: None,
+            outpost_version: None,
+            outpost_rowser_version: outpost.map(String::from),
+            target: Some(target.into()),
+        };
+        let lines = super::status_link_lines(&[
+            link("bad", LinkState::Connecting, None, "system"),
+            link("good", LinkState::Connected, Some("1.0.0"), "safari"),
+        ]);
+        let t = super::local_time(0);
+        assert_eq!(
+            lines,
+            [
+                format!("bad   connecting  since {t}  outpost -      target system"),
+                format!("good  connected   since {t}  outpost 1.0.0  target safari"),
+            ]
+        );
     }
 }

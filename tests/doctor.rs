@@ -54,7 +54,8 @@ fn env(dir: &TmpDir, over: Option<PathBuf>) -> DoctorEnv<Vec<u8>> {
         path: Some(bin.clone().into_os_string()),
         browser: Some("xdg-open".into()),
         home: Some(home),
-        outpost_socket: Some(dir.0.join("no-outpost.sock")),
+        // No folder: the outpost socket check has nothing to report.
+        outpost_socket: Some(dir.0.join("no-outpost/outpost.sock")),
         socket_override: over,
         graphical: false,
         self_exe: Some(bin.join("rowser")),
@@ -65,6 +66,7 @@ fn env(dir: &TmpDir, over: Option<PathBuf>) -> DoctorEnv<Vec<u8>> {
         service_file: Ok(dir.0.join("svc/rowser.service")),
         browser_roots: empty_roots(dir),
         ssh: false,
+        ssh_timeout: std::time::Duration::from_secs(1),
         stdout: Vec::new(),
     }
 }
@@ -518,7 +520,8 @@ async fn an_outpost_socket_in_a_folder_others_can_read_fails() {
         line(&out, "outpost socket"),
         format!(
             "fail outpost socket: {} has mode 755; it must be 0700; the Shim does not use \
-             this socket",
+             this socket; fix: chmod 700 {}",
+            sock.parent().unwrap().display(),
             sock.parent().unwrap().display()
         )
     );
@@ -542,16 +545,56 @@ async fn an_outpost_socket_that_others_can_use_fails() {
 }
 
 #[tokio::test]
-async fn rowser_socket_skips_the_outpost_socket_check() {
+async fn a_bad_outpost_folder_fails_the_link_check_with_the_same_cause() {
+    let dir = TmpDir::new("dL");
+    let sock = outpost_socket(&dir, 0o755, 0o600);
+    let mut e = env(&dir, None);
+    e.outpost_socket = Some(sock.clone());
+    assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
+    let out = lines(e);
+    assert_eq!(
+        line(&out, "link"),
+        format!(
+            "fail link: {} has mode 755; it must be 0700; the Shim does not use {}",
+            sock.parent().unwrap().display(),
+            sock.display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn an_outpost_folder_without_a_socket_is_still_checked() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TmpDir::new("dF");
+    let o = dir.0.join("o");
+    std::fs::create_dir_all(&o).unwrap();
+    std::fs::set_permissions(&o, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut e = env(&dir, None);
+    e.outpost_socket = Some(o.join("outpost.sock"));
+    assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
+    let out = lines(e);
+    assert_eq!(
+        line(&out, "outpost socket"),
+        format!(
+            "fail outpost socket: {} has mode 755; it must be 0700; fix: chmod 700 {}",
+            o.display(),
+            o.display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn rowser_socket_still_checks_the_outpost_socket() {
     let dir = TmpDir::new("dr");
     let sock = dir.0.join("ok.sock");
     fake_daemon(sock.clone(), Version::new(2, 0));
     let mut e = env(&dir, Some(sock));
-    // An Outpost socket folder others can read, which ROWSER_SOCKET skips.
+    // An Outpost socket folder others can read: the Shim uses ROWSER_SOCKET.
     e.outpost_socket = Some(outpost_socket(&dir, 0o755, 0o666));
-    assert_eq!(run_doctor(&mut e).await, ExitCode::SUCCESS);
+    assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
     let out = lines(e);
-    assert!(!out.iter().any(|l| l.contains("outpost socket")), "{out:?}");
+    assert!(line(&out, "outpost socket").starts_with("fail "), "{out:?}");
+    assert!(line(&out, "link").starts_with("ok   "), "{out:?}");
 }
 
 #[tokio::test]
@@ -642,7 +685,8 @@ fn link(host: &str, state: LinkState) -> LinkInfo {
 }
 
 /// A fake `ssh` in `dir/fakebin` that never reaches a host: it logs its
-/// arguments to `dir/ssh-args` and fails (exit 255) for the host `bad`.
+/// arguments to `dir/ssh-args`, fails (exit 255) for the host `bad`, and
+/// does not answer for the host `slow`.
 fn fake_ssh(dir: &TmpDir) -> std::ffi::OsString {
     let bin = dir.0.join("fakebin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -650,7 +694,8 @@ fn fake_ssh(dir: &TmpDir) -> std::ffi::OsString {
         &bin.join("ssh"),
         &format!(
             "printf '%s\\n' \"$*\" >> {}\n\
-             case \"$3\" in bad) echo 'bad: Permission denied (publickey).' >&2; exit 255;; esac\n\
+             case \"$5\" in bad) echo 'bad: Permission denied (publickey).' >&2; exit 255;;\n\
+             slow) exec sleep 30;; esac\n\
              exit 0",
             dir.0.join("ssh-args").display()
         ),
@@ -696,16 +741,19 @@ async fn local_doctor_reports_each_saved_hosts_link_and_ssh_login() {
         ],
         "{out:?}"
     );
+    // The hosts run at the same time, so the log order can change.
     let args = std::fs::read_to_string(dir.0.join("ssh-args")).unwrap();
+    let mut args: Vec<&str> = args.lines().collect();
+    args.sort();
     assert_eq!(
         args,
-        "-o BatchMode=yes bad true\n-o BatchMode=yes g14 true\n-o BatchMode=yes new true\n\
-         -o BatchMode=yes old true\n-o BatchMode=yes pi true\n"
+        ["bad", "g14", "new", "old", "pi"]
+            .map(|h| format!("-o BatchMode=yes -o ConnectTimeout=10 {h} true"))
     );
 }
 
 #[tokio::test]
-async fn local_doctor_without_a_daemon_still_checks_ssh() {
+async fn local_doctor_without_a_daemon_says_each_host_has_no_link() {
     let dir = TmpDir::new("dH");
     let mut e = local_env(&dir, "[[host]]\nname = \"g14\"\n");
     e.path = Some(fake_ssh(&dir));
@@ -714,7 +762,27 @@ async fn local_doctor_without_a_daemon_still_checks_ssh() {
     let hosts: Vec<&String> = out.iter().filter(|l| l[5..].starts_with("host ")).collect();
     assert_eq!(
         hosts,
-        vec!["ok   host g14: `ssh -o BatchMode=yes g14 true` succeeds"],
+        vec![
+            "warn host g14: no Link; the daemon is not running",
+            "ok   host g14: `ssh -o BatchMode=yes g14 true` succeeds",
+        ],
+        "{out:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_ssh_login_that_does_not_answer_fails_after_the_time_limit() {
+    let dir = TmpDir::new("dT");
+    let mut e = local_env(&dir, "[[host]]\nname = \"slow\"\n");
+    e.path = Some(fake_ssh(&dir));
+    let start = std::time::Instant::now();
+    assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    let out = lines(e);
+    assert!(
+        out.contains(
+            &"fail host slow: `ssh -o BatchMode=yes slow true` failed: no answer in 1s".to_string()
+        ),
         "{out:?}"
     );
 }
@@ -726,9 +794,12 @@ async fn local_doctor_without_ssh_on_path_fails_for_each_saved_host() {
     e.path = Some(dir.0.join("empty-bin").into_os_string());
     assert_eq!(run_doctor(&mut e).await, ExitCode::FAILURE);
     let out = lines(e);
-    assert_eq!(
-        line(&out, "host g14"),
-        "fail host g14: cannot run `ssh -o BatchMode=yes g14 true`: ssh is not on PATH"
+    assert!(
+        out.contains(
+            &"fail host g14: cannot run `ssh -o BatchMode=yes g14 true`: ssh is not on PATH"
+                .to_string()
+        ),
+        "{out:?}"
     );
 }
 

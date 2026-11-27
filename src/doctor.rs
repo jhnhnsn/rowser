@@ -6,6 +6,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use crate::browsers::{Browsers, Roots};
 use crate::config::{Config, Target};
@@ -77,6 +78,8 @@ pub struct DoctorEnv<W: Write> {
     pub browser_roots: Roots,
     /// `SSH_CONNECTION` is set: this is a Remote host.
     pub ssh: bool,
+    /// How long each `ssh` login check may take (`SSH_TIMEOUT`).
+    pub ssh_timeout: Duration,
     pub stdout: W,
 }
 
@@ -103,6 +106,7 @@ impl DoctorEnv<std::io::Stdout> {
             service_file: crate::service::service_file(),
             browser_roots: Roots::from_env(),
             ssh: std::env::var_os("SSH_CONNECTION").is_some_and(|v| !v.is_empty()),
+            ssh_timeout: SSH_TIMEOUT,
             stdout: std::io::stdout(),
         }
     }
@@ -562,41 +566,53 @@ pub async fn check_daemon(runtime_dir: &Result<PathBuf, String>) -> (Check, Opti
         Ok(d) => d,
         Err(e) => return (Check::new(Status::Warn, NAME, e.clone()), None),
     };
-    let check = match request_async(dir, &Msg::Status).await {
+    match request_async(dir, &Msg::Status).await {
         Ok(Msg::StatusReply {
             daemon_version,
             protocol_version,
             links,
             ..
-        }) => {
-            let c = Check::new(
+        }) => (
+            Check::new(
                 Status::Ok,
                 NAME,
                 format!(
                     "rowser {daemon_version} answers on {} (protocol {protocol_version})",
                     dir.display()
                 ),
-            );
-            return (c, Some(links));
-        }
-        Ok(other) => Check::new(
-            Status::Fail,
-            NAME,
-            format!("unexpected reply from daemon: {other:?}"),
+            ),
+            Some(links),
         ),
-        Err(RequestError::NotRunning) => Check::new(
-            Status::Warn,
-            NAME,
-            "the daemon is not running; start it with `rowser daemon`",
+        Ok(other) => (
+            Check::new(
+                Status::Fail,
+                NAME,
+                format!("unexpected reply from daemon: {other:?}"),
+            ),
+            None,
         ),
-        Err(RequestError::Other(e)) => Check::new(Status::Fail, NAME, e),
-    };
-    (check, None)
+        Err(RequestError::NotRunning) => (
+            Check::new(
+                Status::Warn,
+                NAME,
+                "the daemon is not running; start it with `rowser daemon`",
+            ),
+            None,
+        ),
+        Err(RequestError::Other(e)) => (Check::new(Status::Fail, NAME, e), None),
+    }
 }
 
-/// The Link state of the Saved host `host`, from the Daemon's `links`.
-pub fn check_link_state(host: &str, links: &[LinkInfo]) -> Check {
-    let name = "host";
+/// The Link state of the Saved host `host`, from the Daemon's `links`;
+/// `None` when the Daemon did not answer.
+pub fn check_link_state(host: &str, links: Option<&[LinkInfo]>) -> Check {
+    let Some(links) = links else {
+        return Check::new(
+            Status::Warn,
+            format!("host {host}"),
+            "no Link; the daemon is not running",
+        );
+    };
     let (status, detail) = match links.iter().find(|l| l.host == host).map(|l| l.state) {
         Some(LinkState::Connected) => (Status::Ok, "the Link is connected".to_string()),
         Some(LinkState::Connecting) => (Status::Warn, "the Link is connecting".to_string()),
@@ -613,12 +629,13 @@ pub fn check_link_state(host: &str, links: &[LinkInfo]) -> Check {
             format!("the daemon has no Link to {host}; run `rowser reload`"),
         ),
     };
-    Check::new(status, format!("{name} {host}"), detail)
+    Check::new(status, format!("host {host}"), detail)
 }
 
 /// `ssh -o BatchMode=yes <host> true` must succeed: the Link logs in the
-/// same way. `ssh` comes from `path`.
-pub fn check_ssh_login(host: &str, path: Option<&OsStr>) -> Check {
+/// same way. `ssh` comes from `path`, with `-o ConnectTimeout=10` too; it
+/// fails with "no answer" when it runs longer than `timeout`.
+pub fn check_ssh_login(host: &str, path: Option<&OsStr>, timeout: Duration) -> Check {
     let name = format!("host {host}");
     let shown = format!("`ssh -o BatchMode=yes {host} true`");
     let Some(ssh) = path.and_then(|p| find_on_path(p, "ssh", |_| true)) else {
@@ -628,24 +645,65 @@ pub fn check_ssh_login(host: &str, path: Option<&OsStr>) -> Check {
             format!("cannot run {shown}: ssh is not on PATH"),
         );
     };
-    let out = std::process::Command::new(ssh)
-        .args(["-o", "BatchMode=yes", host, "true"])
+    let child = std::process::Command::new(ssh)
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            host,
+            "true",
+        ])
         .stdin(std::process::Stdio::null())
-        .output();
-    match out {
-        Ok(o) if o.status.success() => Check::new(Status::Ok, name, format!("{shown} succeeds")),
-        Ok(o) => {
-            let err = String::from_utf8_lossy(&o.stderr);
-            let last = err.lines().map(str::trim).rfind(|l| !l.is_empty());
-            let detail = match last {
-                Some(l) => format!("{shown} failed ({}): {l}", o.status),
-                None => format!("{shown} failed ({})", o.status),
-            };
-            Check::new(Status::Fail, name, crate::protocol::printable(&detail))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return Check::new(Status::Fail, name, format!("cannot run {shown}: {e}")),
+    };
+    // Read stderr on its own thread, so a full pipe cannot stop ssh.
+    let stderr = child.stderr.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
+            buf
+        })
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Check::new(
+                    Status::Fail,
+                    name,
+                    format!("{shown} failed: no answer in {}s", timeout.as_secs()),
+                );
+            }
+            Err(e) => return Check::new(Status::Fail, name, format!("cannot run {shown}: {e}")),
         }
-        Err(e) => Check::new(Status::Fail, name, format!("cannot run {shown}: {e}")),
+    };
+    if status.success() {
+        return Check::new(Status::Ok, name, format!("{shown} succeeds"));
     }
+    let err = stderr.and_then(|t| t.join().ok()).unwrap_or_default();
+    let err = String::from_utf8_lossy(&err);
+    let last = err.lines().map(str::trim).rfind(|l| !l.is_empty());
+    let detail = match last {
+        Some(l) => format!("{shown} failed ({status}): {l}"),
+        None => format!("{shown} failed ({status})"),
+    };
+    Check::new(Status::Fail, name, crate::protocol::printable(&detail))
 }
+
+/// How long `rowser doctor` waits for each `ssh` login check.
+pub const SSH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// An installed service file must not have the removed
 /// `--confirm-unverified`. `None` when no service is installed.
@@ -703,11 +761,23 @@ pub async fn run_doctor<W: Write>(env: &mut DoctorEnv<W>) -> ExitCode {
         let (c, links) = check_daemon(&env.runtime_dir).await;
         checks.push(c);
         checks.extend(check_service(&env.service_file));
-        for h in config.iter().flat_map(|c| &c.hosts) {
-            if let Some(links) = &links {
-                checks.push(check_link_state(&h.name, links));
-            }
-            checks.push(check_ssh_login(&h.name, env.path.as_deref()));
+        // One thread for each Saved host: each ssh check can take up to
+        // `ssh_timeout`.
+        let (path, timeout) = (env.path.as_deref(), env.ssh_timeout);
+        let logins: Vec<Check> = std::thread::scope(|s| {
+            let threads: Vec<_> = config
+                .iter()
+                .flat_map(|c| &c.hosts)
+                .map(|h| s.spawn(move || check_ssh_login(&h.name, path, timeout)))
+                .collect();
+            threads
+                .into_iter()
+                .map(|t| t.join().expect("ssh check thread"))
+                .collect()
+        });
+        for (h, login) in config.iter().flat_map(|c| &c.hosts).zip(logins) {
+            checks.push(check_link_state(&h.name, links.as_deref()));
+            checks.push(login);
         }
     }
     if remote {
@@ -752,12 +822,23 @@ async fn remote_checks<W: Write>(env: &DoctorEnv<W>, checks: &mut Vec<Check>) {
         env.path.as_deref(),
         env.self_exe.as_deref(),
     ));
-    if env.socket_override.is_none() {
-        if let Some(c) = env.outpost_socket.as_deref().and_then(check_outpost_socket) {
-            checks.push(c);
-        }
+    // The Outpost socket path comes from the UID alone, so check it even
+    // when ROWSER_SOCKET is set.
+    if let Some(c) = env.outpost_socket.as_deref().and_then(check_outpost_socket) {
+        checks.push(c);
     }
-    checks.extend(check_link(shim_socket(env)).await);
+    // Like the Shim: an existing Outpost socket that fails its owner check
+    // is not used, so the `link` check must not connect to it.
+    let refused = match (&env.socket_override, &env.outpost_socket) {
+        (None, Some(p)) if p.symlink_metadata().is_ok() => crate::outpost::check_socket(p)
+            .err()
+            .map(|e| format!("{e}; the Shim does not use {}", p.display())),
+        _ => None,
+    };
+    match refused {
+        Some(detail) => checks.push(Check::new(Status::Fail, "link", detail)),
+        None => checks.extend(check_link(shim_socket(env)).await),
+    }
 }
 
 /// The default-browser part: PATH, the browser symlinks, `BROWSER`, and
@@ -789,20 +870,32 @@ fn default_browser_checks<W: Write>(env: &DoctorEnv<W>, checks: &mut Vec<Check>)
     }
 }
 
-/// The Outpost socket at `path`, when it exists: its folder must belong to
-/// this user with mode 0700 (as the Shim checks), and the socket must have
-/// mode 0600. `None` for a missing socket: the `link` check reports it.
+/// The Outpost socket at `path`, when its folder exists: the folder must
+/// belong to this user with mode 0700 (as the Shim checks), and the socket
+/// must have mode 0600. `None` for a missing folder, or a good folder with
+/// no socket: the `link` check reports those.
 pub fn check_outpost_socket(path: &Path) -> Option<Check> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     const NAME: &str = "outpost socket";
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if let Err(e) = crate::outpost::check_socket(path) {
-        return Some(Check::new(
-            Status::Fail,
-            NAME,
-            format!("{e}; the Shim does not use this socket"),
-        ));
+    let dir = path.parent()?;
+    let dir_meta = std::fs::symlink_metadata(dir).ok()?;
+    let sock_meta = std::fs::symlink_metadata(path).ok();
+    let checked = match sock_meta {
+        Some(_) => crate::outpost::check_socket(path),
+        None => crate::outpost::check_socket_dir(dir),
+    };
+    if let Err(e) = checked {
+        let mut detail = e;
+        if sock_meta.is_some() {
+            detail.push_str("; the Shim does not use this socket");
+        }
+        let dir_mode = dir_meta.permissions().mode() & 0o777;
+        if dir_meta.is_dir() && dir_meta.uid() == crate::outpost::euid() && dir_mode != 0o700 {
+            detail.push_str(&format!("; fix: chmod 700 {}", dir.display()));
+        }
+        return Some(Check::new(Status::Fail, NAME, detail));
     }
+    let meta = sock_meta?;
     let mode = meta.permissions().mode() & 0o777;
     let dir_mode = path
         .parent()

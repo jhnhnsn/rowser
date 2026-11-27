@@ -34,7 +34,7 @@ pub const TEST_DIR_VAR: &str = "ROWSER_TEST_OUTPOST_DIR";
 /// so a test can play an older Outpost.
 pub const TEST_VERSION_VAR: &str = "ROWSER_TEST_OUTPOST_VERSION";
 
-fn euid() -> u32 {
+pub(crate) fn euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() }
 }
@@ -87,7 +87,20 @@ pub fn prepare_dir(dir: &Path) -> Result<(), String> {
 /// must belong to the current user. Another user who made the folder first
 /// gets no URLs (ADR 0010).
 pub fn check_socket(path: &Path) -> Result<(), String> {
-    let dir = path.parent().unwrap_or(Path::new("/"));
+    check_socket_dir(path.parent().unwrap_or(Path::new("/")))?;
+    let sock = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if sock.uid() != euid() {
+        return Err(format!(
+            "{} does not belong to the current user",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// The folder part of `check_socket`: `dir` must be a folder of the current
+/// user with mode 0700.
+pub fn check_socket_dir(dir: &Path) -> Result<(), String> {
     let meta = std::fs::symlink_metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     if !meta.is_dir() {
         return Err(format!("{} is not a folder", dir.display()));
@@ -103,13 +116,6 @@ pub fn check_socket(path: &Path) -> Result<(), String> {
         return Err(format!(
             "{} has mode {mode:03o}; it must be 0700",
             dir.display()
-        ));
-    }
-    let sock = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if sock.uid() != euid() {
-        return Err(format!(
-            "{} does not belong to the current user",
-            path.display()
         ));
     }
     Ok(())

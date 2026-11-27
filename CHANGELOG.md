@@ -10,9 +10,11 @@ All notable changes to rowser are listed here. The format follows
 
 - `rowser status` lists the Links: each Saved host's Host alias, Link state, since when, Outpost
   version and Route Target (`links` in `--json`). `rowser doctor` on the Local machine prints
-  each Saved host's Link state and whether `ssh -o BatchMode=yes <host> true` succeeds, and
-  warns when the installed service still has `--confirm-unverified`. On a Remote host it checks
-  the Outpost socket's owner and modes, and it skips the default-browser checks on a host
+  each Saved host's Link state and whether `ssh -o BatchMode=yes <host> true` succeeds (all
+  hosts at once, failing with "no answer" after 15 seconds), and warns when the installed
+  service still has `--confirm-unverified`. On a Remote host it checks the Outpost socket's
+  owner and modes (also with `ROWSER_SOCKET` set, and a folder with no socket), fails `link`
+  when the Shim does not use the Outpost socket, and it skips the default-browser checks on a host
   installed with `--no-default-browser`. The round-trip check is now named `link` (was
   `tunnel`). ([#83](https://github.com/jhnhnsn/rowser/issues/83))
 - `rowser host add` installs rowser on the host when it is missing or has another version.

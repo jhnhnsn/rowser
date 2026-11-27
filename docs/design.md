@@ -65,8 +65,8 @@ Control messages (protocol 1.1, control socket only; `Msg::is_control` names the
 stream answers them with an `OpenResult` error and closes): `Status`,
 `StatusReply{daemon_version, protocol_version, config_file?, config_file_exists, paused,
 paused_until?, forwards: [ForwardInfo{port, host, age_secs}], links: [LinkInfo{host, state, since,
-last_connected?, outpost_version?, outpost_rowser_version?}]}` (2.0: one entry for each Saved
-host), `Reconnect{host}` (2.0, `rowser host connect`; the reply is `Reconnected{host}`, or an
+last_connected?, outpost_version?, outpost_rowser_version?, target?}]}` (2.0: one entry for each Saved
+host; the Daemon sets `target` from `Routes::host_target`), `Reconnect{host}` (2.0, `rowser host connect`; the reply is `Reconnected{host}`, or an
 `OpenResult` error when the Daemon has no Link to `host`), `Reload` (the Daemon reads the config file again; the reply is `Reloaded{routes}` with the number
 of Routes, or an `OpenResult` error with the file, line and reason, and the old Routes stay).
 `Activity{follow}` (`rowser activity`; the reply is `ActivityReply{entries: [ActivityEntry]}`,
@@ -272,7 +272,7 @@ route ─► config, routes, control
 daemon ─► protocol, remote_install
 host ─► config, control, protocol, remote_install, daemon (control_path_option)
 shim ─► protocol, discovery, detect
-doctor ─► config, browsers, control, discovery, protocol, platform
+doctor ─► config, browsers, control, discovery, protocol, platform, service, outpost, remote_install
 remote_install ─► platform, control, protocol
 discovery ─► protocol
 ```
@@ -347,6 +347,8 @@ src/
   is the one helper for every control command; `RequestError::NotRunning` prints
   `rowser: the daemon is not running`. `control::run_status(StatusArgs, out, err)` is
   `rowser status`; the runtime directory comes from `platform::runtime_dir`, as for `rowser daemon`.
+  It shows each Link from `StatusReply.links` with its state, Outpost rowser version and Target,
+  in padded columns.
   `open_control(runtime_dir)` connects and does the handshake for `request` and for
   `rowser activity --follow`, which keeps its connection open.
 - `rowser activity`: `daemon/activity.rs` keeps the ring (200 entries) and a broadcast channel
@@ -383,11 +385,17 @@ src/
   (types and `Browsers::normalize`); `browsers ─► config` (`Target`). For `doctor`, see
   Dependency direction.
 - `rowser doctor` on the Local machine: `DoctorEnv` also carries `config_file`, `runtime_dir`,
-  `browser_roots` and `ssh` (`SSH_CONNECTION` set). `run_doctor` runs the Local checks
-  (`check_config`, `check_routes` over every browser Target with `Browsers::normalize`,
-  `check_daemon` with `control::request_async(&Msg::Status)`) when a config file or the
-  runtime directory exists, and the Remote checks when the Shim's socket (`ROWSER_SOCKET`, else
-  the Outpost socket) exists or `ssh` is set, or when neither side is found. A Daemon that does not answer is a warning.
+  `service_file`, `outpost_socket`, `browser_roots`, `ssh` (`SSH_CONNECTION` set) and
+  `ssh_timeout`. `run_doctor` runs the Local checks (`check_config`, `check_routes` over every
+  browser Target with `Browsers::normalize`, `check_daemon` with
+  `control::request_async(&Msg::Status)`, which also returns the Daemon's Links,
+  `check_service`, and for each Saved host `check_link_state` and `check_ssh_login`, the ssh
+  checks on one thread each) when a config file or the runtime directory exists, and the Remote
+  checks when the Shim's socket (`ROWSER_SOCKET`, else the Outpost socket) exists or `ssh` is
+  set, or when neither side is found. A Daemon that does not answer is a warning. The Remote
+  checks skip the default-browser checks when the no-default-browser marker exists, always run
+  `check_outpost_socket`, and end with the `link` check (`check_link`, once named `tunnel`),
+  which fails with the same cause when the Shim does not use the Outpost socket.
 - `rowser route`: `route::run_route(RouteArgs { config_file, runtime_dir, action, browsers },
   out, err)`. Warnings go to `err`.
   `config::{add_route, remove_route, move_route}` are text-to-text edits with `toml_edit`
