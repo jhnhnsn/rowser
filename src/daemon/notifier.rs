@@ -32,13 +32,43 @@ pub enum Subject {
     Url(Url),
     /// A `rowser forward` request for these Callback ports.
     Forward(Vec<u16>),
+    /// A change of a Link's state. Never a request: it is sent with
+    /// `Notifier::notify`, never confirmed, and never pending.
+    Link(LinkEvent),
+}
+
+impl Subject {
+    /// True for a request (an Open request or a `rowser forward` request),
+    /// which can wait for a confirmation; false for a Link notice.
+    pub fn is_request(&self) -> bool {
+        !matches!(self, Subject::Link(_))
+    }
+}
+
+/// What a Link notice is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkEvent {
     /// The Link to the host cannot log in with `BatchMode`.
     NeedsLogin,
     /// The Outpost on the host has another major version: `outpost` is its
-    /// rowser version, if it gave one.
-    VersionMismatch { outpost: Option<String> },
+    /// rowser version, if it gave one. `after_update`: the automatic update
+    /// ran, but rowser at `remote_path` still has that version.
+    VersionMismatch {
+        outpost: Option<String>,
+        after_update: bool,
+    },
     /// The Daemon updated rowser on the host to `version`.
     Updated { version: String },
+}
+
+impl LinkEvent {
+    fn title(&self) -> &'static str {
+        match self {
+            LinkEvent::NeedsLogin => "Needs login",
+            LinkEvent::VersionMismatch { .. } => "Version mismatch",
+            LinkEvent::Updated { .. } => "Updated",
+        }
+    }
 }
 
 /// What the Daemon tells the user about an Open request or a `rowser
@@ -57,24 +87,20 @@ pub struct Notice {
 
 impl Notice {
     pub fn summary(&self) -> String {
-        match self.subject {
+        match &self.subject {
             Subject::Url(_) => "rowser: opened a URL".into(),
             Subject::Forward(_) => "rowser: forwarded a port".into(),
-            Subject::NeedsLogin => "rowser: needs login".into(),
-            Subject::VersionMismatch { .. } => "rowser: version mismatch".into(),
-            Subject::Updated { .. } => "rowser: updated".into(),
+            Subject::Link(e) => format!("rowser: {}", e.title().to_lowercase()),
         }
     }
 
-    /// The question of a confirmation, without the "rowser: " prefix.
+    /// The question of a confirmation, without the "rowser: " prefix. A
+    /// Link notice is never a confirmation: it gives its title.
     pub fn question(&self) -> &'static str {
-        match self.subject {
+        match &self.subject {
             Subject::Url(_) => "Open this URL?",
             Subject::Forward(_) => "Forward this port?",
-            // Never a confirmation.
-            Subject::NeedsLogin | Subject::VersionMismatch { .. } | Subject::Updated { .. } => {
-                "Log in?"
-            }
+            Subject::Link(e) => e.title(),
         }
     }
 
@@ -105,16 +131,29 @@ impl Notice {
                 let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
                 format!("forward local port {}", ports.join(", "))
             }
-            Subject::NeedsLogin => {
+            Subject::Link(LinkEvent::NeedsLogin) => {
                 format!("cannot log in; run \"rowser host connect {host}\"")
             }
-            Subject::VersionMismatch { outpost } => format!(
-                "rowser {} there, {} here; run \"rowser remote install {host}\"",
-                clean(outpost.as_deref().unwrap_or("of another version"), escape),
-                env!("CARGO_PKG_VERSION")
-            ),
-            Subject::Updated { version } => {
-                format!("updated rowser on {host} to {}", clean(version, escape))
+            Subject::Link(LinkEvent::VersionMismatch {
+                outpost,
+                after_update,
+            }) => {
+                // After an update, rowser at `remote_path` is not the one the
+                // install wrote: `host add` saves the new path.
+                let fix = if *after_update {
+                    format!("the update did not replace it; run \"rowser host add {host}\"")
+                } else {
+                    format!("run \"rowser remote install {host}\"")
+                };
+                format!(
+                    "rowser {} there, {} here; {fix}",
+                    clean(outpost.as_deref().unwrap_or("of another version"), escape),
+                    env!("CARGO_PKG_VERSION")
+                )
+            }
+            // The spec's text names the host, so no "From <host>: ".
+            Subject::Link(LinkEvent::Updated { version }) => {
+                return format!("updated rowser on {host} to {}", clean(version, escape));
             }
         };
         let mut body = format!("From {host}: {what}");

@@ -4,11 +4,14 @@
 mod release;
 #[path = "common/script.rs"]
 mod script;
+#[path = "common/toolbox.rs"]
+mod toolbox;
 
 use release::sums_line;
 use script::write_script;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use toolbox::remote_toolbox;
 
 use rowser::remote_install::{BinarySource, LocalBuild, ReleaseDownload};
 
@@ -155,27 +158,6 @@ fn fake_ssh(dir: &Path) -> PathBuf {
     bin
 }
 
-/// The remote `PATH` for the fake `ssh`: only the tools the remote script
-/// needs, linked from the real `PATH`. It never holds the real `xdg-mime`.
-fn remote_toolbox(dir: &Path) -> PathBuf {
-    let tools = dir.join("toolbox");
-    std::fs::create_dir_all(&tools).unwrap();
-    let path = std::env::var("PATH").unwrap();
-    for tool in [
-        "sh", "mkdir", "rm", "cat", "chmod", "mv", "ln", "head", "awk",
-    ] {
-        let found = std::env::split_paths(&path)
-            .map(|d| d.join(tool))
-            .find(|p| p.is_file())
-            .unwrap_or_else(|| panic!("no {tool} on PATH"));
-        let link = tools.join(tool);
-        if std::fs::symlink_metadata(&link).is_err() {
-            std::os::unix::fs::symlink(found, link).unwrap();
-        }
-    }
-    tools
-}
-
 /// A fake `xdg-mime` in `<dir>/xdg` that writes its arguments to `<dir>/xdg-mime.args`.
 fn fake_xdg_mime(dir: &Path) -> PathBuf {
     let bin = dir.join("xdg");
@@ -220,6 +202,8 @@ fn run_install_remote(
         .env("PATH", path)
         .env("FAKE_REMOTE_PATH", remote_path)
         .env("HOME", home)
+        // No Daemon runs there, so the install tells none to reconnect.
+        .env("ROWSER_RUNTIME_DIR", dir.join("run"))
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_DATA_HOME")
         .env(

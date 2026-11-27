@@ -92,7 +92,7 @@ fn run_inner(args: HostArgs, out: &mut impl Write) -> Result<(), String> {
             let text = read(&file)?;
             // Refuse an invalid file before ssh runs.
             config::parse(&text).map_err(in_file)?;
-            let remote_path = ensure_rowser(&host, default_browser, out)?;
+            let (remote_path, installed) = ensure_rowser(&host, default_browser, out)?;
             let saved = SavedHost {
                 name: host.clone(),
                 remote_path: remote_path.clone(),
@@ -103,7 +103,17 @@ fn run_inner(args: HostArgs, out: &mut impl Write) -> Result<(), String> {
             config::write(&file, &text)?;
             writeln!(out, "rowser: saved host {host} (rowser at {remote_path})").map_err(io)?;
             let note = control::reload_note(args.runtime_dir.as_deref().map_err(String::clone));
-            writeln!(out, "{note}").map_err(io)
+            writeln!(out, "{note}").map_err(io)?;
+            // A reload keeps a Link whose entry did not change, so a Link
+            // that waits in version mismatch must connect again.
+            if let (true, Ok(dir)) = (installed, &args.runtime_dir) {
+                if let Ok(Msg::Reconnected { .. }) =
+                    control::request(dir, &Msg::Reconnect { host: host.clone() })
+                {
+                    writeln!(out, "rowser: the Link to {host} connects again").map_err(io)?;
+                }
+            }
+            Ok(())
         }
         HostAction::Remove { host } => {
             let text = config::remove_host(&read(&file)?, &host).map_err(in_file)?;
@@ -238,31 +248,18 @@ fn find_rowser(host: &str) -> Result<Option<Found>, String> {
     Ok(parse_found(&stdout))
 }
 
-/// The hidden test hook: a local build for the install of `host add`, in
-/// place of the release download.
-pub const TEST_LOCAL_BUILD_VAR: &str = "ROWSER_TEST_LOCAL_BUILD";
-
-/// The binary source of an install from this machine: the release of this
-/// version (or the test hook's local build).
-pub fn install_source() -> Box<dyn crate::remote_install::BinarySource + Send + Sync> {
-    let local = std::env::var_os(TEST_LOCAL_BUILD_VAR)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from);
-    crate::remote_install::source_for(local, None)
-}
-
 /// The `remote_path` for `host`: the found rowser when its version is this
-/// one, else the path of a new install.
+/// one, else the path of a new install. True when it installed.
 fn ensure_rowser(
     host: &str,
     default_browser: bool,
     out: &mut impl Write,
-) -> Result<String, String> {
+) -> Result<(String, bool), String> {
     let found = find_rowser(host)?;
     let local = env!("CARGO_PKG_VERSION");
     if let Some(f) = &found {
         if f.version.as_deref() == Some(local) {
-            return Ok(f.path.clone());
+            return Ok((f.path.clone(), false));
         }
     }
     let why = match &found {
@@ -273,11 +270,11 @@ fn ensure_rowser(
         Some(_) => "the installed rowser gives no version".to_string(),
     };
     writeln!(out, "rowser: {why} on {host}; installing rowser {local}").map_err(io)?;
-    let source = install_source();
+    let source = crate::remote_install::source_for(crate::remote_install::test_local_build(), None);
     let installed = crate::remote_install::install(host, source.as_ref(), default_browser)
         .map_err(|e| format!("install on {host} failed: {e}"))?;
     crate::remote_install::write_report(out, host, default_browser, &installed).map_err(io)?;
-    Ok(INSTALLED_PATH.into())
+    Ok((INSTALLED_PATH.into(), true))
 }
 
 /// `g14  connected  since <time>  last connected <time>  outpost 1.0.0`: the

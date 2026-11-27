@@ -17,7 +17,9 @@ use common::TmpDir;
 use rowser::config::SavedHost;
 use rowser::control::run_reload;
 use rowser::daemon::testing::{Answer, RecordingNotifier, RecordingOpener, ScriptedNotifier};
-use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, NoticeHost, Notifier, Subject};
+use rowser::daemon::{
+    bind_sockets, Daemon, DaemonConfig, LinkEvent, NoticeHost, Notifier, Subject,
+};
 use rowser::detect::Procfs;
 use rowser::protocol::{Conn, Error, Hello, Version};
 use rowser::routes::Routes;
@@ -421,7 +423,10 @@ async fn a_login_failure_needs_login_and_stops_retries() {
     assert_eq!(w.runs().len(), 1);
     let notices = w.notifier.notices();
     assert_eq!(notices.len(), 1);
-    assert!(matches!(notices[0].subject, Subject::NeedsLogin));
+    assert!(matches!(
+        notices[0].subject,
+        Subject::Link(LinkEvent::NeedsLogin)
+    ));
     assert_eq!(notices[0].host, NoticeHost::Alias("g14".into()));
 }
 
@@ -435,7 +440,7 @@ async fn a_permission_error_of_the_remote_command_retries() {
         .notifier
         .notices()
         .iter()
-        .all(|n| !matches!(n.subject, Subject::NeedsLogin)));
+        .all(|n| !matches!(n.subject, Subject::Link(LinkEvent::NeedsLogin))));
 }
 
 #[tokio::test(flavor = "multi_thread")]

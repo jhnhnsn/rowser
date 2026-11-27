@@ -29,7 +29,7 @@ use crate::browsers::{Browsers, Roots};
 use crate::protocol::{ActivityEntry, AnsweredBy, Conn, Hello, Msg, Outcome, RequestKind};
 use crate::routes::{RequestHost, Resolved, Routes};
 use limit::Limit;
-pub use notifier::{DesktopNotifier, Dismiss, Notice, NoticeHost, Notifier, Subject};
+pub use notifier::{DesktopNotifier, Dismiss, LinkEvent, Notice, NoticeHost, Notifier, Subject};
 pub use opener::{CommandOpener, Opener};
 
 /// File name of the direct socket in the runtime directory.
@@ -629,7 +629,7 @@ impl Inner {
         let (not_approved, not_done) = match notice.subject {
             Subject::Url(_) => (NOT_APPROVED, "the URL was not opened"),
             Subject::Forward(_) => (FORWARD_NOT_APPROVED, "the port was not forwarded"),
-            Subject::NeedsLogin | Subject::VersionMismatch { .. } | Subject::Updated { .. } => {
+            Subject::Link(_) => {
                 unreachable!("a Link notice is sent with Notifier::notify, never confirmed")
             }
         };
@@ -747,7 +747,7 @@ fn paused_text(subject: &Subject) -> String {
                 .join(", ");
             format!("paused; port {ports} was not forwarded")
         }
-        Subject::NeedsLogin | Subject::VersionMismatch { .. } | Subject::Updated { .. } => {
+        Subject::Link(_) => {
             unreachable!("a Link notice is never a request, so no pause refuses it")
         }
     }
@@ -904,9 +904,7 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
         browser_roots: Some(roots),
         hosts: file.hosts.clone(),
         link_dir: dir.clone(),
-        update_local_build: std::env::var_os(crate::host::TEST_LOCAL_BUILD_VAR)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from),
+        update_local_build: crate::remote_install::test_local_build(),
         routes: Routes::from_config(&file),
         config_file: Some(config_path),
         confirm_hosts: args.confirm_hosts,

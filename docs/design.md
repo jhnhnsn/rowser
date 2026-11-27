@@ -165,7 +165,7 @@ one value.
   end, so a 1.x Shim gets the mismatch error from the Daemon. `outpost_dir()` is
   `/tmp/rowser-<uid>`, or the hidden test hook `ROWSER_TEST_OUTPOST_DIR`.
 - `daemon/link`: `Backoff` (1 s, doubles, 60 s maximum; reset after a `Pong` on a control
-  stream), `LinkState` (`Connecting`, `Connected`, `NeedsLogin`). An ssh login failure before
+  stream), `LinkState` (`Connecting`, `Connected`, `NeedsLogin`, `VersionMismatch`). An ssh login failure before
   the first connection (exit status 255 and `Permission denied (…)` on stderr, not from a
   `rowser __outpost:` line) sets `NeedsLogin`, shows one notice and stops retries.
   Requests from a Link carry the Host alias and share one rate limit for each Saved host.
@@ -173,18 +173,37 @@ one value.
 - Link status (#78): each Link task shares a `LinkStatus` (`protocol::LinkInfo`: state, since,
   last connection, the Outpost's protocol version and rowser version from its `Pong`) with the
   control handler. `LinkState` is in
-  `protocol` and adds `VersionMismatch` (a major mismatch on the first stream; the Link keeps
-  retrying with backoff). `StatusReply.links` lists them. `Msg::Reconnect { host }` aborts the
-  Link task and starts a new one at once with the same status, which also ends `NeedsLogin`.
+  `protocol` and adds `VersionMismatch` (a major mismatch on the first stream, from the
+  handshake or from the `Pong`'s `rowser_version`). `StatusReply.links` lists them.
+  `Msg::Reconnect { host }` aborts the Link task and starts a new one at once with the same
+  status, which also ends `NeedsLogin` and `VersionMismatch`.
+- Version mismatch and the automatic update (#81): with `auto_update`, the Link task runs
+  `remote_install::install_with` once (an `Ssh` with `BatchMode=yes`, `ControlMaster=no` and
+  rowser's control path; the host's `default_browser`; `DaemonConfig::update_local_build` or the
+  release download) and connects again. The `Subject::Link(LinkEvent::Updated)` notice shows
+  when that connection reaches an Outpost of this major version. When the install fails, or
+  is skipped (`auto_update = false`), or the Outpost still mismatches (`remote_path` is not
+  where the install writes), the task shows one `LinkEvent::VersionMismatch` notice
+  (`after_update` names `rowser host add <host>` in place of `rowser remote install <host>`)
+  and ends: no more attempts, as each one starts an Outpost that takes `outpost.sock`. A new
+  task ends the wait, with one more update try: `Reconnect` (sent by `rowser host connect`,
+  by `rowser remote install` and by a `host add` that installed), a changed `[[host]]` entry
+  on reload, or a Daemon restart. `rowser reload` alone keeps the waiting task.
+- `Subject::Link(LinkEvent)` (`NeedsLogin`, `VersionMismatch`, `Updated`) is never a request:
+  `Subject::is_request` is false, and it is never confirmed or pending.
 
 ### Host commands: `host` (#78)
 
-`rowser host add <host>` runs `ssh <host> exec "$SHELL" -lc 'command -v rowser'` and saves the
-last non-empty stdout line (a login-shell profile can print lines before it) as `remote_path`
-with `config::add_host`. An entry of the same name is updated in place: `remote_path` (its decor
-stays) and `default_browser` (a plain `add` means true, spec); other keys and comments stay, so
-the same `add` twice gives the same text. No path (or a name, not a path) is the error that names
-`rowser remote install <host>`. `remove` uses `config::remove_host`; a file header above the
+`rowser host add <host> [--no-default-browser]` runs `ssh <host> exec "$SHELL" -lc 'command -v
+rowser && rowser --version'` (`FIND_COMMAND`) and reads the path line and the `rowser <version>`
+line after it (a login-shell profile can print lines before them). When the path is missing (or
+a name, not a path) or the version is not this one, it runs `remote_install::install` (with the
+default-browser part unless `--no-default-browser`), and `remote_path` is
+`~/.local/bin/rowser`; else the found path. It saves the entry with `config::add_host`. An entry
+of the same name is updated in place: `remote_path` (its decor stays) and `default_browser`
+(a plain `add` means true, spec); other keys and comments stay, so the same `add` twice gives
+the same text. After an install it also sends `Reconnect`, so a Link that waits in version
+mismatch connects again. `remove` uses `config::remove_host`; a file header above the
 removed entry moves to the next table. Both then reload a running Daemon. `list` reads the file
 and the Daemon's `StatusReply.links` (`outpost <rowser version>`), or prints `daemon not
 running`, or `no Saved hosts` for an empty list. The reload note is `control::reload_note`,
@@ -247,17 +266,25 @@ wrote `~/.config/environment.d/rowser.conf` (`environment_d`, `ENVIRONMENT_D_CON
 it wrote `~/.local/share/applications/rowser.desktop` (`desktop`), and how rowser became the
 default for `http` and `https` (`default_by`: `DefaultBy::XdgMime`, `DefaultBy::MimeappsList`,
 or none). A kept user file, a failed write or a failed `xdg-mime` is a warning, not an error.
+`install(host, source, default_browser)` uses the `ssh` on `PATH`; `install_with(&Ssh, …)` takes
+an `Ssh { program, options }` (the options go before `-- <host>`), which the Daemon's automatic
+update uses. Without `default_browser` (`--no-default-browser`) the remote script installs only
+the binary and writes the marker `NO_DEFAULT_BROWSER_MARKER`; a full install removes it.
+`source_for(local_build, release_url)` picks the `BinarySource`; `test_local_build()` reads the
+hidden `ROWSER_TEST_LOCAL_BUILD` hook for `host add` and the Daemon. After a successful
+`rowser remote install`, `install_main` sends `Reconnect` for the host to a running Daemon.
 
 ## Dependency direction
 
 ```
-cli ─► daemon, shim, wrapper, service, remote_install, doctor, route
+cli ─► daemon, shim, wrapper, service, remote_install, doctor, route, host
 route ─► config, routes, control
-daemon ─► protocol
+daemon ─► protocol, remote_install
+host ─► config, control, protocol, remote_install, daemon (control_path_option)
 shim ─► protocol, discovery, detect
 wrapper ─► protocol
 doctor ─► config, browsers, control, discovery, protocol, platform
-remote_install ─► platform
+remote_install ─► platform, control, protocol
 discovery ─► protocol
 ```
 

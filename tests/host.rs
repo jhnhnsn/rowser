@@ -8,6 +8,8 @@
 mod common;
 #[path = "common/script.rs"]
 mod script;
+#[path = "common/toolbox.rs"]
+mod toolbox;
 
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -19,6 +21,7 @@ use rowser::daemon::{bind_sockets, Daemon, DaemonConfig};
 use rowser::protocol::{Conn, Hello};
 use script::write_script;
 use tokio::net::UnixStream;
+use toolbox::remote_toolbox;
 
 const ROWSER: &str = env!("CARGO_BIN_EXE_rowser");
 
@@ -165,24 +168,6 @@ impl World {
     fn socket(&self, alias: &str) -> PathBuf {
         self.dir.0.join("o").join(alias).join("outpost.sock")
     }
-}
-
-/// The remote `PATH` for an install: only the tools the remote script
-/// needs, linked from the real `PATH`. It never holds the real `xdg-mime`.
-fn remote_toolbox(dir: &Path) -> PathBuf {
-    let tools = dir.join("toolbox");
-    std::fs::create_dir_all(&tools).unwrap();
-    let path = std::env::var("PATH").unwrap();
-    for tool in [
-        "sh", "mkdir", "rm", "cat", "chmod", "mv", "ln", "head", "awk",
-    ] {
-        let found = std::env::split_paths(&path)
-            .map(|d| d.join(tool))
-            .find(|p| p.is_file())
-            .unwrap_or_else(|| panic!("no {tool} on PATH"));
-        std::os::unix::fs::symlink(found, tools.join(tool)).unwrap();
-    }
-    tools
 }
 
 /// Runs `w.host(…)` off the tokio threads, so the Daemon can answer.

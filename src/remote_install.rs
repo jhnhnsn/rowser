@@ -356,6 +356,17 @@ pub fn install_with(
     })
 }
 
+/// The hidden test hook: a local build for the installs of `host add` and
+/// the Daemon's automatic update, in place of the release download.
+const TEST_LOCAL_BUILD_VAR: &str = "ROWSER_TEST_LOCAL_BUILD";
+
+/// The local build that [`TEST_LOCAL_BUILD_VAR`] gives, if set.
+pub fn test_local_build() -> Option<PathBuf> {
+    std::env::var_os(TEST_LOCAL_BUILD_VAR)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 /// The binary source: `local_build` if given, else the release download at
 /// `release_url` (default: this version's release).
 pub fn source_for(
@@ -419,6 +430,20 @@ pub fn write_report(
     )
 }
 
+/// After an install: asks a running Daemon to connect its Link to `host`
+/// again, which ends a version mismatch wait (spec). `None` when no Daemon
+/// runs or `host` is not a Saved host it loaded.
+fn reconnect_note(host: &str) -> Option<String> {
+    let dir = crate::platform::runtime_dir().ok()?;
+    let msg = crate::protocol::Msg::Reconnect { host: host.into() };
+    match crate::control::request(&dir, &msg) {
+        Ok(crate::protocol::Msg::Reconnected { .. }) => {
+            Some(format!("rowser: the Link to {host} connects again"))
+        }
+        _ => None,
+    }
+}
+
 /// `rowser remote install <host>`.
 pub fn install_main(
     host: &str,
@@ -430,6 +455,9 @@ pub fn install_main(
     match install(host, source.as_ref(), default_browser) {
         Ok(installed) => {
             let _ = write_report(&mut std::io::stdout(), host, default_browser, &installed);
+            if let Some(note) = reconnect_note(host) {
+                println!("{note}");
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {

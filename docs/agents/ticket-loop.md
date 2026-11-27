@@ -59,8 +59,11 @@ rowser is a CLI; test it from the terminal.
   machines (#80): run two Daemons with separate runtime dirs whose fake `ssh` set the same
   `ROWSER_TEST_OUTPOST_DIR`; see `tests/two_links.rs`.
 - `rowser host add|remove|list|connect` (#78) runs the `ssh` on `PATH`: put a fake `ssh` first on
-  `PATH` that logs its arguments, prints a path for `command -v rowser` (or exits 1 for a missing
-  rowser), exits 0 for `-N -f` (the master), and never runs the real `ssh`. Set `HOME`,
+  `PATH` that logs its arguments, prints a path and then a `rowser <version>` line for the find
+  (`command -v rowser && rowser --version`; exit 1 for a missing rowser), exits 0 for `-N -f`
+  (the master), and never runs the real `ssh`. A missing rowser or another version runs the
+  install, so the fake `ssh` must also answer `uname -sm` and run the `sh -c` install with
+  HOME=<tmp> set inside the fake remote command (see the #81 item below). Set `HOME`,
   `XDG_CONFIG_HOME` and `ROWSER_RUNTIME_DIR` to short temp dirs. For a running Daemon, start one
   in that runtime dir as `tests/link.rs` does. See `tests/host.rs`.
 - Installs from `host add` and the Daemon's automatic update (#81): the hidden

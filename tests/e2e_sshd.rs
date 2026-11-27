@@ -472,6 +472,8 @@ async fn remote_install_puts_the_binary_and_links_in_the_remote_home() {
         .args(["remote", "install", "e2e-a", "--local-build"])
         .arg(env!("CARGO_BIN_EXE_rowser"))
         .env("PATH", path)
+        // No Daemon runs there, so the install tells none to reconnect.
+        .env("ROWSER_RUNTIME_DIR", home.join("run"))
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");

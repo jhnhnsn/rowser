@@ -109,9 +109,7 @@ impl Pending {
                 let (kind, url, ports) = match &e.notice.subject {
                     Subject::Url(u) => (RequestKind::Open, Some(u.to_string()), vec![]),
                     Subject::Forward(p) => (RequestKind::Forward, None, p.clone()),
-                    Subject::NeedsLogin
-                    | Subject::VersionMismatch { .. }
-                    | Subject::Updated { .. } => unreachable!(
+                    Subject::Link(_) => unreachable!(
                         "a Link notice never waits for an answer, so it is never pending"
                     ),
                 };

@@ -8,34 +8,35 @@
 mod common;
 #[path = "common/script.rs"]
 mod script;
+#[path = "common/toolbox.rs"]
+mod toolbox;
 
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use common::TmpDir;
 use rowser::config::SavedHost;
 use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
-use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, Subject};
+use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, LinkEvent, Subject};
+use rowser::protocol::Msg;
 use script::write_script;
+use toolbox::remote_toolbox;
 
 const ROWSER: &str = env!("CARGO_BIN_EXE_rowser");
 
-/// The remote `PATH` of the install: only the tools its script needs.
-fn remote_toolbox(dir: &Path) -> PathBuf {
-    let tools = dir.join("toolbox");
-    std::fs::create_dir_all(&tools).unwrap();
-    let path = std::env::var("PATH").unwrap();
-    for tool in [
-        "sh", "mkdir", "rm", "cat", "chmod", "mv", "ln", "head", "awk",
-    ] {
-        let found = std::env::split_paths(&path)
-            .map(|d| d.join(tool))
-            .find(|p| p.is_file())
-            .unwrap_or_else(|| panic!("no {tool} on PATH"));
-        std::os::unix::fs::symlink(found, tools.join(tool)).unwrap();
-    }
-    tools
+/// How the test World is set up.
+struct Setup {
+    auto_update: bool,
+    /// The old rowser's path under the remote HOME.
+    old_path: &'static str,
+    /// The update installs this build; false: a missing file, so it fails.
+    build_ok: bool,
 }
+
+const DEFAULT: Setup = Setup {
+    auto_update: true,
+    old_path: ".local/bin/rowser",
+    build_ok: true,
+};
 
 struct World {
     dir: TmpDir,
@@ -43,17 +44,18 @@ struct World {
 }
 
 impl World {
-    fn start(auto_update: bool) -> World {
+    fn start(setup: Setup) -> World {
         let dir = TmpDir::new("u");
         let d = &dir.0;
         let remote = d.join("remote");
-        let bin = remote.join(".local/bin");
-        std::fs::create_dir_all(&bin).unwrap();
+        let old = remote.join(setup.old_path);
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
         write_script(
-            &bin.join("rowser"),
+            &old,
             &format!("ROWSER_TEST_OUTPOST_VERSION=0.9.0 exec {ROWSER} \"$@\""),
         );
-        let ssh = d.join("ssh");
+        std::fs::create_dir_all(d.join("bin")).unwrap();
+        let ssh = d.join("bin").join("ssh");
         write_script(
             &ssh,
             &format!(
@@ -61,8 +63,8 @@ impl World {
                  eval \"last=\\${{$#}}\"\n\
                  export HOME={remote}\n\
                  case \"$*\" in\n\
-                 *' -- g14 uname -sm') echo 'Linux x86_64'; exit 0;;\n\
-                 *\" -- g14 sh -c '\"*) PATH={toolbox} exec /bin/sh -c \"$last\";;\n\
+                 *'-- g14 uname -sm') echo 'Linux x86_64'; exit 0;;\n\
+                 *\"-- g14 sh -c '\"*) PATH={toolbox} exec /bin/sh -c \"$last\";;\n\
                  *' g14 '*' __outpost')\n\
                  mkdir -p {o}\n\
                  export ROWSER_TEST_OUTPOST_DIR={o}/g14\n\
@@ -78,16 +80,21 @@ impl World {
         );
         let run = d.join("run");
         let (direct, relay, control) = bind_sockets(&run).unwrap();
+        let build = if setup.build_ok {
+            ROWSER.into()
+        } else {
+            d.join("missing-build")
+        };
         let config = DaemonConfig {
             hosts: vec![SavedHost {
                 name: "g14".into(),
-                remote_path: "~/.local/bin/rowser".into(),
-                auto_update,
+                remote_path: format!("~/{}", setup.old_path),
+                auto_update: setup.auto_update,
                 default_browser: false,
             }],
             ssh,
             link_dir: run,
-            update_local_build: Some(ROWSER.into()),
+            update_local_build: Some(build),
             ..DaemonConfig::default()
         };
         let notifier = RecordingNotifier::default();
@@ -107,12 +114,26 @@ impl World {
             .count()
     }
 
-    fn status(&self) -> String {
+    fn attempts(&self) -> usize {
+        self.args()
+            .lines()
+            .filter(|l| l.ends_with("__outpost"))
+            .count()
+    }
+
+    fn request(&self, msg: &Msg) -> String {
         let run = self.dir.0.join("run");
-        let reply = tokio::task::block_in_place(|| {
-            rowser::control::request(&run, &rowser::protocol::Msg::Status)
-        });
+        let reply = tokio::task::block_in_place(|| rowser::control::request(&run, msg));
         format!("{reply:?}")
+    }
+
+    fn status(&self) -> String {
+        self.request(&Msg::Status)
+    }
+
+    /// Waits a time in which a retrying Link would try again (1 s, then 2 s).
+    async fn wait_for_retries(&self) {
+        tokio::time::sleep(Duration::from_millis(3500)).await;
     }
 }
 
@@ -127,9 +148,16 @@ async fn wait_until(mut f: impl FnMut() -> bool) -> bool {
     f()
 }
 
+fn mismatch(after_update: bool) -> Subject {
+    Subject::Link(LinkEvent::VersionMismatch {
+        outpost: Some("0.9.0".into()),
+        after_update,
+    })
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mismatch_with_auto_update_installs_notifies_once_and_reconnects() {
-    let w = World::start(true);
+    let w = World::start(DEFAULT);
     let version = env!("CARGO_PKG_VERSION");
     let want = format!("outpost_rowser_version: Some(\"{version}\")");
     let connected = wait_until(|| {
@@ -142,13 +170,13 @@ async fn a_mismatch_with_auto_update_installs_notifies_once_and_reconnects() {
     assert_eq!(notices.len(), 1, "{notices:?}");
     assert_eq!(
         notices[0].subject,
-        Subject::Updated {
+        Subject::Link(LinkEvent::Updated {
             version: version.into()
-        }
+        })
     );
     assert_eq!(
         notices[0].body(),
-        format!("From g14: updated rowser on g14 to {version}")
+        format!("updated rowser on g14 to {version}")
     );
     assert_eq!(w.installs(), 1, "{}", w.args());
     // The install keeps how the host was added: no default-browser part.
@@ -168,25 +196,18 @@ async fn a_mismatch_with_auto_update_installs_notifies_once_and_reconnects() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_mismatch_without_auto_update_notifies_once_and_does_not_install() {
-    let w = World::start(false);
+async fn a_mismatch_without_auto_update_notifies_once_and_stops_retries() {
+    let w = World::start(Setup {
+        auto_update: false,
+        ..DEFAULT
+    });
     assert!(wait_until(|| !w.notifier.notices().is_empty()).await);
-    // Wait for at least two more Link attempts (1 s, then 2 s).
-    let attempts = || {
-        w.args()
-            .lines()
-            .filter(|l| l.ends_with("__outpost"))
-            .count()
-    };
-    assert!(wait_until(|| attempts() >= 3).await, "{}", w.args());
+    w.wait_for_retries().await;
+    // No more Link attempts: each one would start an Outpost on the host.
+    assert_eq!(w.attempts(), 1, "{}", w.args());
     let notices = w.notifier.notices();
     assert_eq!(notices.len(), 1, "{notices:?}");
-    assert_eq!(
-        notices[0].subject,
-        Subject::VersionMismatch {
-            outpost: Some("0.9.0".into())
-        }
-    );
+    assert_eq!(notices[0].subject, mismatch(false));
     assert!(
         notices[0].body().contains("rowser remote install g14"),
         "{}",
@@ -194,4 +215,94 @@ async fn a_mismatch_without_auto_update_notifies_once_and_does_not_install() {
     );
     assert_eq!(w.installs(), 0);
     assert!(w.status().contains("VersionMismatch"), "{}", w.status());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rowser_remote_install_ends_the_wait() {
+    let w = World::start(Setup {
+        auto_update: false,
+        ..DEFAULT
+    });
+    assert!(wait_until(|| !w.notifier.notices().is_empty()).await);
+    let d = &w.dir.0;
+    let out = tokio::task::block_in_place(|| {
+        std::process::Command::new(ROWSER)
+            .args([
+                "remote",
+                "install",
+                "g14",
+                "--no-default-browser",
+                "--local-build",
+            ])
+            .arg(ROWSER)
+            .env("PATH", format!("{}:/usr/bin:/bin", d.join("bin").display()))
+            .env("HOME", d)
+            .env("XDG_CONFIG_HOME", d.join("cfg"))
+            .env("ROWSER_RUNTIME_DIR", d.join("run"))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    });
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("the Link to g14 connects again"),
+        "{out:?}"
+    );
+    let version = env!("CARGO_PKG_VERSION");
+    let want = format!("outpost_rowser_version: Some(\"{version}\")");
+    let connected = wait_until(|| {
+        let s = w.status();
+        s.contains("Connected") && s.contains(&want)
+    })
+    .await;
+    assert!(connected, "{}", w.status());
+    assert_eq!(w.notifier.notices().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_that_still_mismatches_says_to_add_the_host_again() {
+    // rowser is not at ~/.local/bin/rowser, where the install puts it.
+    let w = World::start(Setup {
+        old_path: "opt/rowser",
+        ..DEFAULT
+    });
+    assert!(wait_until(|| !w.notifier.notices().is_empty()).await);
+    w.wait_for_retries().await;
+    let notices = w.notifier.notices();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].subject, mismatch(true));
+    assert!(
+        notices[0].body().contains("rowser host add g14"),
+        "{}",
+        notices[0].body()
+    );
+    assert_eq!(w.installs(), 1, "{}", w.args());
+    assert_eq!(w.attempts(), 2, "{}", w.args());
+    assert!(w.status().contains("VersionMismatch"), "{}", w.status());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_update_waits_and_a_reconnect_tries_once_more() {
+    let w = World::start(Setup {
+        build_ok: false,
+        ..DEFAULT
+    });
+    assert!(wait_until(|| !w.notifier.notices().is_empty()).await);
+    w.wait_for_retries().await;
+    let notices = w.notifier.notices();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].subject, mismatch(false));
+    assert_eq!(w.attempts(), 1, "{}", w.args());
+    // The update tries once: `uname -sm` runs, then the missing build fails.
+    assert_eq!(w.installs(), 1, "{}", w.args());
+
+    // `rowser host connect` sends `Reconnect`: one more Link attempt and
+    // one more update try, with one more notification.
+    let reply = w.request(&Msg::Reconnect { host: "g14".into() });
+    assert!(reply.contains("Reconnected"), "{reply}");
+    assert!(wait_until(|| w.notifier.notices().len() == 2).await);
+    w.wait_for_retries().await;
+    assert_eq!(w.notifier.notices().len(), 2);
+    assert_eq!(w.installs(), 2, "{}", w.args());
+    assert_eq!(w.attempts(), 2, "{}", w.args());
 }

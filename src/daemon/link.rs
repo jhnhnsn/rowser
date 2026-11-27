@@ -9,7 +9,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use super::limit::Limit;
-use super::{Inner, Notice, NoticeHost, Source, Subject};
+use super::{Inner, LinkEvent, Notice, NoticeHost, Source, Subject};
 use crate::config::SavedHost;
 use crate::mux::{self, Side};
 use crate::protocol::{Conn, Error, Hello, LinkInfo, LinkState, Msg};
@@ -131,8 +131,9 @@ pub(super) fn ssh_args(host: &SavedHost, runtime_dir: &Path) -> Vec<String> {
     ]
 }
 
-/// Keeps the Link to `host` open until it needs a login. The caller
-/// aborts the task to close the Link.
+/// Keeps the Link to `host` open until it needs a login or waits in
+/// version mismatch. The caller aborts the task to close the Link, and
+/// starts a new task to end a wait (`Reconnect`, or a changed entry).
 pub(super) async fn supervise(inner: Arc<Inner>, host: SavedHost, link: LinkStatus) {
     // One limit for all streams of this Saved host, across reconnections.
     let limit = Arc::new(Mutex::new(Limit::new(
@@ -140,78 +141,70 @@ pub(super) async fn supervise(inner: Arc<Inner>, host: SavedHost, link: LinkStat
         inner.config.rate_window,
     )));
     let mut backoff = Backoff::default();
-    // One notification and one update attempt per version mismatch; a
-    // connection to an Outpost of this major version ends the mismatch.
-    let mut mismatch_notified = false;
+    // One update try per task: a task ends in version mismatch, and only a
+    // new task (one entry into the state) tries again.
     let mut update_tried = false;
+    // Set after an update: notify "updated" when the Link connects to an
+    // Outpost of this major version.
+    let mut updated: Option<String> = None;
     loop {
         tracing::debug!("link {}: {:?}", host.name, LinkState::Connecting);
-        let mismatch =
-            link.lock().unwrap_or_else(|e| e.into_inner()).state == LinkState::VersionMismatch;
-        if !mismatch {
-            set_state(&link, LinkState::Connecting);
-        }
+        set_state(&link, LinkState::Connecting);
         let (connected, status, stderr) =
-            connect_once(&inner, &host, &limit, &mut backoff, &link).await;
+            connect_once(&inner, &host, &limit, &mut backoff, &link, &mut updated).await;
         let state = after_exit(connected, status, &stderr);
-        if state == LinkState::NeedsLogin
-            || link.lock().unwrap_or_else(|e| e.into_inner()).state != LinkState::VersionMismatch
-        {
+        if state == LinkState::NeedsLogin {
             set_state(&link, state);
+            tracing::warn!("link {}: needs login: {}", host.name, stderr.trim());
+            notify(&inner, &host, LinkEvent::NeedsLogin);
+            return;
         }
-        match state {
-            LinkState::NeedsLogin => {
-                tracing::warn!("link {}: needs login: {}", host.name, stderr.trim());
-                notify(&inner, &host, Subject::NeedsLogin);
-                return;
-            }
-            _ => {
-                if !stderr.trim().is_empty() {
-                    tracing::warn!("link {}: {}", host.name, stderr.trim());
+        if !stderr.trim().is_empty() {
+            tracing::warn!("link {}: {}", host.name, stderr.trim());
+        }
+        let (state, outpost) = {
+            let s = link.lock().unwrap_or_else(|e| e.into_inner());
+            (s.state, s.outpost_rowser_version.clone())
+        };
+        if state != LinkState::VersionMismatch {
+            set_state(&link, LinkState::Connecting);
+            let wait = backoff.next();
+            tracing::debug!("link {}: dropped; next attempt in {wait:?}", host.name);
+            tokio::time::sleep(wait).await;
+            continue;
+        }
+        if host.auto_update && !update_tried {
+            update_tried = true;
+            match update(&inner, &host).await {
+                Ok(()) => {
+                    let version = env!("CARGO_PKG_VERSION").to_string();
+                    tracing::info!("link {}: installed rowser {version}", host.name);
+                    updated = Some(version);
+                    backoff.reset();
+                    continue;
                 }
-                if connected {
-                    mismatch_notified = false;
-                    update_tried = false;
-                }
-                let (state, outpost) = {
-                    let s = link.lock().unwrap_or_else(|e| e.into_inner());
-                    (s.state, s.outpost_rowser_version.clone())
-                };
-                if state == LinkState::VersionMismatch {
-                    if host.auto_update && !update_tried {
-                        update_tried = true;
-                        match update(&inner, &host).await {
-                            Ok(()) => {
-                                let version = env!("CARGO_PKG_VERSION").to_string();
-                                tracing::info!("link {}: updated rowser to {version}", host.name);
-                                notify(&inner, &host, Subject::Updated { version });
-                                set_state(&link, LinkState::Connecting);
-                                backoff.reset();
-                                continue;
-                            }
-                            Err(e) => {
-                                tracing::warn!("link {}: update failed: {e}", host.name)
-                            }
-                        }
-                    }
-                    if !mismatch_notified {
-                        mismatch_notified = true;
-                        notify(&inner, &host, Subject::VersionMismatch { outpost });
-                    }
-                }
-                let wait = backoff.next();
-                tracing::debug!("link {}: dropped; next attempt in {wait:?}", host.name);
-                tokio::time::sleep(wait).await;
+                Err(e) => tracing::warn!("link {}: update failed: {e}", host.name),
             }
         }
+        // Wait: no more attempts, as each one starts an Outpost on the host.
+        let after_update = updated.take().is_some();
+        notify(
+            &inner,
+            &host,
+            LinkEvent::VersionMismatch {
+                outpost,
+                after_update,
+            },
+        );
+        return;
     }
 }
 
 /// Shows one notification about the Link to `host`.
-fn notify(inner: &Arc<Inner>, host: &SavedHost, subject: Subject) {
+fn notify(inner: &Arc<Inner>, host: &SavedHost, event: LinkEvent) {
     let notifier = inner.notifier.clone();
     let notice = Notice {
-        subject,
+        subject: Subject::Link(event),
         host: NoticeHost::Alias(host.name.clone()),
         target: None,
         warnings: vec![],
@@ -258,13 +251,15 @@ async fn update(inner: &Arc<Inner>, host: &SavedHost) -> Result<(), String> {
 
 /// Runs one `ssh` process until it ends. Returns whether the Outpost
 /// answered, the exit status of `ssh` (`None` when it was killed), and its
-/// stderr.
+/// stderr. When the Link connects and `updated` holds a version, it shows
+/// the "updated" notification and clears `updated`.
 async fn connect_once(
     inner: &Arc<Inner>,
     host: &SavedHost,
     limit: &Arc<Mutex<Limit>>,
     backoff: &mut Backoff,
     link: &LinkStatus,
+    updated: &mut Option<String>,
 ) -> (bool, Option<i32>, String) {
     if inner.config.link_dir.as_os_str().is_empty() {
         return (false, None, "no runtime directory for the Link".into());
@@ -359,6 +354,10 @@ async fn connect_once(
                 }
                 set_state(link, LinkState::Connected);
                 tracing::info!("link {}: {:?} (outpost {version})", host.name, LinkState::Connected);
+                if let Some(version) = updated.take() {
+                    tracing::info!("link {}: updated rowser to {version}", host.name);
+                    notify(inner, host, LinkEvent::Updated { version });
+                }
                 (&mut serve).await;
             }
             _ => {}
