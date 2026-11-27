@@ -79,7 +79,9 @@ is invoked through a symlink named `xdg-open`, `sensible-browser` or `www-browse
   from the user's `ssh_config` or a `user@host`, given to `ssh` unchanged, so `User`, `Port`,
   keys and `ProxyJump` from `ssh_config` apply. `remote_path` is where rowser is on that host
   (default `~/.local/bin/rowser`). `auto_update` (default `true`) lets the Daemon update rowser
-  on that host.
+  on that host. `default_browser` (default `true`; `false` after `--no-default-browser`) says
+  whether installs on that host include the default-browser part. The install also leaves a
+  marker on the Remote host when it skips that part, so `rowser doctor` there skips its checks.
 - `rowser host add <host> [--no-default-browser]`: finds rowser on the host once
   (`command -v rowser` in the user's login shell there) and saves its path as `remote_path`. If
   rowser is missing or its version differs from the local one, it runs the remote install first
@@ -312,6 +314,7 @@ in `rowser doctor`; the release after makes it an error.
 name = "g14"
 remote_path = "~/.local/bin/rowser"
 auto_update = true
+default_browser = false
 
 [[route]]
 host = "g14"
