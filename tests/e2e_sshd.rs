@@ -189,7 +189,7 @@ async fn remote_install_puts_the_binary_and_links_in_the_remote_home() {
         &ssh,
         &format!(
             "[ \"$1\" = -- ] && [ $# -eq 3 ] || exit 99\n\
-             exec /usr/bin/ssh -F {} -- \"$2\" \"HOME={} PATH={} $3\"",
+             exec /usr/bin/ssh -F {} -o ProxyCommand=none -o ProxyJump=none -- \"$2\" \"HOME={} PATH={} $3\"",
             w.path("ssh_config"),
             home.display(),
             tools.display()
@@ -302,7 +302,7 @@ async fn a_link_through_sshd_opens_a_detached_shim_url_and_forwards_the_callback
              f=$(mktemp {d}/cmd.XXXXXX)\n\
              if [ $n = 2 ]; then printf 'echo $$ > %s\\nexec %s\\n' {pid} \"$cmd\" > \"$f\";\n\
              else printf '%s\\n' \"$cmd\" > \"$f\"; fi\n\
-             exec /usr/bin/ssh -F {cfg} \"${{a[@]:0:${{#a[@]}}-n}}\" \
+             exec /usr/bin/ssh -F {cfg} -o ProxyCommand=none -o ProxyJump=none \"${{a[@]:0:${{#a[@]}}-n}}\" \
              \"env -i HOME={home} PATH={tools} ROWSER_TEST_OUTPOST_DIR={outpost} \
              XDG_CONFIG_HOME={home}/.config DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/bus \
              /bin/sh $f\"\n",
@@ -326,6 +326,8 @@ async fn a_link_through_sshd_opens_a_detached_shim_url_and_forwards_the_callback
             link_dir: run.clone(),
             loopback: vec![V6],
             config_file: Some(config_file.clone()),
+            // A version mismatch updates from this build, never from GitHub.
+            update_local_build: Some(env!("CARGO_BIN_EXE_rowser").into()),
             ..DaemonConfig::default()
         },
         opener.clone(),
@@ -384,6 +386,10 @@ async fn a_link_through_sshd_opens_a_detached_shim_url_and_forwards_the_callback
         assert!(out.status.success(), "{out:?}");
     };
 
+    // This test process listens on the callback port and is also a parent of
+    // the Shim, so the Shim's `/proc` walk finds the port too. The test thus
+    // shows that the forward works, not that `redirect_uri` detection alone
+    // gives it.
     let port = free_port();
     let remote = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await

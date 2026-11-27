@@ -65,8 +65,7 @@ against the other projects. Corrections are welcome.
   manual checks on macOS and Linux desktops.
 - **v1.0 Links: built, not yet released.** The Daemon keeps a Link to each Saved host
   (`rowser host add`), so plain `ssh`, detached programs and background agents open URLs too;
-  `rowser ssh` is removed. An end-to-end test runs a Link through a real `sshd`. v1.0.0 ships
-  with Links.
+  `rowser ssh` is removed. v1.0.0 ships with Links.
 - **Release binaries:** v1.0.0-rc.2 is on
   [GitHub Releases](https://github.com/jhnhnsn/rowser/releases). `rowser remote install`
   downloads the release that matches the local `rowser` version; `--local-build` installs your

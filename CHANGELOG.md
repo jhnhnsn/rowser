@@ -8,13 +8,15 @@ All notable changes to rowser are listed here. The format follows
 
 Links replace the Wrapper: the Daemon keeps one `ssh` connection (a Link) to each Saved host and
 runs the Outpost there, so any program on the host opens URLs and OAuth callbacks come back with
-plain `ssh`, a detached process, or no SSH session at all. An end-to-end test now runs a Link
-through a real `sshd`: `rowser host add` with the install, a detached Shim call, a full callback
-and a Link drop. ([#76](https://github.com/jhnhnsn/rowser/issues/76),
+plain `ssh`, a detached process, or no SSH session at all.
+([#76](https://github.com/jhnhnsn/rowser/issues/76),
 [#84](https://github.com/jhnhnsn/rowser/issues/84))
+
+### Changed
 
 **From 1.0.0-rc.1 or rc.2:**
 
+- Delete a rowser `RemoteForward` line from `~/.ssh/config`; the Link replaces it.
 - Remove `alias ssh='rowser ssh'` (and any `rowser ssh` in scripts); use plain `ssh`.
 - Run `rowser host add <host>` once for each Remote host. It installs this version there when
   needed.
