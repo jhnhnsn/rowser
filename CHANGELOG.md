@@ -6,6 +6,23 @@ All notable changes to rowser are listed here. The format follows
 
 ## [Unreleased]
 
+Links replace the Wrapper: the Daemon keeps one `ssh` connection (a Link) to each Saved host and
+runs the Outpost there, so any program on the host opens URLs and OAuth callbacks come back with
+plain `ssh`, a detached process, or no SSH session at all. An end-to-end test now runs a Link
+through a real `sshd`: `rowser host add` with the install, a detached Shim call, a full callback
+and a Link drop. ([#76](https://github.com/jhnhnsn/rowser/issues/76),
+[#84](https://github.com/jhnhnsn/rowser/issues/84))
+
+**From 1.0.0-rc.1 or rc.2:**
+
+- Remove `alias ssh='rowser ssh'` (and any `rowser ssh` in scripts); use plain `ssh`.
+- Run `rowser host add <host>` once for each Remote host. It installs this version there when
+  needed.
+- An `[unverified]` entry in the config file is ignored; delete it. Run `rowser daemon install`
+  again if the service still has `--confirm-unverified`.
+- For a host with its own desktop, use `rowser host add --no-default-browser <host>`, so rowser
+  does not become its default browser.
+
 ### Added
 
 - `rowser status` lists the Links: each Saved host's Host alias, Link state, since when, Outpost

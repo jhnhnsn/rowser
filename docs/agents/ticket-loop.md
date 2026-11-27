@@ -31,7 +31,9 @@ rowser is a CLI; test it from the terminal.
   `Daemon::serve_with_test_links` (see `tests/common/mod.rs`, `test_link`).
 - Test hooks: `--runtime-dir <tmp>`, `ROWSER_SOCKET`, `--open-command` writing URLs to a file,
   the test Opener and Notifier adapters, `ROWSER_E2E=1` with a throwaway unprivileged `sshd` on
-  localhost (`/usr/bin/sshd` is installed).
+  localhost (`/usr/bin/sshd` is installed). `tests/e2e_sshd.rs` runs a Link through it: its
+  `ssh` passes `-F <temp ssh_config>` and runs each remote command under `env -i HOME=<tmp>
+  PATH=<toolbox> ROWSER_TEST_OUTPOST_DIR=<tmp>/o`, and the Shim runs under `setsid`.
 - Confirmations: hidden daemon flags `--test-confirm approve|deny|hang` (scripted Notifier, no
   desktop) and `--confirm-timeout <secs>` (default 60).
 - Callback forwards on one machine: run the daemon with the hidden `--loopback ::1` so the

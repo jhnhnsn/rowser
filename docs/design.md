@@ -287,7 +287,9 @@ discovery ─► protocol
    with a fake `ssh` that runs `rowser __outpost` locally, Callback forward with a fake remote
    HTTP listener, all with the test adapters.
 3. E2E (`tests/e2e_sshd.rs`, Linux only; each test returns at once unless `ROWSER_E2E=1`): throwaway
-   `sshd` and `rowser remote install`. A Link through `sshd` is #84.
+   `sshd`, `rowser remote install`, and a Link through `sshd` to a Saved host that `rowser host
+   add` installs: a detached Shim call (`setsid`), a full callback, and a Link drop. The test's
+   `ssh` uses a temp config and puts the remote command under `env -i HOME=<tmp> …`.
 
 Every fake script at any level is written with `write_script`/`write_executable` from
 `tests/common/script.rs`, so the test process never holds the write fd (ETXTBSY, #55).
