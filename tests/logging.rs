@@ -101,6 +101,38 @@ fn without_rowser_log_an_unverified_entry_shows_one_warning() {
     assert!(!lines.iter().any(|l| l.contains("DEBUG")), "{lines:?}");
 }
 
+/// Runs `rowser reload` against the Daemon in `dir`.
+fn reload(dir: &Path) {
+    let out = Command::new(EXE)
+        .arg("reload")
+        .env("ROWSER_RUNTIME_DIR", dir)
+        .env("XDG_CONFIG_HOME", dir.join("config"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+}
+
+#[test]
+fn a_reload_warns_about_unverified_only_when_the_entry_is_new() {
+    let dir = TmpDir::new("logr");
+    let (mut child, rx, early) = daemon(&dir.0, "[unverified]\nopen = \"system\"\n", None);
+    let mut lines = early;
+    reload(&dir.0);
+    reload(&dir.0);
+    lines.extend(drain(&rx, Duration::from_millis(300)));
+    let file = dir.0.join("config").join("rowser").join("config.toml");
+    std::fs::write(&file, "").unwrap();
+    reload(&dir.0);
+    std::fs::write(&file, "[unverified]\nopen = \"system\"\n").unwrap();
+    reload(&dir.0);
+    lines.extend(drain(&rx, Duration::from_millis(300)));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let warns = lines.iter().filter(|l| l.contains("[unverified]")).count();
+    // One at start, none for the unchanged reloads, one when it comes back.
+    assert_eq!(warns, 2, "{lines:?}");
+}
+
 #[test]
 fn log_lines_never_go_to_stdout() {
     let out = Command::new(EXE)

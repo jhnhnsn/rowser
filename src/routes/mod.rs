@@ -129,6 +129,15 @@ pub struct Resolved {
     pub warnings: Vec<String>,
 }
 
+/// The Route that matched (its index), or `[default]`, as `rowser activity`
+/// and `rowser route test` show it.
+pub fn route_label(route: Option<usize>) -> String {
+    match route {
+        Some(i) => format!("route {}", i + 1),
+        None => "[default]".into(),
+    }
+}
+
 /// Matches `name` against a glob `pattern` with `*` (any run) and `?` (one
 /// character), ignoring ASCII case. The `--confirm-hosts` rules.
 pub fn glob_match(pattern: &str, name: &str) -> bool {

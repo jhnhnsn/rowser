@@ -287,21 +287,21 @@ fn parse_loopback(text: &str) -> Result<std::net::IpAddr, String> {
 
 /// Runs a parsed command.
 pub fn run(command: Command) -> ExitCode {
-    if let Command::Daemon {
-        confirm_unverified: true,
-        ..
-    } = command
-    {
-        eprintln!("rowser daemon: {CONFIRM_UNVERIFIED_REMOVED}");
-        return ExitCode::from(2);
-    }
     match command {
+        // First, so it wins over any `rowser daemon` action.
+        Command::Daemon {
+            confirm_unverified: true,
+            ..
+        } => {
+            eprintln!("rowser daemon: {CONFIRM_UNVERIFIED_REMOVED}");
+            ExitCode::from(2)
+        }
         Command::Daemon {
             action: None,
             runtime_dir,
             open_command,
             confirm_hosts,
-            confirm_unverified: _,
+            confirm_unverified: false,
             test_confirm,
             confirm_timeout,
             loopback,

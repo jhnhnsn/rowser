@@ -28,7 +28,7 @@ use crate::browsers::{Browsers, Roots};
 use crate::protocol::{ActivityEntry, AnsweredBy, Conn, Hello, Msg, Outcome, RequestKind};
 use crate::routes::{Resolved, Routes};
 use limit::Limit;
-pub use notifier::{DesktopNotifier, Dismiss, LinkEvent, Notice, NoticeHost, Notifier, Subject};
+pub use notifier::{DesktopNotifier, Dismiss, LinkEvent, Notice, Notifier, Subject};
 pub use opener::{CommandOpener, Opener};
 
 pub use crate::protocol::CONTROL_SOCKET;
@@ -66,6 +66,9 @@ pub struct DaemonConfig {
     /// The automatic update copies this binary in place of the release
     /// download (the hidden `ROWSER_TEST_LOCAL_BUILD` hook, and tests).
     pub update_local_build: Option<PathBuf>,
+    /// The start-up config file has an `[unverified]` entry, so a reload
+    /// that still has it does not warn again.
+    pub has_unverified: bool,
 }
 
 impl Default for DaemonConfig {
@@ -86,6 +89,7 @@ impl Default for DaemonConfig {
             // Saved hosts, so no Link uses it; a caller with hosts sets it.
             link_dir: PathBuf::new(),
             update_local_build: None,
+            has_unverified: false,
         }
     }
 }
@@ -117,6 +121,9 @@ struct Loaded {
     routes: Arc<Routes>,
     /// True when a file was at `config.config_file` at the last load.
     config_file_exists: bool,
+    /// The last loaded file had an `[unverified]` entry: a reload warns
+    /// only when the entry is new.
+    has_unverified: bool,
 }
 
 struct Inner {
@@ -170,6 +177,7 @@ impl Daemon {
                 loaded: RwLock::new(Loaded {
                     routes: Arc::new(std::mem::take(&mut config.routes)),
                     config_file_exists,
+                    has_unverified: config.has_unverified,
                 }),
                 config,
                 opener: Arc::new(opener),
@@ -241,7 +249,7 @@ pub const FORWARD_NOT_APPROVED: &str =
 /// The error for a control message on a Link.
 pub const CONTROL_ONLY: &str = "control messages are accepted only on the control socket";
 
-/// The answer to `Ping` on every socket.
+/// The answer to `Ping`, on a Link stream or the control socket.
 fn pong() -> Msg {
     Msg::Pong {
         version: Hello::current().version(),
@@ -331,7 +339,7 @@ impl Inner {
                 // ADR 0006: a Remote host never reaches the control socket.
                 return conn.send(&open_error(CONTROL_ONLY)).await;
             }
-            let host = NoticeHost::Alias(alias.clone());
+            let host = alias.clone();
             let reply = match msg {
                 Msg::Ping => pong(),
                 Msg::Open {
@@ -413,7 +421,7 @@ impl Inner {
     async fn forward(
         &self,
         ports: &[u16],
-        host: &NoticeHost,
+        host: &str,
         link: Option<&crate::mux::Opener>,
     ) -> forward::Created {
         self.forwards
@@ -435,7 +443,7 @@ impl Inner {
     /// request. A matching host waits for "Open"; other hosts get a notice.
     async fn manual_forward(
         &self,
-        host: NoticeHost,
+        host: String,
         ports: Vec<u16>,
         link: Option<&crate::mux::Opener>,
     ) -> Msg {
@@ -478,7 +486,7 @@ impl Inner {
     async fn open(
         &self,
         raw: &str,
-        host: NoticeHost,
+        host: String,
         ports: &[u16],
         link: Option<&crate::mux::Opener>,
     ) -> Msg {
@@ -505,10 +513,8 @@ impl Inner {
             mut target,
             ask,
             mut warnings,
-        } = self
-            .current_routes()
-            .resolve(host.alias(), &url, &self.browsers());
-        entry.route = Some(route_label(route));
+        } = self.current_routes().resolve(&host, &url, &self.browsers());
+        entry.route = Some(crate::routes::route_label(route));
         entry.target = Some(target.to_string());
         entry.warnings = warnings.clone();
         let confirm = ask || self.config.needs_confirm(&host);
@@ -726,12 +732,12 @@ fn unix_now() -> u64 {
 
 /// A new `rowser activity` entry, stamped with the time now. The ring
 /// sets its id.
-fn new_entry(kind: RequestKind, host: &NoticeHost, result: Outcome) -> ActivityEntry {
+fn new_entry(kind: RequestKind, host: &str, result: Outcome) -> ActivityEntry {
     ActivityEntry {
         id: 0,
         time: unix_now(),
         kind,
-        host: host.alias().to_string(),
+        host: host.to_string(),
         url: None,
         route: None,
         target: None,
@@ -740,14 +746,6 @@ fn new_entry(kind: RequestKind, host: &NoticeHost, result: Outcome) -> ActivityE
         open_secs: None,
         warnings: vec![],
         answered_by: None,
-    }
-}
-
-/// The Route that matched, as `rowser activity` shows it.
-fn route_label(route: Option<usize>) -> String {
-    match route {
-        Some(i) => format!("route {}", i + 1),
-        None => "[default]".into(),
     }
 }
 
@@ -856,6 +854,7 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
         routes: Routes::from_config(&file),
         config_file: Some(config_path),
         confirm_hosts: args.confirm_hosts,
+        has_unverified: file.has_unverified,
         ..DaemonConfig::default()
     };
     let unverified = file.has_unverified;

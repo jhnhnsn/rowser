@@ -273,7 +273,7 @@ fn a_real_xdg_open_that_runs_browser_rowser_does_not_loop() {
 }
 
 #[tokio::test]
-async fn open_through_rowser_socket_reaches_the_opener() {
+async fn open_through_the_rowser_socket_env_var_reaches_the_opener() {
     let d = start_daemon().await;
     let empty = TmpDir::new();
     let mut env = env(Some(d.link()), Some(empty.path("missing.sock")));

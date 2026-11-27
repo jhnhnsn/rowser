@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use super::{DaemonConfig, NoticeHost};
+use super::DaemonConfig;
 use crate::routes::glob_match;
 
 /// How long a confirmation waits for the user by default. The Daemon's
@@ -11,10 +11,8 @@ pub(crate) const CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl DaemonConfig {
     /// Whether an Open request from `host` must wait for confirmation.
-    pub(crate) fn needs_confirm(&self, host: &NoticeHost) -> bool {
-        self.confirm_hosts
-            .iter()
-            .any(|p| glob_match(p, host.alias()))
+    pub(crate) fn needs_confirm(&self, host: &str) -> bool {
+        self.confirm_hosts.iter().any(|p| glob_match(p, host))
     }
 }
 

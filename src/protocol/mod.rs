@@ -25,7 +25,9 @@ pub fn printable(text: &str) -> String {
 /// 2.0: the Link carries `yamux` streams; a 1.x peer gets the mismatch error.
 const VERSION: Version = Version { major: 2, minor: 0 };
 
-/// A protocol version `major.minor`. Peers with the same major interoperate.
+/// A protocol version `major.minor`. Peers with another major get the
+/// mismatch error. Within a major, a peer ignores fields it does not know;
+/// builds from `main` between releases may still differ.
 ///
 /// On the wire it is a JSON object, `{"major":1,"minor":0}`, not a `"1.0"`
 /// string: this is deliberate, so peers compare numbers and never parse text.

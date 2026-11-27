@@ -115,7 +115,7 @@ impl Pending {
                 PendingInfo {
                     id: *id,
                     kind,
-                    host: e.notice.host.alias().to_string(),
+                    host: e.notice.host.clone(),
                     url,
                     ports,
                     target: e.notice.target.as_ref().map(Target::to_string),

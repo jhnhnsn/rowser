@@ -175,8 +175,8 @@ async fn request_forward<W: Write>(request: Msg, env: &mut ShimEnv<W>) -> Outcom
             _ => None,
         },
     };
-    let mut conn = match find_socket(socket.as_slice()).await {
-        Ok((conn, _)) => conn,
+    let mut conn = match find_socket(socket.as_deref()).await {
+        Ok(conn) => conn,
         Err(e) => {
             if let Some(mismatch) = e.mismatch {
                 let _ = writeln!(env.stderr, "rowser: {mismatch}");

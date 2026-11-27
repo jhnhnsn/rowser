@@ -9,7 +9,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use super::limit::Limit;
-use super::{Inner, LinkEvent, Notice, NoticeHost, Source, Subject};
+use super::{Inner, LinkEvent, Notice, Source, Subject};
 use crate::config::SavedHost;
 use crate::mux::{self, Side};
 use crate::protocol::{Conn, Error, Hello, LinkInfo, LinkState, Msg};
@@ -205,7 +205,7 @@ fn notify(inner: &Arc<Inner>, host: &SavedHost, event: LinkEvent) {
     let notifier = inner.notifier.clone();
     let notice = Notice {
         subject: Subject::Link(event),
-        host: NoticeHost::Alias(host.name.clone()),
+        host: host.name.clone(),
         target: None,
         warnings: vec![],
     };

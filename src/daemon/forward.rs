@@ -10,7 +10,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
-use super::NoticeHost;
 use crate::mux;
 use crate::protocol::{Conn, ForwardInfo, Hello, Msg};
 
@@ -50,7 +49,7 @@ impl Forwards {
     pub async fn create(
         self: &Arc<Self>,
         ports: &[u16],
-        host: &NoticeHost,
+        host: &str,
         link: Option<&mux::Opener>,
         loopback: &[IpAddr],
         timeout: Duration,
@@ -131,7 +130,7 @@ impl Forwards {
             id.clone(),
             Active {
                 ports: bound.clone(),
-                host: host.alias().to_string(),
+                host: host.to_string(),
                 started: tokio::time::Instant::now(),
             },
         );

@@ -6,21 +6,6 @@ use url::Url;
 
 use crate::config::Target;
 
-/// The host of a notice: the Host alias of the Link the request came on.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NoticeHost {
-    Alias(String),
-}
-
-impl NoticeHost {
-    /// The Host alias.
-    pub fn alias(&self) -> &str {
-        match self {
-            NoticeHost::Alias(a) => a,
-        }
-    }
-}
-
 /// What a notice is about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Subject {
@@ -72,7 +57,8 @@ impl LinkEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
     pub subject: Subject,
-    pub host: NoticeHost,
+    /// The Host alias of the Link the request came on.
+    pub host: String,
     /// The Target an Open request opens in; `None` for a `rowser forward`
     /// request. The body names it when it is not `system`.
     pub target: Option<Target>,
@@ -113,7 +99,7 @@ impl Notice {
     }
 
     fn body_with(&self, escape: bool) -> String {
-        let host = clean(self.host.alias(), escape);
+        let host = clean(&self.host, escape);
         let what = match &self.subject {
             Subject::Url(url) => clean(url.as_str(), escape),
             Subject::Forward(ports) => {
@@ -391,7 +377,7 @@ mod tests {
     fn macos_notification_text_is_plain_and_passed_as_arguments() {
         let notice = Notice {
             subject: Subject::Url(Url::parse("https://example.com/?a=1&b=2").unwrap()),
-            host: NoticeHost::Alias("g14".into()),
+            host: "g14".into(),
             target: None,
             warnings: vec![],
         };

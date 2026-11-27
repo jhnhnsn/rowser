@@ -50,9 +50,10 @@ All notable changes to rowser are listed here. The format follows
 
 - The Wrapper: `rowser ssh …` now prints `rowser ssh is removed: run "rowser host add <host>"
   once, then use plain ssh` and exits 2. Use plain `ssh` after `rowser host add`. Gone with it:
-  Session sockets, the relay socket and Host stamp, the direct socket `rowserd.sock` (and the
-  `ssh_config` `RemoteForward` setup), the Shim's search of `/tmp` and its Stale socket removal,
-  the Reported host name, and Sessions in `rowser status`.
+  the Wrapper's per-connection sockets, the relay socket and Host stamp, the direct socket
+  `rowserd.sock` (and the `ssh_config` `RemoteForward` setup), the Shim's search of `/tmp` and
+  its Stale socket removal, the Reported host name, and the list of Wrapper connections in
+  `rowser status`. ([#82](https://github.com/jhnhnsn/rowser/issues/82))
 - `[unverified]`: the entry is ignored, with one warning in the log and in `rowser doctor`.
   `rowser daemon --confirm-unverified` exits 2 with an error that says the flag is removed, and
   `rowser route test --unverified` is gone. ([#82](https://github.com/jhnhnsn/rowser/issues/82))

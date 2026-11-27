@@ -112,15 +112,19 @@ impl Inner {
         match crate::config::load(path) {
             Ok(file) => {
                 let count = file.routes.len();
-                if file.has_unverified {
-                    tracing::warn!("{}", crate::config::UNVERIFIED_IGNORED);
-                }
                 self.sync_links(file.hosts.clone());
                 // A valid load means a file is there now.
-                *self.loaded.write().unwrap_or_else(|e| e.into_inner()) = Loaded {
+                let mut loaded = self.loaded.write().unwrap_or_else(|e| e.into_inner());
+                // Spec: one warning, so only a new entry warns again.
+                if file.has_unverified && !loaded.has_unverified {
+                    tracing::warn!("{}", crate::config::UNVERIFIED_IGNORED);
+                }
+                *loaded = Loaded {
                     routes: Arc::new(Routes::from_config(&file)),
                     config_file_exists: true,
+                    has_unverified: file.has_unverified,
                 };
+                drop(loaded);
                 tracing::info!("config reloaded from {} ({count} routes)", path.display());
                 Msg::Reloaded { routes: count }
             }

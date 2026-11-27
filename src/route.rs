@@ -105,10 +105,7 @@ fn test(
 ) -> Result<(), String> {
     let routes = Routes::from_config(&config::load(file)?);
     let pick = routes.pick(host, url);
-    let label = match pick.route {
-        Some(i) => format!("route {}", i + 1),
-        None => "[default]".into(),
-    };
+    let label = crate::routes::route_label(pick.route);
     let (target, ask, warnings) = match pick.target {
         Target::Browser { .. } => {
             let r = routes.resolve(host, url, browsers);

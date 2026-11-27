@@ -48,8 +48,8 @@ rowser is a CLI; test it from the terminal.
   not rowser: put a fake `xdg-open` script that records its argument first on `PATH`, set
   `DISPLAY`, and set the hidden `ROWSER_TEST_OUTPOST_DIR` to an empty short temp dir, so no
   real Link answers. Never let it reach the real `xdg-open`.
-- Links (#77): the Shim tries the Outpost socket `/tmp/rowser-<uid>/outpost.sock` after
-  `ROWSER_SOCKET`. Always set the hidden `ROWSER_TEST_OUTPOST_DIR` to a short temp dir
+- Links (#77): the Shim uses the Outpost socket `/tmp/rowser-<uid>/outpost.sock` when
+  `ROWSER_SOCKET` is not set. Always set the hidden `ROWSER_TEST_OUTPOST_DIR` to a short temp dir
   (`/tmp/rw.XXXX/o`) for `rowser __outpost` and for any Shim a test runs, so no test uses the
   real Outpost socket. To test a Link, give the Daemon a `[[host]]` and a fake `ssh` (the
   `DaemonConfig::ssh` field in tests) that drops its options and alias and execs

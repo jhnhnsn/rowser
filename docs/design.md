@@ -104,8 +104,8 @@ pid matching. On non-Linux the `/proc` part yields nothing.
 
 ### `discovery` — deep, local-substitutable
 
-Interface: `find_socket(paths: &[PathBuf]) -> Result<(Conn, PathBuf), NoTunnel>`: the first
-path that answers the handshake, in order (`ROWSER_SOCKET`, else the Outpost socket). Hidden:
+Interface: `find_socket(path: Option<&Path>) -> Result<Conn, NoLink>`: connects to the Shim's
+socket (`ROWSER_SOCKET`, else the Outpost socket) and completes the handshake. Hidden:
 the handshake probe. Tests use a temp directory and real Unix sockets.
 
 ### `daemon` — the deepest module
@@ -374,7 +374,8 @@ src/
   refused. The test `ScriptedNotifier` counts dismissals (`dismissed()`), and a dismissed hung
   confirmation returns. `control::{run_pending, run_approve, run_deny}` are the clients.
 - `[unverified]` (#82): `config::parse` ignores the entry and sets `Config::has_unverified`. The
-  Daemon logs `config::UNVERIFIED_IGNORED` once at start and on each reload that reads it, and
+  Daemon logs `config::UNVERIFIED_IGNORED` once at start, and on a reload only when the
+  previous load did not have the entry (`Loaded::has_unverified`), and
   `rowser doctor` shows it as one `config` warning.
 - Dependency direction: `cli ─► config, routes, browsers, control, route`;
   `route ─► config, routes, browsers, control`; `control ─► protocol,

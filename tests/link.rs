@@ -17,9 +17,7 @@ use common::TmpDir;
 use rowser::config::SavedHost;
 use rowser::control::run_reload;
 use rowser::daemon::testing::{Answer, RecordingNotifier, RecordingOpener, ScriptedNotifier};
-use rowser::daemon::{
-    bind_sockets, Daemon, DaemonConfig, LinkEvent, NoticeHost, Notifier, Subject,
-};
+use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, LinkEvent, Notifier, Subject};
 use rowser::detect::Procfs;
 use rowser::protocol::{Conn, Error, Hello, Version};
 use rowser::routes::Routes;
@@ -221,7 +219,7 @@ async fn a_url_through_the_outpost_opens_with_the_host_alias() {
     );
     assert_eq!(w.opener.urls(), [url]);
     let hosts: Vec<_> = w.notifier.notices().into_iter().map(|n| n.host).collect();
-    assert!(hosts.iter().all(|h| *h == NoticeHost::Alias("g14".into())));
+    assert!(hosts.iter().all(|h| h == "g14"));
     let args = std::fs::read_to_string(w.dir.0.join("args")).unwrap();
     assert!(
         args.starts_with("-T -o BatchMode=yes -o ControlMaster=no"),
@@ -306,7 +304,7 @@ async fn confirm_hosts_on_the_link_match_the_host_alias() {
     assert_eq!(run_open(&url, &mut env).await, ExitCode::FAILURE);
     let confirms = notifier.confirms();
     assert_eq!(confirms.len(), 1, "{confirms:?}");
-    assert_eq!(confirms[0].host, NoticeHost::Alias("g14".into()));
+    assert_eq!(confirms[0].host, "g14");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -425,7 +423,7 @@ async fn a_login_failure_needs_login_and_stops_retries() {
         notices[0].subject,
         Subject::Link(LinkEvent::NeedsLogin)
     ));
-    assert_eq!(notices[0].host, NoticeHost::Alias("g14".into()));
+    assert_eq!(notices[0].host, "g14");
 }
 
 #[tokio::test(flavor = "multi_thread")]

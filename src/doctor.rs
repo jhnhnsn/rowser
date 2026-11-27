@@ -411,8 +411,8 @@ pub fn check_fallback(graphical: bool, path: Option<&OsStr>, self_exe: Option<&P
 /// Daemon's protocol version and any version skew.
 pub async fn check_tunnel(socket: Option<PathBuf>) -> Vec<Check> {
     const NAME: &str = "tunnel";
-    let (mut conn, socket) = match find_socket(socket.as_slice()).await {
-        Ok(found) => found,
+    let mut conn = match find_socket(socket.as_deref()).await {
+        Ok(conn) => conn,
         Err(e) => {
             // A mismatch means a socket answers; its message names both
             // versions and the update command, so the "no Link" hint is wrong.
@@ -427,6 +427,8 @@ pub async fn check_tunnel(socket: Option<PathBuf>) -> Vec<Check> {
             };
         }
     };
+    // find_socket succeeded, so there is a path.
+    let socket = socket.unwrap_or_default();
     let fail = |detail: String| vec![Check::new(Status::Fail, NAME, detail)];
     if let Err(e) = conn.send(&Msg::Ping).await {
         return fail(format!("{}: {e}", socket.display()));

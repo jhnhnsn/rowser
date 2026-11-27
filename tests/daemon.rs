@@ -10,8 +10,8 @@ use common::TmpDir;
 use rowser::config::Target;
 use rowser::daemon::testing::{Answer, RecordingNotifier, RecordingOpener, ScriptedNotifier};
 use rowser::daemon::{
-    bind_sockets, CommandOpener, Daemon, DaemonConfig, NoticeHost, Notifier, Opener,
-    FORWARD_NOT_APPROVED, NOT_APPROVED,
+    bind_sockets, CommandOpener, Daemon, DaemonConfig, Notifier, Opener, FORWARD_NOT_APPROVED,
+    NOT_APPROVED,
 };
 use rowser::protocol::{Conn, Hello, Msg, CONTROL_SOCKET};
 use rowser::routes::Routes;
@@ -136,7 +136,7 @@ async fn a_link_uses_the_alias_of_its_saved_host() {
     assert_eq!(error_of(&reply), None);
     assert_eq!(h.opened(), ["https://example.com/"]);
     let notices = h.notifier.notices();
-    assert_eq!(notices[0].host, NoticeHost::Alias("devbox".into()));
+    assert_eq!(notices[0].host, "devbox");
     assert!(!notices[0].body().contains("unverified"));
 }
 
@@ -511,7 +511,7 @@ async fn confirmed_host_opens_after_the_user_approves() {
     assert_eq!(h.opened(), ["https://example.com/ok"]);
     let asked = h.notifier.confirms();
     assert_eq!(asked.len(), 1);
-    assert_eq!(asked[0].host, NoticeHost::Alias("db.prod".into()));
+    assert_eq!(asked[0].host, "db.prod");
 }
 
 #[tokio::test]
@@ -796,7 +796,7 @@ async fn denied_manual_forward_binds_nothing() {
     assert_eq!(forward_ports(&h.run()).await, [] as [u16; 0]);
     let asked = h.notifier.confirms();
     assert_eq!(asked.len(), 1);
-    assert_eq!(asked[0].host, NoticeHost::Alias("db.prod".into()));
+    assert_eq!(asked[0].host, "db.prod");
     let body = asked[0].body();
     assert!(
         body.contains("db.prod") && body.contains(&port.to_string()),
