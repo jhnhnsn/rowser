@@ -70,6 +70,39 @@ pub fn prepare_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The Shim's check before it connects to the Outpost socket at `path`: its
+/// folder must belong to the current user with mode 0700, and the socket
+/// must belong to the current user. Another user who made the folder first
+/// gets no URLs (ADR 0010).
+pub fn check_socket(path: &Path) -> Result<(), String> {
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    let meta = std::fs::symlink_metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if !meta.is_dir() {
+        return Err(format!("{} is not a folder", dir.display()));
+    }
+    if meta.uid() != euid() {
+        return Err(format!(
+            "{} does not belong to the current user",
+            dir.display()
+        ));
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if mode != 0o700 {
+        return Err(format!(
+            "{} has mode {mode:03o}; it must be 0700",
+            dir.display()
+        ));
+    }
+    let sock = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if sock.uid() != euid() {
+        return Err(format!(
+            "{} does not belong to the current user",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Runs the Outpost over `io` with its socket in `dir` until `io` closes.
 /// The socket is removed at the end.
 pub async fn serve<T>(io: T, dir: &Path) -> Result<(), String>

@@ -61,9 +61,10 @@ pub(super) enum LinkState {
 
 impl LinkState {
     /// The state after the `ssh` process ended. `connected`: the Outpost
-    /// answered on this attempt. `stderr`: what `ssh` wrote.
-    pub(super) fn after_exit(connected: bool, stderr: &str) -> LinkState {
-        if !connected && is_login_failure(stderr) {
+    /// answered on this attempt. `status`: the exit status of `ssh`, if it
+    /// exited. `stderr`: what `ssh` wrote.
+    pub(super) fn after_exit(connected: bool, status: Option<i32>, stderr: &str) -> LinkState {
+        if !connected && is_login_failure(status, stderr) {
             LinkState::NeedsLogin
         } else {
             LinkState::Connecting
@@ -71,9 +72,25 @@ impl LinkState {
     }
 }
 
-/// True when `ssh` stderr shows that `BatchMode` could not authenticate.
-fn is_login_failure(stderr: &str) -> bool {
-    stderr.contains("Permission denied")
+/// The exit status `ssh` gives for its own errors, such as a failed login.
+const SSH_ERROR_STATUS: i32 = 255;
+
+/// True when `ssh` itself could not authenticate under `BatchMode`: it exits
+/// 255 and writes `Permission denied (<methods>)`. A "Permission denied"
+/// from the Outpost (`rowser __outpost: …`) or from the remote shell is not
+/// a login failure.
+fn is_login_failure(status: Option<i32>, stderr: &str) -> bool {
+    status == Some(SSH_ERROR_STATUS)
+        && stderr
+            .lines()
+            .filter(|l| !l.starts_with("rowser __outpost:"))
+            .any(|l| l.contains("Permission denied ("))
+}
+
+/// `path` as one `ssh -o` value: in double quotes, so a space (as in the
+/// macOS runtime directory) does not split it.
+fn ssh_quoted(path: &Path) -> String {
+    format!("\"{}\"", path.display())
 }
 
 /// The `ssh` arguments of the Link to `host`.
@@ -86,7 +103,7 @@ pub(super) fn ssh_args(host: &SavedHost, runtime_dir: &Path) -> Vec<String> {
         "-o".into(),
         "ControlMaster=no".into(),
         "-o".into(),
-        format!("ControlPath={}", cm.display()),
+        format!("ControlPath={}", ssh_quoted(&cm)),
         "-o".into(),
         "ServerAliveInterval=15".into(),
         "-o".into(),
@@ -108,8 +125,8 @@ pub(super) async fn supervise(inner: Arc<Inner>, host: SavedHost) {
     let mut backoff = Backoff::default();
     loop {
         tracing::debug!("link {}: {:?}", host.name, LinkState::Connecting);
-        let (connected, stderr) = connect_once(&inner, &host, &limit, &mut backoff).await;
-        match LinkState::after_exit(connected, &stderr) {
+        let (connected, status, stderr) = connect_once(&inner, &host, &limit, &mut backoff).await;
+        match LinkState::after_exit(connected, status, &stderr) {
             LinkState::NeedsLogin => {
                 tracing::warn!("link {}: needs login: {}", host.name, stderr.trim());
                 let notifier = inner.notifier.clone();
@@ -135,13 +152,17 @@ pub(super) async fn supervise(inner: Arc<Inner>, host: SavedHost) {
 }
 
 /// Runs one `ssh` process until it ends. Returns whether the Outpost
-/// answered, and the stderr of `ssh`.
+/// answered, the exit status of `ssh` (`None` when it was killed), and its
+/// stderr.
 async fn connect_once(
     inner: &Arc<Inner>,
     host: &SavedHost,
     limit: &Arc<Mutex<Limit>>,
     backoff: &mut Backoff,
-) -> (bool, String) {
+) -> (bool, Option<i32>, String) {
+    if inner.config.link_dir.as_os_str().is_empty() {
+        return (false, None, "no runtime directory for the Link".into());
+    }
     let mut child = match Command::new(&inner.config.ssh)
         .args(ssh_args(host, &inner.config.link_dir))
         .stdin(Stdio::piped())
@@ -154,6 +175,7 @@ async fn connect_once(
         Err(e) => {
             return (
                 false,
+                None,
                 format!("cannot run {}: {e}", inner.config.ssh.display()),
             )
         }
@@ -161,7 +183,7 @@ async fn connect_once(
     let (Some(stdin), Some(stdout), Some(mut err)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
-        return (false, "ssh has no stdio".into());
+        return (false, None, "ssh has no stdio".into());
     };
     let stderr = tokio::spawn(async move {
         let mut text = String::new();
@@ -206,10 +228,21 @@ async fn connect_once(
         _ = &mut serve => {}
     }
     driver.abort();
-    let _ = child.kill().await;
+    // When `ssh` ended by itself, its stdout closed first: give it a moment
+    // to exit, so its status shows a login failure.
+    let status = match tokio::time::timeout(EXIT_WAIT, child.wait()).await {
+        Ok(Ok(s)) => s.code(),
+        _ => {
+            let _ = child.kill().await;
+            None
+        }
+    };
     let text = stderr.await.unwrap_or_default();
-    (connected, text)
+    (connected, status, text)
 }
+
+/// How long `connect_once` waits for `ssh` to exit before it kills it.
+const EXIT_WAIT: Duration = Duration::from_secs(1);
 
 #[cfg(test)]
 mod tests {
@@ -227,14 +260,86 @@ mod tests {
     #[test]
     fn a_login_failure_before_the_outpost_answers_needs_login() {
         let err = "g14: Permission denied (publickey).\n";
-        assert_eq!(LinkState::after_exit(false, err), LinkState::NeedsLogin);
+        assert_eq!(
+            LinkState::after_exit(false, Some(255), err),
+            LinkState::NeedsLogin
+        );
+        let err = "user@g14: Permission denied (publickey,password).\n";
+        assert_eq!(
+            LinkState::after_exit(false, Some(255), err),
+            LinkState::NeedsLogin
+        );
     }
 
     #[test]
     fn a_drop_after_a_connection_retries() {
         let err = "Connection to g14 closed by remote host.\n";
-        assert_eq!(LinkState::after_exit(true, err), LinkState::Connecting);
-        assert_eq!(LinkState::after_exit(false, err), LinkState::Connecting);
+        assert_eq!(
+            LinkState::after_exit(true, Some(255), err),
+            LinkState::Connecting
+        );
+        assert_eq!(
+            LinkState::after_exit(false, Some(255), err),
+            LinkState::Connecting
+        );
+    }
+
+    #[test]
+    fn a_permission_error_from_the_outpost_retries() {
+        let err =
+            "rowser __outpost: /tmp/rowser-1000/outpost.sock: Permission denied (os error 13)\n";
+        assert_eq!(
+            LinkState::after_exit(false, Some(1), err),
+            LinkState::Connecting
+        );
+        assert_eq!(
+            LinkState::after_exit(false, Some(255), err),
+            LinkState::Connecting
+        );
+    }
+
+    #[test]
+    fn a_remote_shell_permission_error_retries() {
+        let err = "bash: line 1: /home/u/.local/bin/rowser: Permission denied\n";
+        assert_eq!(
+            LinkState::after_exit(false, Some(126), err),
+            LinkState::Connecting
+        );
+        assert_eq!(
+            LinkState::after_exit(false, Some(255), err),
+            LinkState::Connecting
+        );
+    }
+
+    #[test]
+    fn a_login_text_without_the_ssh_error_status_retries() {
+        let err = "g14: Permission denied (publickey).\n";
+        assert_eq!(
+            LinkState::after_exit(false, Some(1), err),
+            LinkState::Connecting
+        );
+        assert_eq!(
+            LinkState::after_exit(false, None, err),
+            LinkState::Connecting
+        );
+    }
+
+    #[test]
+    fn a_runtime_dir_with_a_space_is_quoted_for_ssh() {
+        let host = SavedHost {
+            name: "g14".into(),
+            remote_path: "~/.local/bin/rowser".into(),
+            auto_update: true,
+            default_browser: true,
+        };
+        let dir = Path::new("/Users/u/Library/Application Support/rowser");
+        let args = ssh_args(&host, dir);
+        assert!(
+            args.contains(
+                &"ControlPath=\"/Users/u/Library/Application Support/rowser/cm-%C\"".to_string()
+            ),
+            "{args:?}"
+        );
     }
 
     #[test]
@@ -247,7 +352,7 @@ mod tests {
         };
         assert_eq!(
             ssh_args(&host, Path::new("/run/u/rowser")).join(" "),
-            "-T -o BatchMode=yes -o ControlMaster=no -o ControlPath=/run/u/rowser/cm-%C \
+            "-T -o BatchMode=yes -o ControlMaster=no -o ControlPath=\"/run/u/rowser/cm-%C\" \
              -o ServerAliveInterval=15 -o ServerAliveCountMax=3 g14 ~/.local/bin/rowser __outpost"
         );
     }

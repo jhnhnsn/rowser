@@ -89,7 +89,9 @@ impl Default for DaemonConfig {
             browser_roots: None,
             hosts: vec![],
             ssh: PathBuf::from("ssh"),
-            link_dir: std::env::temp_dir(),
+            // Empty: no shared folder such as /tmp. The default has no
+            // Saved hosts, so no Link uses it; a caller with hosts sets it.
+            link_dir: PathBuf::new(),
         }
     }
 }
@@ -569,9 +571,9 @@ impl Inner {
     async fn confirm(&self, notice: Notice) -> Result<Confirmed, Refused> {
         let (not_approved, not_done) = match notice.subject {
             Subject::Url(_) => (NOT_APPROVED, "the URL was not opened"),
-            // A Link notice is never a confirmation.
-            Subject::Forward(_) | Subject::NeedsLogin => {
-                (FORWARD_NOT_APPROVED, "the port was not forwarded")
+            Subject::Forward(_) => (FORWARD_NOT_APPROVED, "the port was not forwarded"),
+            Subject::NeedsLogin => {
+                unreachable!("a needs-login notice is sent with Notifier::notify, never confirmed")
             }
         };
         let paused = paused_text(&notice.subject);
@@ -688,7 +690,9 @@ fn paused_text(subject: &Subject) -> String {
                 .join(", ");
             format!("paused; port {ports} was not forwarded")
         }
-        Subject::NeedsLogin => "paused".into(),
+        Subject::NeedsLogin => {
+            unreachable!("a needs-login notice is never a request, so no pause refuses it")
+        }
     }
 }
 

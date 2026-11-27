@@ -176,11 +176,24 @@ pub async fn run_forward<W: Write>(port: u16, env: &mut ShimEnv<W>) -> ExitCode 
 /// reply has a forward id.
 async fn request_forward<W: Write>(request: Msg, ports: &[u16], env: &mut ShimEnv<W>) -> Outcome {
     // ROWSER_SOCKET, else the Outpost socket, else the old directory search.
-    let first = env.socket_override.clone().or_else(|| {
-        env.outpost_socket
-            .clone()
-            .filter(|p| p.symlink_metadata().is_ok())
-    });
+    // The owner check applies to the Outpost socket only: ROWSER_SOCKET is
+    // the user's own choice.
+    let first = match env.socket_override.clone() {
+        Some(p) => Some(p),
+        None => match env.outpost_socket.clone() {
+            Some(p) if p.symlink_metadata().is_ok() => match crate::outpost::check_socket(&p) {
+                Ok(()) => Some(p),
+                Err(e) => {
+                    let _ = writeln!(
+                        env.stderr,
+                        "rowser: warning: not using the Outpost socket: {e}"
+                    );
+                    None
+                }
+            },
+            _ => None,
+        },
+    };
     let (mut conn, socket) = match find_tunnel_path(&env.tunnel_dir, first).await {
         Ok(found) => found,
         Err(e) => {

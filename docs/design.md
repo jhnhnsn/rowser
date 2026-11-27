@@ -138,8 +138,10 @@ plain config values.
 ### Links: `mux`, `outpost`, `daemon/link` (#77)
 
 Protocol 2.0. The Daemon keeps one Link to each `[[host]]`: it runs `ssh -T -o BatchMode=yes
--o ControlMaster=no -o ControlPath=<runtime dir>/cm-%C -o ServerAliveInterval=15
+-o ControlMaster=no -o ControlPath="<runtime dir>/cm-%C" -o ServerAliveInterval=15
 -o ServerAliveCountMax=3 <name> <remote_path> __outpost` and runs yamux over the child's stdio.
+The `ControlPath` value is in double quotes, so the macOS runtime directory (with a space) stays
+one value.
 
 - `mux::start(io, Side) -> (Opener, inbound streams, driver)`: one yamux connection. Each
   stream carries the usual NDJSON handshake, so `Conn` is unchanged.
@@ -149,21 +151,26 @@ Protocol 2.0. The Daemon keeps one Link to each `[[host]]`: it runs `ssh -T -o B
   end, so a 1.x Shim gets the mismatch error from the Daemon. `outpost_dir()` is
   `/tmp/rowser-<uid>`, or the hidden test hook `ROWSER_TEST_OUTPOST_DIR`.
 - `daemon/link`: `Backoff` (1 s, doubles, 60 s maximum; reset after a `Pong` on a control
-  stream), `LinkState` (`Connecting`, `Connected`, `NeedsLogin`). "Permission denied" on ssh
-  stderr before the first connection sets `NeedsLogin`, shows one notice and stops retries.
+  stream), `LinkState` (`Connecting`, `Connected`, `NeedsLogin`). An ssh login failure before
+  the first connection (exit status 255 and `Permission denied (…)` on stderr, not from a
+  `rowser __outpost:` line) sets `NeedsLogin`, shows one notice and stops retries.
   Requests from a Link carry the Host alias and share one rate limit for each Saved host.
   `serve` and a reload call `sync_links` to add or remove Links.
 
 `DaemonConfig` adds `hosts`, `ssh` (the program; tests give a fake that runs `rowser __outpost`
-locally) and `link_dir` (the `ControlPath` folder). The Shim tries `ROWSER_SOCKET`, then the
-Outpost socket (`ShimEnv::outpost_socket`), then the Tunnel directory search.
+locally) and `link_dir` (the `ControlPath` folder; empty by default, and a Link refuses an
+empty one). The Shim tries `ROWSER_SOCKET`, then the Outpost socket (`ShimEnv::outpost_socket`),
+then the old socket discovery of the Wrapper (until #82). Before it uses the Outpost socket, the
+Shim checks `outpost::check_socket`: the folder belongs to the user with mode 0700 and the socket
+belongs to the user. On a failed check it prints a warning and goes on to the next step. It does
+not check `ROWSER_SOCKET`.
 
 ### `shim` — deep
 
 Interface: `run_open(url, ShimEnv) -> ExitCode`, `run_forward(port, ShimEnv) -> ExitCode`,
 `run_keeper(KeeperArgs) -> ExitCode`.
 
-`ShimEnv`: tunnel directory, `ROWSER_SOCKET`, the Outpost socket, procfs root, caller pid, reported host name, path
+`ShimEnv`: tunnel directory, `ROWSER_SOCKET`, the Outpost socket, procfs root, caller pid, the host name it sends, path
 to the own executable (for the keeper re-exec), `graphical` (`WAYLAND_DISPLAY` or `DISPLAY` set),
 `search_path` (`PATH`, for the real `xdg-open`), `self_exe` (skipped as an `xdg-open`),
 `in_fallback` (the hidden `ROWSER_SHIM_FALLBACK` guard), stderr writer. Hidden: discovery,

@@ -22,7 +22,7 @@ pub fn printable(text: &str) -> String {
 }
 
 /// The protocol version this build speaks.
-/// 2.0 (*v1.0 Links*): the Link carries `yamux` streams; a 1.x peer is refused.
+/// 2.0: the Link carries `yamux` streams; a 1.x peer gets the mismatch error.
 const VERSION: Version = Version { major: 2, minor: 0 };
 
 /// A protocol version `major.minor`. Peers with the same major interoperate.
@@ -40,7 +40,8 @@ impl Version {
         Version { major, minor }
     }
 
-    /// True for 1.1 and later: the peer knows Sessions.
+    /// True for 1.1 and later: the peer knows the Wrapper's control
+    /// connection (`Msg::Session`).
     pub fn has_sessions(self) -> bool {
         self.major >= 2 || (self.major == 1 && self.minor >= 1)
     }

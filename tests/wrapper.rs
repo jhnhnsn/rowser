@@ -464,7 +464,7 @@ async fn a_1_0_daemon_is_refused_and_ssh_runs_without_the_forward() {
         session_dir: run,
     };
     let wrapper = spawn_wrapper(&["g14"], env);
-    // Protocol 2.0 refuses a 1.x peer, so no Tunnel is made.
+    // Protocol 2.0 refuses a 1.x peer, so ssh runs with no `-R` forward.
     assert_eq!(argv(&dir.0), ["g14"]);
     std::fs::write(dir.0.join("done"), "").unwrap();
     assert_eq!(wrapper.join().unwrap(), ExitCode::SUCCESS);

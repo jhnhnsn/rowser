@@ -109,8 +109,9 @@ impl Pending {
                 let (kind, url, ports) = match &e.notice.subject {
                     Subject::Url(u) => (RequestKind::Open, Some(u.to_string()), vec![]),
                     Subject::Forward(p) => (RequestKind::Forward, None, p.clone()),
-                    // A Link notice never waits for an answer.
-                    Subject::NeedsLogin => (RequestKind::Forward, None, vec![]),
+                    Subject::NeedsLogin => unreachable!(
+                        "a needs-login notice never waits for an answer, so it is never pending"
+                    ),
                 };
                 PendingInfo {
                     id: *id,
