@@ -248,6 +248,7 @@ async fn connect_once(
             let source = Source::Link {
                 alias: host.name.clone(),
                 limit: limit.clone(),
+                link: opener.clone(),
             };
             tokio::spawn(async move {
                 if let Err(e) = inner.handle(stream, source).await {

@@ -46,6 +46,9 @@ pub enum Command {
         /// 127.0.0.1 and ::1). Repeat for more than one.
         #[arg(long, hide = true, value_parser = parse_loopback)]
         loopback: Vec<std::net::IpAddr>,
+        /// Test hook: Callback forward timeout in seconds (default 600).
+        #[arg(long, hide = true)]
+        forward_timeout: Option<u64>,
     },
     /// Run ssh with a Tunnel to the Daemon.
     Ssh {
@@ -123,16 +126,6 @@ pub enum Command {
     Remote {
         #[command(subcommand)]
         action: RemoteAction,
-    },
-    /// Internal: holds a Callback forward for `rowser open` and `rowser forward`.
-    #[command(name = "__keeper", hide = true)]
-    Keeper {
-        #[arg(long)]
-        socket: PathBuf,
-        #[arg(long)]
-        forward_id: String,
-        #[arg(long = "port", required = true)]
-        ports: Vec<u16>,
     },
     /// Internal: the far end of a Link, started by the Daemon over ssh.
     #[command(name = "__outpost", hide = true)]
@@ -289,7 +282,6 @@ impl Command {
             Command::Route { .. } => "route",
             Command::Host { .. } => "host",
             Command::Remote { .. } => "remote install",
-            Command::Keeper { .. } => "__keeper",
             Command::Outpost => "__outpost",
         }
     }
@@ -317,6 +309,7 @@ pub fn run(command: Command) -> ExitCode {
             test_confirm,
             confirm_timeout,
             loopback,
+            forward_timeout,
         } => crate::daemon::run(crate::daemon::RunArgs {
             runtime_dir,
             open_command,
@@ -325,6 +318,7 @@ pub fn run(command: Command) -> ExitCode {
             test_confirm,
             confirm_timeout,
             loopback,
+            forward_timeout,
         }),
         cmd @ Command::Daemon {
             action: Some(DaemonAction::Install),
@@ -355,11 +349,6 @@ pub fn run(command: Command) -> ExitCode {
         Command::Activity { follow, json } => crate::control::activity_main(follow, json),
         Command::Route { action } => crate::route::route_main(action.into()),
         Command::Host { action } => crate::host::host_main(action.into()),
-        Command::Keeper {
-            socket,
-            forward_id,
-            ports,
-        } => crate::shim::keeper_main(socket, forward_id, ports),
         Command::Outpost => crate::outpost::outpost_main(),
         Command::Remote {
             action:
@@ -394,14 +383,19 @@ fn install_args_from(
         test_confirm,
         confirm_timeout,
         loopback,
+        forward_timeout,
         ..
     } = cmd
     else {
         return Ok(Vec::new());
     };
-    if test_confirm.is_some() || confirm_timeout.is_some() || !loopback.is_empty() {
+    if test_confirm.is_some()
+        || confirm_timeout.is_some()
+        || !loopback.is_empty()
+        || forward_timeout.is_some()
+    {
         return Err(
-            "test flags (--test-confirm, --confirm-timeout, --loopback) \
+            "test flags (--test-confirm, --confirm-timeout, --loopback, --forward-timeout) \
                     cannot go into the installed service"
                 .into(),
         );
@@ -567,6 +561,7 @@ mod install_args_tests {
             &["--test-confirm", "approve"][..],
             &["--confirm-timeout", "5"],
             &["--loopback", "127.0.0.1"],
+            &["--forward-timeout", "5"],
         ] {
             let mut argv = vec!["rowser", "daemon"];
             argv.extend(flag);

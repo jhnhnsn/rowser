@@ -76,19 +76,6 @@ fn every_stub_subcommand_parses() {
         (&["rowser", "daemon", "uninstall"], "daemon uninstall"),
         (&["rowser", "forward", "8080"], "forward"),
         (&["rowser", "remote", "install", "box"], "remote install"),
-        (
-            &[
-                "rowser",
-                "__keeper",
-                "--socket",
-                "/tmp/x.sock",
-                "--forward-id",
-                "f",
-                "--port",
-                "8080",
-            ],
-            "__keeper",
-        ),
     ];
     for (argv, name) in cases {
         let cmd = parse_from(argv.iter().copied()).expect("parse");

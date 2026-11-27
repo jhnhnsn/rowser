@@ -187,7 +187,6 @@ fn env(tunnel_dir: &Path, over: Option<PathBuf>) -> ShimEnv<Vec<u8>> {
         reported_host: "devbox".into(),
         procfs: rowser::detect::Procfs::new("/nonexistent"),
         caller_pid: 1,
-        keeper_exe: None,
         graphical: false,
         search_path: None,
         self_exe: None,

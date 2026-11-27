@@ -180,7 +180,6 @@ fn shim(dir: &Path, outpost_socket: Option<PathBuf>) -> ShimEnv<Vec<u8>> {
         reported_host: "g14-box".into(),
         procfs: Procfs::new(dir.join("no-proc")),
         caller_pid: 1,
-        keeper_exe: None,
         graphical: false,
         search_path: None,
         self_exe: None,

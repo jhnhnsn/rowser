@@ -10,6 +10,7 @@ pub mod detect;
 pub mod discovery;
 pub mod doctor;
 pub mod host;
+mod liveness;
 pub mod logging;
 pub mod mux;
 pub mod outpost;

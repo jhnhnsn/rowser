@@ -264,9 +264,13 @@ still works.
 rowser finds the callback port from `redirect_uri`, `redirect_url` or `callback` query
 parameters pointing at `localhost`, `127.0.0.1` or `[::1]`, from the URL's own port when it points
 at one of those, and (on Linux) from loopback ports the calling program is listening on. The
-daemon binds that port on loopback on your local machine and relays connections back to the
-remote port. The forward closes when the remote port stops listening, when a dial to it fails,
-or after 10 minutes. Use `rowser forward <port>` when detection misses a port.
+daemon binds that port on loopback on your local machine and relays each connection through the
+Link to the Saved host, where `rowser __outpost` dials the remote port. `rowser open` exits as
+soon as the daemon accepts the URL; no process stays behind on the remote host. The forward
+closes when the remote port stops listening, when a dial to it fails, when the Link drops, or
+after 10 minutes. Use `rowser forward <port>` when detection misses a port. Callback forwards
+need a Saved host: a request through a `rowser ssh` session still opens the URL, but rowser
+warns that the port is not forwarded.
 
 ### tmux
 

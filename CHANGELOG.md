@@ -24,6 +24,12 @@ All notable changes to rowser are listed here. The format follows
 
 ### Changed
 
+- OAuth callbacks go through the Link: the Outpost on the Saved host dials the remote port for
+  each browser connection. `rowser open` and `rowser forward` exit when the Daemon accepts the
+  request and leave no process on the host. A forward also ends when the Link drops. A request
+  through a `rowser ssh` session still opens the URL, but its callback port is not forwarded.
+  `--confirm-hosts` still applies to `rowser forward`.
+  ([#79](https://github.com/jhnhnsn/rowser/issues/79))
 - Protocol 2.0. A rowser 1.x on the other side gets the version mismatch error; update both
   sides. ([#77](https://github.com/jhnhnsn/rowser/issues/77))
 

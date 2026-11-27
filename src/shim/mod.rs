@@ -1,11 +1,8 @@
-//! The Shim: `rowser open`, `rowser forward` and the `__keeper` process on
-//! the Remote host.
-
-mod keeper;
+//! The Shim: `rowser open` and `rowser forward` on the Remote host.
 
 use std::ffi::OsString;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use url::Url;
@@ -14,7 +11,6 @@ use crate::detect::{callback_ports, Procfs};
 use crate::discovery::find_tunnel_path;
 use crate::platform::real_xdg_open;
 use crate::protocol::Msg;
-pub use keeper::{keeper_main, run_keeper, KeeperArgs};
 
 pub use crate::platform::TUNNEL_DIR;
 
@@ -33,17 +29,13 @@ pub struct ShimEnv<W: Write> {
     pub procfs: Procfs,
     /// The process whose tree may listen on Callback ports (the Shim's parent).
     pub caller_pid: u32,
-    /// The rowser executable, re-executed as `rowser __keeper`. `None`
-    /// starts no keeper.
-    pub keeper_exe: Option<PathBuf>,
     /// `WAYLAND_DISPLAY` or `DISPLAY` is set: with no Tunnel, the URL goes
     /// to the real `xdg-open`.
     pub graphical: bool,
     /// `PATH`, searched for the real `xdg-open`.
     pub search_path: Option<OsString>,
     /// The running rowser executable; an `xdg-open` that resolves to it is
-    /// skipped. It holds the same path as `keeper_exe`, but a test sets each
-    /// alone: `None` here does not stop the keeper.
+    /// skipped.
     pub self_exe: Option<PathBuf>,
     /// `ROWSER_SHIM_FALLBACK` is set: this Shim runs under a real `xdg-open`
     /// that an earlier Shim started, so it must not run `xdg-open` again.
@@ -68,7 +60,6 @@ impl ShimEnv<std::io::Stderr> {
             procfs: Procfs::default(),
             // SAFETY: getppid has no preconditions and cannot fail.
             caller_pid: unsafe { libc::getppid() } as u32,
-            keeper_exe: std::env::current_exe().ok(),
             graphical: ["WAYLAND_DISPLAY", "DISPLAY"]
                 .iter()
                 .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty())),
@@ -80,9 +71,9 @@ impl ShimEnv<std::io::Stderr> {
     }
 }
 
-/// Sends `url` and its Callback ports to the Daemon through a Tunnel. When
-/// the Daemon returns a forward id, starts a detached keeper. Exits 0 when the
-/// Daemon accepts the URL, 1 otherwise, without waiting for the callback.
+/// Sends `url` and its Callback ports to the Daemon through a Tunnel. The
+/// Outpost holds any Callback forward. Exits 0 when the Daemon accepts the
+/// URL, 1 otherwise, without waiting for the callback.
 pub async fn run_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> ExitCode {
     let ports: Vec<u16> = callback_ports(url, &env.procfs, env.caller_pid)
         .into_iter()
@@ -92,7 +83,7 @@ pub async fn run_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> ExitCode {
         reported_host: env.reported_host.clone(),
         callback_ports: ports.clone(),
     };
-    match request_forward(request, &ports, env).await {
+    match request_forward(request, env).await {
         Outcome::Failed => ExitCode::FAILURE,
         Outcome::NoTunnel => {
             if env.graphical && !env.in_fallback {
@@ -106,7 +97,7 @@ pub async fn run_open<W: Write>(url: &Url, env: &mut ShimEnv<W>) -> ExitCode {
             );
             ExitCode::FAILURE
         }
-        Outcome::Accepted | Outcome::KeeperStarted => ExitCode::SUCCESS,
+        Outcome::Accepted | Outcome::Forwarded => ExitCode::SUCCESS,
     }
 }
 
@@ -143,10 +134,10 @@ enum Outcome {
     NoTunnel,
     /// The request failed; the error is on stderr.
     Failed,
-    /// The Daemon accepted the request, but no keeper runs.
+    /// The Daemon accepted the request, with no Callback forward.
     Accepted,
-    /// The Daemon accepted the request and a keeper holds the forward.
-    KeeperStarted,
+    /// The Daemon accepted the request and started a Callback forward.
+    Forwarded,
 }
 
 /// `rowser forward <port>`: a Callback forward without a URL. Exits 0 when
@@ -156,12 +147,12 @@ pub async fn run_forward<W: Write>(port: u16, env: &mut ShimEnv<W>) -> ExitCode 
         reported_host: env.reported_host.clone(),
         callback_ports: vec![port],
     };
-    match request_forward(request, &[port], env).await {
+    match request_forward(request, env).await {
         Outcome::NoTunnel => {
             let _ = writeln!(env.stderr, "rowser: no tunnel; cannot forward port {port}");
             ExitCode::FAILURE
         }
-        Outcome::KeeperStarted => {
+        Outcome::Forwarded => {
             let _ = writeln!(
                 env.stderr,
                 "rowser: forwarding local port {port} to port {port} on this host"
@@ -172,9 +163,8 @@ pub async fn run_forward<W: Write>(port: u16, env: &mut ShimEnv<W>) -> ExitCode 
     }
 }
 
-/// Sends `request`, prints warnings and errors, and starts a keeper when the
-/// reply has a forward id.
-async fn request_forward<W: Write>(request: Msg, ports: &[u16], env: &mut ShimEnv<W>) -> Outcome {
+/// Sends `request` and prints the reply's warnings and errors.
+async fn request_forward<W: Write>(request: Msg, env: &mut ShimEnv<W>) -> Outcome {
     // ROWSER_SOCKET, else the Outpost socket, else the old directory search.
     // The owner check applies to the Outpost socket only: ROWSER_SOCKET is
     // the user's own choice.
@@ -194,7 +184,7 @@ async fn request_forward<W: Write>(request: Msg, ports: &[u16], env: &mut ShimEn
             _ => None,
         },
     };
-    let (mut conn, socket) = match find_tunnel_path(&env.tunnel_dir, first).await {
+    let (mut conn, _socket) = match find_tunnel_path(&env.tunnel_dir, first).await {
         Ok(found) => found,
         Err(e) => {
             if let Some(mismatch) = e.mismatch {
@@ -236,51 +226,10 @@ async fn request_forward<W: Write>(request: Msg, ports: &[u16], env: &mut ShimEn
         let _ = writeln!(env.stderr, "rowser: {e}");
         return Outcome::Failed;
     }
-    let (Some(id), Some(exe)) = (forward_id, env.keeper_exe.as_deref()) else {
-        return Outcome::Accepted;
-    };
-    match spawn_keeper(exe, &socket, &id, ports) {
-        Ok(()) => Outcome::KeeperStarted,
-        Err(e) => {
-            let _ = writeln!(
-                env.stderr,
-                "rowser: warning: could not start the callback forward: {e}"
-            );
-            Outcome::Accepted
-        }
+    match forward_id {
+        Some(_) => Outcome::Forwarded,
+        None => Outcome::Accepted,
     }
-}
-
-/// Re-executes `exe` as `rowser __keeper` in a new session, detached from
-/// the caller's terminal and stdio, and does not wait for it.
-fn spawn_keeper(exe: &Path, socket: &Path, forward_id: &str, ports: &[u16]) -> std::io::Result<()> {
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-    let mut cmd = Command::new(exe);
-    cmd.arg("__keeper")
-        .arg("--socket")
-        .arg(socket)
-        .arg("--forward-id")
-        .arg(forward_id);
-    for p in ports {
-        cmd.arg("--port").arg(p.to_string());
-    }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // `spawn` forks while tokio threads run. The spec's "no fork inside
-    // tokio" means no forked child that keeps running tokio code: here the
-    // child only calls setsid and then execs at once, which is safe.
-    // SAFETY: setsid is async-signal-safe; nothing else runs between fork and exec.
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    cmd.spawn().map(drop)
 }
 
 fn block_on(f: impl std::future::Future<Output = ExitCode>) -> ExitCode {

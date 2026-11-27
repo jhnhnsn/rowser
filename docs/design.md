@@ -19,14 +19,16 @@ src/
   daemon/            Daemon: policy, Open requests, Callback forwards
     opener.rs        Opener port + CommandOpener adapter
     notifier.rs      Notifier port + DesktopNotifier adapter
-    forward.rs       internal: local listeners, reverse-dial bookkeeping
+    forward.rs       internal: local listeners, one Link stream per browser connection
     limit.rs         internal: per-connection rate limit
     confirm.rs       internal: `--confirm-hosts` matching and the confirmation timeout
     link.rs          internal: one Link for each Saved host (ssh child, backoff, Link state)
     testing.rs       test adapters for the Opener and Notifier ports
-  shim/              `rowser open`, `rowser forward`, `__keeper`
+  shim/              `rowser open`, `rowser forward`
   mux.rs             yamux over one byte pipe (the Link); the Daemon is the client side
-  outpost.rs         `rowser __outpost` on a Saved host: the Outpost socket and its relay
+  outpost.rs         `rowser __outpost` on a Saved host: the Outpost socket, its relay, and the
+                     remote side of Callback forwards (`Watch`, `Dial`)
+  liveness.rs        internal: remote-port liveness and the loopback dial (ADR 0005)
   wrapper/           `rowser ssh`: destination resolution, relay with Host stamp
   service.rs         `rowser daemon install|uninstall` (systemd unit, launchd plist, their paths)
   remote_install.rs  `rowser remote install <host>`
@@ -49,15 +51,17 @@ Interface:
   perform the version handshake. A major-version mismatch is a typed error that carries both
   versions; callers only format it.
 - `Conn::send(&Msg)` / `Conn::recv() -> Result<Option<Msg>>`.
-- `Conn::into_raw()` hands back the stream for byte splicing after a `DataConn` message.
+- `Conn::into_raw()` hands back the stream for byte splicing after a `Dial` reply.
 
 Messages (one enum, `Msg`): `HostStamp{alias}`, `Open{url, reported_host, callback_ports}`,
 `Forward{reported_host, callback_ports}` (`rowser forward`; the reply is an `OpenResult`),
-`OpenResult{forward_id?, warnings, error?}`, `AttachForward{forward_id}`, `Dial{conn_id, port}`,
-`DataConn{forward_id, conn_id}`, `Ping`, `Pong{version, rowser_version?}` (`rowser_version` is
-the answering side's `CARGO_PKG_VERSION`, protocol 2.0; the Daemon and the Outpost send it). A
-`conn_id` is random, and the Daemon accepts a `DataConn` only when its `forward_id` is the
-forward that sent that `Dial`.
+`OpenResult{forward_id?, warnings, error?}`, `Watch{ports}`, `Dial{port}`, `Ping`,
+`Pong{version, rowser_version?}` (`rowser_version` is the answering side's `CARGO_PKG_VERSION`,
+protocol 2.0; the Daemon and the Outpost send it). `Watch` and `Dial` go from the Daemon to the
+Outpost on a new Link stream
+(#79). On a `Watch` stream the Outpost checks the remote ports every 2 seconds and closes the
+stream when none listens. On a `Dial` stream it dials `127.0.0.1`, then `[::1]`, replies with
+an `OpenResult` (an `error` when the dial fails or the port is below 1024), and then splices.
 
 Control messages (protocol 1.1, control socket only; `Msg::is_control` names them, and the direct
 and relay sockets answer them with an `OpenResult` error and close the connection): `Status`,
@@ -127,8 +131,12 @@ bind addresses.
 
 Everything else is hidden behind `serve`: Host stamp rules per socket, scheme allowlist, rate
 limit, confirmation, `Ping`, Callback forward lifecycle (bind local port, busy-port warning,
-queue connections until the keeper attaches, `Dial`, splice, 2-second liveness, 10-minute
-timeout).
+a `Watch` stream on the Link, a `Dial` stream for each browser connection, splice, 10-minute
+timeout). A forward ends when the `Watch` stream closes (the remote port stopped listening or
+the Link dropped), when a dial fails, or at the timeout. A request with no Link (the Wrapper's
+direct and relay sockets) gets no forward, only the warning `callback forwards need a Link to a
+Saved host; port <p> is not forwarded`. The hidden daemon flag `--forward-timeout <secs>` is a
+test hook for the timeout.
 
 Ports (each has a production adapter and a test adapter, so both seams are real):
 
@@ -195,17 +203,17 @@ not check `ROWSER_SOCKET`.
 
 ### `shim` — deep
 
-Interface: `run_open(url, ShimEnv) -> ExitCode`, `run_forward(port, ShimEnv) -> ExitCode`,
-`run_keeper(KeeperArgs) -> ExitCode`.
+Interface: `run_open(url, ShimEnv) -> ExitCode`, `run_forward(port, ShimEnv) -> ExitCode`.
+The Shim detects Callback ports, sends the request and exits; it starts no other process.
 
-`ShimEnv`: tunnel directory, `ROWSER_SOCKET`, the Outpost socket, procfs root, caller pid, the host name it sends, path
-to the own executable (for the keeper re-exec), `graphical` (`WAYLAND_DISPLAY` or `DISPLAY` set),
+`ShimEnv`: tunnel directory, `ROWSER_SOCKET`, the Outpost socket, procfs root, caller pid, the
+host name it sends, `graphical` (`WAYLAND_DISPLAY` or `DISPLAY` set),
 `search_path` (`PATH`, for the real `xdg-open`), `self_exe` (skipped as an `xdg-open`),
 `in_fallback` (the hidden `ROWSER_SHIM_FALLBACK` guard), stderr writer. Hidden: discovery,
 detection, message flow, the real `xdg-open` lookup (it runs with `ROWSER_SHIM_FALLBACK=1`, and a
 Shim that sees it does not run `xdg-open` again, so `BROWSER=rowser` or a copy of rowser on `PATH`
-cannot loop), keeper spawn (`setsid`, re-exec), reverse-dial handling, remote-port liveness
-(LISTEN entries in `/proc/net/tcp{,6}` on Linux, a bind probe elsewhere; ADR 0005).
+cannot loop). Remote-port liveness (LISTEN entries in `/proc/net/tcp{,6}` on Linux, a bind
+probe elsewhere; ADR 0005) is in `liveness`, and the Outpost runs it.
 
 ### `wrapper` — deep
 

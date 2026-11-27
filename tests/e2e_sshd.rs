@@ -298,6 +298,7 @@ c.close()
 "#;
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "the Wrapper no longer forwards callbacks (#79); move to a Link: #85"]
 async fn an_oauth_callback_reaches_the_remote_program() {
     if !enabled() {
         return;
@@ -310,6 +311,7 @@ async fn an_oauth_callback_reaches_the_remote_program() {
 /// the sshd port is not a Callback port, and the session ends when the
 /// remote program stops listening (not at the 10-minute timeout).
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "the Wrapper no longer forwards callbacks (#79); move to a Link: #85"]
 async fn an_oauth_callback_works_when_sshd_listens_on_a_high_loopback_port() {
     if !enabled() {
         return;
@@ -360,7 +362,7 @@ async fn oauth_callback(w: World) {
         "GET /cb?code=e2e HTTP/1.1"
     );
     // A browser closes the connection after a `Connection: close` reply.
-    // While it stays open, the keeper's splice holds the remote program's
+    // While it stays open, the splice holds the remote program's
     // side of the connection, and the forward (and so ssh) stays alive.
     drop(browser);
     assert_eq!(join("the session", session), ExitCode::SUCCESS);

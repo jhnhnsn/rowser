@@ -107,10 +107,12 @@ pub(crate) enum Socket {
 /// Where a request connection came from.
 pub(crate) enum Source {
     Socket(Socket),
-    /// A stream on the Link to the Saved host `alias`; all its streams share `limit`.
+    /// A stream on the Link to the Saved host `alias`; all its streams share
+    /// `limit`. `link` opens new streams on that Link, for Callback forwards.
     Link {
         alias: String,
         limit: Arc<Mutex<Limit>>,
+        link: crate::mux::Opener,
     },
 }
 
@@ -320,10 +322,13 @@ impl Inner {
         source: Source,
     ) -> crate::protocol::Result<()> {
         let (mut conn, _) = Conn::accept(Box::new(stream) as BoxStream).await?;
-        let (socket, shared) = match source {
-            Source::Socket(s) => (s, None),
-            Source::Link { alias, limit } => (Socket::Relay, Some((alias, limit))),
+        let (socket, shared, link) = match source {
+            Source::Socket(s) => (s, None, None),
+            Source::Link { alias, limit, link } => {
+                (Socket::Relay, Some((alias, limit)), Some(link))
+            }
         };
+        let link = link.as_ref();
         let stamp = match (&shared, socket) {
             (Some((alias, _)), _) => Some(alias.clone()),
             (None, Socket::Direct | Socket::Control) => None,
@@ -371,7 +376,7 @@ impl Inner {
                         self.record(e, callback_ports);
                         open_error(format!("paused; open this URL manually: {url}"))
                     } else if allow() {
-                        self.open(&url, host, &callback_ports).await
+                        self.open(&url, host, &callback_ports, link).await
                     } else {
                         let mut e = new_entry(RequestKind::Open, &host, Outcome::RateLimited);
                         e.url = Some(url);
@@ -390,27 +395,12 @@ impl Inner {
                         self.record(e, callback_ports);
                         open_error(text)
                     } else if allow() {
-                        self.manual_forward(host, callback_ports).await
+                        self.manual_forward(host, callback_ports, link).await
                     } else {
                         let e = new_entry(RequestKind::Forward, &host, Outcome::RateLimited);
                         self.record(e, callback_ports);
                         self.rate_error()
                     }
-                }
-                Msg::AttachForward { forward_id } => {
-                    return match self.forwards.attach(&forward_id, conn) {
-                        Ok(()) => Ok(()),
-                        Err(mut conn) => conn.send(&open_error("unknown forward id")).await,
-                    };
-                }
-                Msg::DataConn {
-                    forward_id,
-                    conn_id,
-                } => {
-                    return match self.forwards.take_pending(&forward_id, conn_id) {
-                        Some(mut browser) => Ok(conn.splice(&mut browser).await?),
-                        None => conn.send(&open_error("unknown connection id")).await,
-                    };
                 }
                 _ => return conn.send(&open_error("unexpected message")).await,
             };
@@ -448,10 +438,16 @@ impl Inner {
         ))
     }
 
-    fn forward(&self, ports: &[u16], host: &NoticeHost) -> forward::Created {
+    fn forward(
+        &self,
+        ports: &[u16],
+        host: &NoticeHost,
+        link: Option<&crate::mux::Opener>,
+    ) -> forward::Created {
         self.forwards.create(
             ports,
             host,
+            link,
             &self.config.loopback,
             self.config.forward_timeout,
             {
@@ -463,7 +459,12 @@ impl Inner {
 
     /// `rowser forward`: the same `--confirm-hosts` rules as an Open
     /// request. A matching host waits for "Open"; other hosts get a notice.
-    async fn manual_forward(&self, host: NoticeHost, ports: Vec<u16>) -> Msg {
+    async fn manual_forward(
+        &self,
+        host: NoticeHost,
+        ports: Vec<u16>,
+        link: Option<&crate::mux::Opener>,
+    ) -> Msg {
         let confirm = self.config.needs_confirm(&host);
         let mut notice = Notice {
             subject: Subject::Forward(ports.clone()),
@@ -483,7 +484,7 @@ impl Inner {
                 }
             }
         }
-        let created = self.forward(&ports, &notice.host);
+        let created = self.forward(&ports, &notice.host, link);
         let mut e = new_entry(RequestKind::Forward, &notice.host, Outcome::Opened);
         e.answered_by = answered_by;
         e.ports = ports.clone();
@@ -500,7 +501,13 @@ impl Inner {
         }
     }
 
-    async fn open(&self, raw: &str, host: NoticeHost, ports: &[u16]) -> Msg {
+    async fn open(
+        &self,
+        raw: &str,
+        host: NoticeHost,
+        ports: &[u16],
+        link: Option<&crate::mux::Opener>,
+    ) -> Msg {
         let mut entry = new_entry(RequestKind::Open, &host, Outcome::SchemeRefused);
         entry.url = Some(raw.to_string());
         entry.ports = ports.to_vec();
@@ -562,7 +569,7 @@ impl Inner {
         }
         // Bind the Callback forward only after approval, so a denied URL
         // never holds a local port.
-        let created = self.forward(ports, &host);
+        let created = self.forward(ports, &host, link);
         let opener = self.opener.clone();
         let notifier = self.notifier.clone();
         let forward_warned = !created.warnings.is_empty();
@@ -596,7 +603,7 @@ impl Inner {
                 entry.result = Outcome::BrowserMissing;
                 entry.warnings.extend(created.warnings.iter().cloned());
                 self.record(entry, vec![]);
-                // No keeper attaches when the Shim gets an error: free the
+                // The URL did not open, so no callback comes: free the
                 // ports now, not after the forward timeout.
                 if let Some(id) = &created.forward_id {
                     self.forwards.close(id);
@@ -871,6 +878,8 @@ pub struct RunArgs {
     pub confirm_timeout: Option<u64>,
     /// Test hook: loopback addresses for Callback forwards.
     pub loopback: Vec<IpAddr>,
+    /// Test hook: Callback forward timeout in seconds.
+    pub forward_timeout: Option<u64>,
 }
 
 fn run_inner(args: RunArgs) -> Result<(), String> {
@@ -897,6 +906,9 @@ fn run_inner(args: RunArgs) -> Result<(), String> {
     };
     if let Some(secs) = args.confirm_timeout {
         config.confirm_timeout = Duration::from_secs(secs);
+    }
+    if let Some(secs) = args.forward_timeout {
+        config.forward_timeout = Duration::from_secs(secs);
     }
     if !args.loopback.is_empty() {
         config.loopback = args.loopback;

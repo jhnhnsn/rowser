@@ -110,18 +110,18 @@ pub enum Msg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    AttachForward {
-        forward_id: String,
+    /// Daemon to Outpost, on a Link stream: watch the remote Callback
+    /// `ports` of one forward. The Outpost closes the stream when the
+    /// forward must end (the ports stopped listening); the Daemon closes it
+    /// when the forward ended on its side.
+    Watch {
+        ports: Vec<u16>,
     },
+    /// Daemon to Outpost, on a new Link stream: dial the remote loopback
+    /// `port` for one browser connection. The reply is an `OpenResult`; on
+    /// success the stream then carries the connection's bytes.
     Dial {
-        conn_id: u64,
         port: u16,
-    },
-    /// A keeper's data connection for the browser connection `conn_id` of
-    /// the forward `forward_id`. The Daemon accepts it only when both match.
-    DataConn {
-        forward_id: String,
-        conn_id: u64,
     },
     /// Control socket only (1.1): the Wrapper registers its Session for the
     /// Host alias `host` it got from `ssh -G`. The reply is an `OpenResult`.

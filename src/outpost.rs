@@ -2,7 +2,10 @@
 //!
 //! It speaks the protocol with the Daemon over its stdin and stdout
 //! (`yamux`, ADR 0010), listens on the Outpost socket, and relays each Shim
-//! connection to the Daemon as a new stream. It exits when stdio closes.
+//! connection to the Daemon as a new stream. It also holds the remote side
+//! of each Callback forward: it watches the Callback ports and dials them
+//! for each browser connection. It exits when stdio closes, which ends its
+//! forwards.
 
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -12,6 +15,7 @@ use std::process::ExitCode;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixListener;
 
+use crate::liveness::{connect_loopback, in_use, Liveness};
 use crate::mux::{self, Side};
 use crate::protocol::{Conn, Hello, Msg};
 
@@ -163,7 +167,17 @@ where
     Ok(())
 }
 
-/// A Daemon-to-Outpost control exchange: answers `Ping`.
+/// A failed `OpenResult` carrying `text`.
+fn error_reply(text: impl Into<String>) -> Msg {
+    Msg::OpenResult {
+        forward_id: None,
+        warnings: vec![],
+        error: Some(text.into()),
+    }
+}
+
+/// A Daemon-to-Outpost stream: answers `Ping`, watches the ports of a
+/// Callback forward (`Watch`), or relays one browser connection (`Dial`).
 async fn answer_control(stream: mux::Stream) -> crate::protocol::Result<()> {
     let (mut conn, _) = Conn::accept(stream).await?;
     while let Some(msg) = conn.recv().await? {
@@ -172,14 +186,59 @@ async fn answer_control(stream: mux::Stream) -> crate::protocol::Result<()> {
                 version: Hello::current().version(),
                 rowser_version: crate::protocol::rowser_version(),
             },
-            _ => Msg::OpenResult {
-                forward_id: None,
-                warnings: vec![],
-                error: Some("unexpected message".into()),
-            },
+            Msg::Watch { ports } => return watch(conn, &ports).await,
+            Msg::Dial { port } => return dial(conn, port).await,
+            _ => error_reply("unexpected message"),
         };
         conn.send(&reply).await?;
     }
+    Ok(())
+}
+
+/// Holds the stream open while the forward's Callback ports pass the
+/// liveness rule, and closes it when they stop. The Daemon ends the forward
+/// when the stream closes. Ends early when the Daemon closes the stream.
+async fn watch(mut conn: Conn<mux::Stream>, ports: &[u16]) -> crate::protocol::Result<()> {
+    let mut liveness = Liveness::new(ports);
+    let mut tick = tokio::time::interval(crate::callback::LIVENESS_INTERVAL);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                if !liveness.check(in_use) {
+                    return Ok(());
+                }
+            }
+            // The Daemon sends nothing more: any message or EOF ends the watch.
+            _ = conn.recv() => return Ok(()),
+        }
+    }
+}
+
+/// Dials the remote loopback `port` and relays the stream to it. A port
+/// below 1024 or a failed dial gets an error reply, and the Daemon ends the
+/// forward.
+async fn dial(mut conn: Conn<mux::Stream>, port: u16) -> crate::protocol::Result<()> {
+    if port < 1024 {
+        return conn
+            .send(&error_reply(format!("port {port} is not a callback port")))
+            .await;
+    }
+    let mut remote = match connect_loopback(port).await {
+        Ok(s) => s,
+        Err(e) => {
+            return conn
+                .send(&error_reply(format!("cannot dial port {port}: {e}")))
+                .await
+        }
+    };
+    conn.send(&Msg::OpenResult {
+        forward_id: None,
+        warnings: vec![],
+        error: None,
+    })
+    .await?;
+    // A relay that breaks after the dial is not a dial failure.
+    let _ = conn.splice(&mut remote).await;
     Ok(())
 }
 

@@ -3,7 +3,7 @@
 mod common;
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
@@ -14,7 +14,7 @@ use rowser::daemon::testing::{RecordingNotifier, RecordingOpener};
 use rowser::daemon::{bind_sockets, Daemon, DaemonConfig, DIRECT_SOCKET, RELAY_SOCKET};
 use rowser::protocol::{Conn, Hello, Msg, Version, CONTROL_SOCKET};
 use rowser::routes::Routes;
-use tokio::net::{TcpListener, UnixStream};
+use tokio::net::UnixStream;
 
 const V6: IpAddr = IpAddr::V6(Ipv6Addr::LOCALHOST);
 const EXE: &str = env!("CARGO_BIN_EXE_rowser");
@@ -42,48 +42,6 @@ async fn start_with(dir: &TmpDir, config: DaemonConfig) -> PathBuf {
 async fn connect(path: PathBuf) -> Conn<UnixStream> {
     let s = UnixStream::connect(path).await.unwrap();
     Conn::connect(s, Hello::current()).await.unwrap()
-}
-
-async fn free_port() -> u16 {
-    TcpListener::bind(SocketAddr::new(V6, 0))
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-/// Sends a manual Forward on `conn` with a free port until the reply is not
-/// "busy", and returns the port and forward_id. `free_port` closes its
-/// listener before the Daemon binds the port, so another test or process can
-/// take the port in that window. A busy port gives no forward_id; then this
-/// tries again with a new port.
-/// It stops at 5 tries, the default `rate_max`: a 6th request on the
-/// connection gets a rate-limit error.
-async fn forward_on_free_port(conn: &mut Conn<UnixStream>) -> (u16, String) {
-    for _ in 0..5 {
-        let port = free_port().await;
-        conn.send(&Msg::Forward {
-            reported_host: "devbox".into(),
-            callback_ports: vec![port],
-        })
-        .await
-        .unwrap();
-        match conn.recv().await.unwrap() {
-            Some(Msg::OpenResult {
-                forward_id: Some(id),
-                warnings,
-                error: None,
-            }) if warnings.is_empty() => return (port, id),
-            Some(Msg::OpenResult {
-                forward_id: None,
-                warnings,
-                error: None,
-            }) if warnings.iter().any(|w| w.contains("busy")) => {}
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-    panic!("no free port after 5 tries");
 }
 
 /// Runs `rowser status` on a blocking thread; gives (exit, stdout, stderr).
@@ -118,17 +76,10 @@ async fn json_status(run: PathBuf) -> serde_json::Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn status_shows_the_daemon_version_and_an_open_callback_forward() {
+async fn status_shows_the_daemon_version() {
+    // A callback forward in status: tests/callback.rs, through a Link.
     let dir = TmpDir::new("ctl");
     let run = start(&dir).await;
-    let mut relay = connect(run.join(RELAY_SOCKET)).await;
-    relay
-        .send(&Msg::HostStamp {
-            alias: "g14".into(),
-        })
-        .await
-        .unwrap();
-    let (port, _) = forward_on_free_port(&mut relay).await;
 
     let (code, out, err) = status(run.clone(), false).await;
     assert_eq!(code, ExitCode::SUCCESS, "{err}");
@@ -144,12 +95,6 @@ async fn status_shows_the_daemon_version_and_an_open_callback_forward() {
         ]
     );
     assert_eq!(lines[5], "sessions:          none");
-    assert_eq!(lines[6], "callback forwards:");
-    assert!(
-        lines[7].starts_with(&format!("  {port}  g14  ")),
-        "{}",
-        lines[7]
-    );
 
     let v = json_status(run.clone()).await;
     assert_eq!(v["daemon_version"], env!("CARGO_PKG_VERSION"));
@@ -158,66 +103,6 @@ async fn status_shows_the_daemon_version_and_an_open_callback_forward() {
     assert_eq!(v["config_file"], serde_json::Value::Null);
     assert_eq!(v["config_file_exists"], false);
     assert_eq!(v["paused"], false);
-    assert_eq!(v["forwards"][0]["port"], port);
-    assert_eq!(v["forwards"][0]["host"], "g14");
-    assert_eq!(v["forwards"][0]["unverified"], false);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_forward_from_the_direct_socket_shows_its_reported_host_as_unverified() {
-    let dir = TmpDir::new("ctl");
-    let run = start(&dir).await;
-    let mut direct = connect(run.join(DIRECT_SOCKET)).await;
-    let (port, _) = forward_on_free_port(&mut direct).await;
-
-    let (_, out, _) = status(run.clone(), false).await;
-    let line = out.lines().nth(7).unwrap_or_default().to_string();
-    assert!(
-        line.starts_with(&format!("  {port}  devbox (unverified)  ")),
-        "{out}"
-    );
-
-    let v = json_status(run).await;
-    assert_eq!(v["forwards"][0]["host"], "devbox");
-    assert_eq!(v["forwards"][0]["unverified"], true);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_forward_leaves_status_when_it_ends() {
-    let dir = TmpDir::new("ctl");
-    // The default (long) timeout: the forward cannot end before the first
-    // status read. The keeper's disconnect ends it, at a time the test picks.
-    let run = start(&dir).await;
-    let mut relay = connect(run.join(RELAY_SOCKET)).await;
-    relay
-        .send(&Msg::HostStamp {
-            alias: "g14".into(),
-        })
-        .await
-        .unwrap();
-    let (_, forward_id) = forward_on_free_port(&mut relay).await;
-    assert_eq!(
-        json_status(run.clone()).await["forwards"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-
-    // A keeper attaches and disconnects, so the forward ends.
-    let mut keeper = connect(run.join(DIRECT_SOCKET)).await;
-    keeper
-        .send(&Msg::AttachForward { forward_id })
-        .await
-        .unwrap();
-    drop(keeper);
-    for _ in 0..50 {
-        if json_status(run.clone()).await["forwards"] == serde_json::json!([]) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("the forward is still in status");
 }
 
 #[tokio::test(flavor = "multi_thread")]

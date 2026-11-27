@@ -33,12 +33,16 @@ rowser is a CLI; test it from the terminal.
 - Confirmations: hidden daemon flags `--test-confirm approve|deny|hang` (scripted Notifier, no
   desktop) and `--confirm-timeout <secs>` (default 60).
 - Callback forwards on one machine: run the daemon with the hidden `--loopback ::1` so the
-  local side binds only `[::1]`, and run the fake remote listener on `127.0.0.1` (the keeper
-  dials `127.0.0.1` first). `--loopback` refuses non-loopback addresses. `rowser open` and
-  `rowser forward` start a detached `rowser __keeper`. It watches only the address it dials,
-  so the daemon on `[::1]` does not keep it alive. It ends when a port that listened once stops
-  (2 s checks); before that, only the 10-minute timeout ends it. Kill leftover keepers with
-  `pkill -f __keeper`.
+  local side binds only `[::1]`, and run the fake remote listener on `127.0.0.1` (the Outpost
+  dials `127.0.0.1` first). `--loopback` refuses non-loopback addresses. Forwards go only
+  through a Link (#79): use a `[[host]]` with a fake `ssh` that runs `rowser __outpost` locally
+  (see the Links item). The Outpost holds the forward; the Shim exits and leaves no process.
+  Every 2 s the Outpost checks only the address it dials (LISTEN entries, ADR 0005), so the
+  daemon's `[::1]` listener does not keep a forward alive. A forward ends when a port that
+  listened once stops; before that, only the timeout ends it. Kill the Outpost (the fake
+  `ssh` can write its pid) to test a Link drop. The hidden daemon flag
+  `--forward-timeout <secs>` replaces the 10-minute timeout; `rowser daemon install` refuses it.
+  A request on the Wrapper's sockets gets no forward, only the "need a Link" warning.
 - The Shim's no-tunnel fallback (graphical session) runs the first `xdg-open` on `PATH` that is
   not rowser: put a fake `xdg-open` script that records its argument first on `PATH`, set
   `DISPLAY`, and set the hidden `ROWSER_TEST_TUNNEL_DIR` to an empty temp dir (it replaces

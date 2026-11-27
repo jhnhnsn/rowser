@@ -40,17 +40,10 @@ fn all_messages() -> Vec<Msg> {
             reported_host: "devbox".into(),
             callback_ports: vec![8080],
         },
-        Msg::AttachForward {
-            forward_id: "f1".into(),
+        Msg::Watch {
+            ports: vec![8400, 8401],
         },
-        Msg::Dial {
-            conn_id: 7,
-            port: 8400,
-        },
-        Msg::DataConn {
-            forward_id: "f".into(),
-            conn_id: 7,
-        },
+        Msg::Dial { port: 8400 },
         Msg::Ping,
         Msg::Pong {
             version: current(),
@@ -189,12 +182,9 @@ async fn recv_after_over_long_line_keeps_failing() {
 }
 
 #[tokio::test]
-async fn into_raw_keeps_bytes_after_data_conn() {
+async fn into_raw_keeps_bytes_after_a_dial() {
     let (mut client, server) = pair().await;
-    let data_conn = Msg::DataConn {
-        forward_id: "f".into(),
-        conn_id: 3,
-    };
+    let data_conn = Msg::Dial { port: 8400 };
     client.send(&data_conn).await.unwrap();
     let (mut raw, _) = client.into_raw();
     raw.write_all(b"spliced bytes").await.unwrap();
